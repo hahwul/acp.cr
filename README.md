@@ -1,9 +1,6 @@
 # ACP — Agent Client Protocol for Crystal
 
-[![Crystal](https://img.shields.io/badge/Crystal-%3E%3D1.19.1-blue.svg)](https://crystal-lang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-An unofficial Crystal implementation of the [Agent Client Protocol (ACP)](https://github.com/anthropics/acp), which defines a JSON-RPC 2.0 based communication standard between code editors (clients) and AI coding agents.
+An unofficial Crystal implementation of the [Agent Client Protocol (ACP)](https://agentclientprotocol.com), which defines a JSON-RPC 2.0 based communication standard between code editors (clients) and AI coding agents.
 
 ## Features
 
