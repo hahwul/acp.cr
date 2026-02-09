@@ -531,6 +531,15 @@ describe ACP::Protocol do
     end
   end
 
+  describe ACP::Protocol::SessionLoadParams do
+    it "serializes with session ID and cwd" do
+      params = ACP::Protocol::SessionLoadParams.new("sess-123", "/tmp")
+      json = JSON.parse(params.to_json)
+      json["sessionId"].as_s.should eq("sess-123")
+      json["cwd"].as_s.should eq("/tmp")
+    end
+  end
+
   describe ACP::Protocol::SessionPromptParams do
     it "serializes session ID and prompt blocks" do
       blocks = [ACP::Protocol::TextContentBlock.new("hello").as(ACP::Protocol::ContentBlock)]
@@ -562,6 +571,50 @@ describe ACP::Protocol do
       params = ACP::Protocol::SessionCancelParams.new("sess-001")
       json = JSON.parse(params.to_json)
       json["sessionId"].as_s.should eq("sess-001")
+    end
+  end
+
+  describe ACP::Protocol::SessionSetModeParams do
+    it "serializes session ID and mode ID" do
+      params = ACP::Protocol::SessionSetModeParams.new("sess-001", "code")
+      json = JSON.parse(params.to_json)
+      json["sessionId"].as_s.should eq("sess-001")
+      json["modeId"].as_s.should eq("code")
+    end
+  end
+
+  describe ACP::Protocol::SessionSetModeResult do
+    it "deserializes from empty JSON" do
+      result = ACP::Protocol::SessionSetModeResult.from_json("{}")
+      result.should be_a(ACP::Protocol::SessionSetModeResult)
+    end
+  end
+
+  describe ACP::Protocol::AuthenticateResult do
+    it "deserializes from empty JSON" do
+      result = ACP::Protocol::AuthenticateResult.from_json("{}")
+      result.should be_a(ACP::Protocol::AuthenticateResult)
+    end
+  end
+
+  describe ACP::Protocol::ConfigOption do
+    it "round-trips through JSON" do
+      opt = ACP::Protocol::ConfigOption.new(
+        id: "theme",
+        label: "Theme",
+        config_type: "enum",
+        value: JSON::Any.new("dark"),
+        options: [JSON::Any.new("light"), JSON::Any.new("dark")],
+        description: "UI Theme"
+      )
+      json_str = opt.to_json
+      restored = ACP::Protocol::ConfigOption.from_json(json_str)
+      restored.id.should eq("theme")
+      restored.label.should eq("Theme")
+      restored.config_type.should eq("enum")
+      restored.value.not_nil!.as_s.should eq("dark")
+      restored.options.not_nil!.size.should eq(2)
+      restored.description.should eq("UI Theme")
     end
   end
 
@@ -1214,6 +1267,72 @@ describe ACP::Client do
 
       transport.close
     end
+
+    it "loads a session after initialization" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-loaded"))
+      end
+
+      result = client.session_load("sess-loaded")
+      result.session_id.should eq("sess-loaded")
+      client.session_id.should eq("sess-loaded")
+      client.state.should eq(ACP::ClientState::SessionActive)
+
+      transport.close
+    end
+  end
+
+  describe "#session_set_mode" do
+    it "sends session/set_mode request" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+      client.session_new("/tmp")
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(%({
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {}
+        }))
+      end
+
+      client.session_set_mode("chat")
+
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/set_mode")
+      sent["params"]["modeId"].as_s.should eq("chat")
+
+      transport.close
+    end
   end
 
   describe "#session_prompt_text" do
@@ -1607,6 +1726,24 @@ describe ACP::Session do
     end
   end
 
+  describe ".load" do
+    it "loads an existing session" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-existing"))
+      end
+
+      session = ACP::Session.load(client, session_id: "sess-existing")
+      session.id.should eq("sess-existing")
+      session.closed?.should eq(false)
+
+      transport.close
+    end
+  end
+
   describe "#prompt(text)" do
     it "sends a text prompt and returns result" do
       transport, client = setup_client_with_session
@@ -1779,6 +1916,38 @@ describe ACP::Session do
       session = ACP::Session.create(client, cwd: "/tmp")
       session.close
       session.to_s.should contain("closed")
+
+      transport.close
+    end
+  end
+
+  describe "#set_mode" do
+    it "sends session/set_mode request" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(%({
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {}
+        }))
+      end
+
+      session.set_mode("chat")
+
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/set_mode")
+      sent["params"]["modeId"].as_s.should eq("chat")
 
       transport.close
     end
