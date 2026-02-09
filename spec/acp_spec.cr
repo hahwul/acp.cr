@@ -2493,3 +2493,760 @@ describe "Full ACP flow simulation" do
     client.close
   end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Protocol Enum Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::StopReason do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::StopReason::EndTurn.to_s.should eq("end_turn")
+    ACP::Protocol::StopReason::MaxTokens.to_s.should eq("max_tokens")
+    ACP::Protocol::StopReason::MaxTurnRequests.to_s.should eq("max_turn_requests")
+    ACP::Protocol::StopReason::Refusal.to_s.should eq("refusal")
+    ACP::Protocol::StopReason::Cancelled.to_s.should eq("cancelled")
+  end
+
+  it "parses from wire-format strings" do
+    ACP::Protocol::StopReason.parse("end_turn").should eq(ACP::Protocol::StopReason::EndTurn)
+    ACP::Protocol::StopReason.parse("max_tokens").should eq(ACP::Protocol::StopReason::MaxTokens)
+    ACP::Protocol::StopReason.parse("max_turn_requests").should eq(ACP::Protocol::StopReason::MaxTurnRequests)
+    ACP::Protocol::StopReason.parse("refusal").should eq(ACP::Protocol::StopReason::Refusal)
+    ACP::Protocol::StopReason.parse("cancelled").should eq(ACP::Protocol::StopReason::Cancelled)
+  end
+
+  it "returns nil for unknown values via parse?" do
+    ACP::Protocol::StopReason.parse?("unknown").should be_nil
+  end
+
+  it "raises on unknown values via parse" do
+    expect_raises(ArgumentError) do
+      ACP::Protocol::StopReason.parse("unknown")
+    end
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::StopReason::EndTurn.to_json
+    json.should eq(%("end_turn"))
+    ACP::Protocol::StopReason.from_json(json).should eq(ACP::Protocol::StopReason::EndTurn)
+  end
+end
+
+describe ACP::Protocol::ToolKind do
+  it "serializes all variants to wire-format strings" do
+    ACP::Protocol::ToolKind::Read.to_s.should eq("read")
+    ACP::Protocol::ToolKind::Edit.to_s.should eq("edit")
+    ACP::Protocol::ToolKind::Delete.to_s.should eq("delete")
+    ACP::Protocol::ToolKind::Move.to_s.should eq("move")
+    ACP::Protocol::ToolKind::Search.to_s.should eq("search")
+    ACP::Protocol::ToolKind::Execute.to_s.should eq("execute")
+    ACP::Protocol::ToolKind::Think.to_s.should eq("think")
+    ACP::Protocol::ToolKind::Fetch.to_s.should eq("fetch")
+    ACP::Protocol::ToolKind::SwitchMode.to_s.should eq("switch_mode")
+    ACP::Protocol::ToolKind::Other.to_s.should eq("other")
+  end
+
+  it "parses all variants from wire-format strings" do
+    ACP::Protocol::ToolKind.parse("read").should eq(ACP::Protocol::ToolKind::Read)
+    ACP::Protocol::ToolKind.parse("edit").should eq(ACP::Protocol::ToolKind::Edit)
+    ACP::Protocol::ToolKind.parse("switch_mode").should eq(ACP::Protocol::ToolKind::SwitchMode)
+    ACP::Protocol::ToolKind.parse("other").should eq(ACP::Protocol::ToolKind::Other)
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::ToolKind::Execute.to_json
+    json.should eq(%("execute"))
+    ACP::Protocol::ToolKind.from_json(json).should eq(ACP::Protocol::ToolKind::Execute)
+  end
+end
+
+describe ACP::Protocol::ToolCallStatus do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::ToolCallStatus::Pending.to_s.should eq("pending")
+    ACP::Protocol::ToolCallStatus::InProgress.to_s.should eq("in_progress")
+    ACP::Protocol::ToolCallStatus::Completed.to_s.should eq("completed")
+    ACP::Protocol::ToolCallStatus::Failed.to_s.should eq("failed")
+  end
+
+  it "parses from wire-format strings" do
+    ACP::Protocol::ToolCallStatus.parse("pending").should eq(ACP::Protocol::ToolCallStatus::Pending)
+    ACP::Protocol::ToolCallStatus.parse("in_progress").should eq(ACP::Protocol::ToolCallStatus::InProgress)
+    ACP::Protocol::ToolCallStatus.parse("completed").should eq(ACP::Protocol::ToolCallStatus::Completed)
+    ACP::Protocol::ToolCallStatus.parse("failed").should eq(ACP::Protocol::ToolCallStatus::Failed)
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::ToolCallStatus::InProgress.to_json
+    json.should eq(%("in_progress"))
+    ACP::Protocol::ToolCallStatus.from_json(json).should eq(ACP::Protocol::ToolCallStatus::InProgress)
+  end
+end
+
+describe ACP::Protocol::PermissionOptionKind do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::PermissionOptionKind::AllowOnce.to_s.should eq("allow_once")
+    ACP::Protocol::PermissionOptionKind::AllowAlways.to_s.should eq("allow_always")
+    ACP::Protocol::PermissionOptionKind::RejectOnce.to_s.should eq("reject_once")
+    ACP::Protocol::PermissionOptionKind::RejectAlways.to_s.should eq("reject_always")
+  end
+
+  it "parses from wire-format strings" do
+    ACP::Protocol::PermissionOptionKind.parse("allow_once").should eq(ACP::Protocol::PermissionOptionKind::AllowOnce)
+    ACP::Protocol::PermissionOptionKind.parse("reject_always").should eq(ACP::Protocol::PermissionOptionKind::RejectAlways)
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::PermissionOptionKind::AllowAlways.to_json
+    json.should eq(%("allow_always"))
+    ACP::Protocol::PermissionOptionKind.from_json(json).should eq(ACP::Protocol::PermissionOptionKind::AllowAlways)
+  end
+end
+
+describe ACP::Protocol::PlanEntryPriority do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::PlanEntryPriority::High.to_s.should eq("high")
+    ACP::Protocol::PlanEntryPriority::Medium.to_s.should eq("medium")
+    ACP::Protocol::PlanEntryPriority::Low.to_s.should eq("low")
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::PlanEntryPriority::High.to_json
+    ACP::Protocol::PlanEntryPriority.from_json(json).should eq(ACP::Protocol::PlanEntryPriority::High)
+  end
+end
+
+describe ACP::Protocol::PlanEntryStatus do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::PlanEntryStatus::Pending.to_s.should eq("pending")
+    ACP::Protocol::PlanEntryStatus::InProgress.to_s.should eq("in_progress")
+    ACP::Protocol::PlanEntryStatus::Completed.to_s.should eq("completed")
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::PlanEntryStatus::Completed.to_json
+    ACP::Protocol::PlanEntryStatus.from_json(json).should eq(ACP::Protocol::PlanEntryStatus::Completed)
+  end
+end
+
+describe ACP::Protocol::SessionConfigOptionCategory do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::SessionConfigOptionCategory::Mode.to_s.should eq("mode")
+    ACP::Protocol::SessionConfigOptionCategory::Model.to_s.should eq("model")
+    ACP::Protocol::SessionConfigOptionCategory::ThoughtLevel.to_s.should eq("thought_level")
+    ACP::Protocol::SessionConfigOptionCategory::Other.to_s.should eq("other")
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::SessionConfigOptionCategory::Model.to_json
+    ACP::Protocol::SessionConfigOptionCategory.from_json(json).should eq(ACP::Protocol::SessionConfigOptionCategory::Model)
+  end
+end
+
+describe ACP::Protocol::Role do
+  it "serializes to wire-format strings" do
+    ACP::Protocol::Role::Assistant.to_s.should eq("assistant")
+    ACP::Protocol::Role::User.to_s.should eq("user")
+  end
+
+  it "round-trips through JSON" do
+    json = ACP::Protocol::Role::Assistant.to_json
+    json.should eq(%("assistant"))
+    ACP::Protocol::Role.from_json(json).should eq(ACP::Protocol::Role::Assistant)
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Tool Call Content Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::ToolCallContent do
+  describe "ToolCallContentBlock" do
+    it "deserializes from JSON with type=content" do
+      json = %({
+        "type": "content",
+        "content": {
+          "type": "text",
+          "text": "Analysis complete. Found 3 issues."
+        }
+      })
+      block = ACP::Protocol::ToolCallContent.from_json(json)
+      block.should be_a(ACP::Protocol::ToolCallContentBlock)
+      block.type.should eq("content")
+
+      content_block = block.as(ACP::Protocol::ToolCallContentBlock)
+      content_block.text.should eq("Analysis complete. Found 3 issues.")
+    end
+
+    it "serializes back to JSON" do
+      inner = ACP::Protocol::TextContentBlock.new("Hello")
+      block = ACP::Protocol::ToolCallContentBlock.new(content: inner)
+      parsed = JSON.parse(block.to_json)
+      parsed["type"].as_s.should eq("content")
+      parsed["content"]["type"].as_s.should eq("text")
+      parsed["content"]["text"].as_s.should eq("Hello")
+    end
+  end
+
+  describe "ToolCallDiff" do
+    it "deserializes from JSON with type=diff" do
+      json = %({
+        "type": "diff",
+        "path": "/home/user/project/src/config.json",
+        "oldText": "{\\"debug\\": false}",
+        "newText": "{\\"debug\\": true}"
+      })
+      block = ACP::Protocol::ToolCallContent.from_json(json)
+      block.should be_a(ACP::Protocol::ToolCallDiff)
+
+      diff = block.as(ACP::Protocol::ToolCallDiff)
+      diff.path.should eq("/home/user/project/src/config.json")
+      diff.old_text.should eq("{\"debug\": false}")
+      diff.new_text.should eq("{\"debug\": true}")
+      diff.new_file?.should be_false
+      diff.deletion?.should be_false
+    end
+
+    it "detects new file diffs" do
+      diff = ACP::Protocol::ToolCallDiff.new(
+        path: "/new/file.txt",
+        new_text: "content",
+        old_text: nil
+      )
+      diff.new_file?.should be_true
+    end
+
+    it "detects deletion diffs" do
+      diff = ACP::Protocol::ToolCallDiff.new(
+        path: "/old/file.txt",
+        new_text: "",
+        old_text: "was here"
+      )
+      diff.deletion?.should be_true
+    end
+
+    it "serializes with camelCase field names" do
+      diff = ACP::Protocol::ToolCallDiff.new(
+        path: "/a/b.txt",
+        new_text: "new",
+        old_text: "old"
+      )
+      parsed = JSON.parse(diff.to_json)
+      parsed["type"].as_s.should eq("diff")
+      parsed["path"].as_s.should eq("/a/b.txt")
+      parsed["oldText"].as_s.should eq("old")
+      parsed["newText"].as_s.should eq("new")
+    end
+  end
+
+  describe "ToolCallTerminal" do
+    it "deserializes from JSON with type=terminal" do
+      json = %({"type": "terminal", "terminalId": "term_xyz789"})
+      block = ACP::Protocol::ToolCallContent.from_json(json)
+      block.should be_a(ACP::Protocol::ToolCallTerminal)
+
+      terminal = block.as(ACP::Protocol::ToolCallTerminal)
+      terminal.terminal_id.should eq("term_xyz789")
+    end
+
+    it "serializes with camelCase field names" do
+      term = ACP::Protocol::ToolCallTerminal.new("term_abc")
+      parsed = JSON.parse(term.to_json)
+      parsed["type"].as_s.should eq("terminal")
+      parsed["terminalId"].as_s.should eq("term_abc")
+    end
+  end
+end
+
+describe ACP::Protocol::ToolCallLocation do
+  it "deserializes from JSON" do
+    json = %({"path": "/home/user/project/src/main.py", "line": 42})
+    loc = ACP::Protocol::ToolCallLocation.from_json(json)
+    loc.path.should eq("/home/user/project/src/main.py")
+    loc.line.should eq(42)
+  end
+
+  it "handles missing optional line" do
+    json = %({"path": "/home/user/file.cr"})
+    loc = ACP::Protocol::ToolCallLocation.from_json(json)
+    loc.path.should eq("/home/user/file.cr")
+    loc.line.should be_nil
+  end
+
+  it "renders to_s with path and line" do
+    loc = ACP::Protocol::ToolCallLocation.new(path: "/a/b.cr", line: 10)
+    loc.to_s.should eq("/a/b.cr:10")
+  end
+
+  it "renders to_s with path only" do
+    loc = ACP::Protocol::ToolCallLocation.new(path: "/a/b.cr")
+    loc.to_s.should eq("/a/b.cr")
+  end
+end
+
+describe ACP::Protocol::TerminalExitStatus do
+  it "deserializes exit code" do
+    json = %({"exitCode": 0, "signal": null})
+    status = ACP::Protocol::TerminalExitStatus.from_json(json)
+    status.exit_code.should eq(0)
+    status.signal.should be_nil
+    status.success?.should be_true
+    status.signaled?.should be_false
+  end
+
+  it "deserializes signal termination" do
+    json = %({"exitCode": null, "signal": "SIGKILL"})
+    status = ACP::Protocol::TerminalExitStatus.from_json(json)
+    status.exit_code.should be_nil
+    status.signal.should eq("SIGKILL")
+    status.success?.should be_false
+    status.signaled?.should be_true
+  end
+
+  it "handles non-zero exit codes" do
+    json = %({"exitCode": 1})
+    status = ACP::Protocol::TerminalExitStatus.from_json(json)
+    status.exit_code.should eq(1)
+    status.success?.should be_false
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Client Method Type Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::ReadTextFileParams do
+  it "serializes with correct camelCase keys" do
+    params = ACP::Protocol::ReadTextFileParams.new(
+      session_id: "sess-001",
+      path: "/home/user/file.py",
+      line: 10,
+      limit: 50
+    )
+    parsed = JSON.parse(params.to_json)
+    parsed["sessionId"].as_s.should eq("sess-001")
+    parsed["path"].as_s.should eq("/home/user/file.py")
+    parsed["line"].as_i.should eq(10)
+    parsed["limit"].as_i.should eq(50)
+  end
+
+  it "deserializes from JSON" do
+    json = %({"sessionId": "s1", "path": "/a/b.txt"})
+    params = ACP::Protocol::ReadTextFileParams.from_json(json)
+    params.session_id.should eq("s1")
+    params.path.should eq("/a/b.txt")
+    params.line.should be_nil
+    params.limit.should be_nil
+  end
+end
+
+describe ACP::Protocol::ReadTextFileResult do
+  it "serializes and deserializes" do
+    result = ACP::Protocol::ReadTextFileResult.new(content: "hello world\n")
+    parsed = JSON.parse(result.to_json)
+    parsed["content"].as_s.should eq("hello world\n")
+
+    rt = ACP::Protocol::ReadTextFileResult.from_json(result.to_json)
+    rt.content.should eq("hello world\n")
+  end
+end
+
+describe ACP::Protocol::WriteTextFileParams do
+  it "serializes with correct camelCase keys" do
+    params = ACP::Protocol::WriteTextFileParams.new(
+      session_id: "sess-002",
+      path: "/home/user/config.json",
+      content: "{\"debug\": true}"
+    )
+    parsed = JSON.parse(params.to_json)
+    parsed["sessionId"].as_s.should eq("sess-002")
+    parsed["path"].as_s.should eq("/home/user/config.json")
+    parsed["content"].as_s.should eq("{\"debug\": true}")
+  end
+end
+
+describe ACP::Protocol::CreateTerminalParams do
+  it "serializes all fields with correct keys" do
+    params = ACP::Protocol::CreateTerminalParams.new(
+      session_id: "sess-003",
+      command: "npm",
+      args: ["test", "--coverage"],
+      cwd: "/home/user/project",
+      output_byte_limit: 1048576_i64
+    )
+    parsed = JSON.parse(params.to_json)
+    parsed["sessionId"].as_s.should eq("sess-003")
+    parsed["command"].as_s.should eq("npm")
+    parsed["args"].as_a.map(&.as_s).should eq(["test", "--coverage"])
+    parsed["cwd"].as_s.should eq("/home/user/project")
+    parsed["outputByteLimit"].as_i64.should eq(1048576)
+  end
+
+  it "deserializes from JSON" do
+    json = %({"sessionId": "s1", "command": "ls", "args": ["-la"]})
+    params = ACP::Protocol::CreateTerminalParams.from_json(json)
+    params.session_id.should eq("s1")
+    params.command.should eq("ls")
+    params.args.should eq(["la".gsub("la", "-la")] || ["-la"])
+    params.cwd.should be_nil
+    params.output_byte_limit.should be_nil
+  end
+end
+
+describe ACP::Protocol::CreateTerminalResult do
+  it "serializes and deserializes" do
+    result = ACP::Protocol::CreateTerminalResult.new(terminal_id: "term_xyz789")
+    parsed = JSON.parse(result.to_json)
+    parsed["terminalId"].as_s.should eq("term_xyz789")
+
+    rt = ACP::Protocol::CreateTerminalResult.from_json(result.to_json)
+    rt.terminal_id.should eq("term_xyz789")
+  end
+end
+
+describe ACP::Protocol::TerminalOutputResult do
+  it "serializes output without exit status" do
+    result = ACP::Protocol::TerminalOutputResult.new(
+      output: "Running tests...\n",
+      truncated: false
+    )
+    parsed = JSON.parse(result.to_json)
+    parsed["output"].as_s.should eq("Running tests...\n")
+    parsed["truncated"].as_bool.should be_false
+    result.exited?.should be_false
+  end
+
+  it "serializes output with exit status" do
+    exit_status = ACP::Protocol::TerminalExitStatus.new(exit_code: 0)
+    result = ACP::Protocol::TerminalOutputResult.new(
+      output: "All tests passed\n",
+      truncated: false,
+      exit_status: exit_status
+    )
+    parsed = JSON.parse(result.to_json)
+    parsed["exitStatus"]["exitCode"].as_i.should eq(0)
+    result.exited?.should be_true
+  end
+
+  it "deserializes with truncation flag" do
+    json = %({"output": "truncated...", "truncated": true})
+    result = ACP::Protocol::TerminalOutputResult.from_json(json)
+    result.output.should eq("truncated...")
+    result.truncated.should be_true
+  end
+end
+
+describe ACP::Protocol::WaitForTerminalExitResult do
+  it "serializes and deserializes exit code" do
+    result = ACP::Protocol::WaitForTerminalExitResult.new(exit_code: 0)
+    result.success?.should be_true
+    result.signaled?.should be_false
+
+    parsed = JSON.parse(result.to_json)
+    parsed["exitCode"].as_i.should eq(0)
+  end
+
+  it "serializes and deserializes signal termination" do
+    result = ACP::Protocol::WaitForTerminalExitResult.new(signal: "SIGTERM")
+    result.success?.should be_false
+    result.signaled?.should be_true
+  end
+end
+
+describe ACP::Protocol::ClientMethod do
+  it "recognizes known client methods" do
+    ACP::Protocol::ClientMethod.known?("fs/read_text_file").should be_true
+    ACP::Protocol::ClientMethod.known?("fs/write_text_file").should be_true
+    ACP::Protocol::ClientMethod.known?("terminal/create").should be_true
+    ACP::Protocol::ClientMethod.known?("terminal/output").should be_true
+    ACP::Protocol::ClientMethod.known?("terminal/release").should be_true
+    ACP::Protocol::ClientMethod.known?("terminal/wait_for_exit").should be_true
+    ACP::Protocol::ClientMethod.known?("terminal/kill").should be_true
+    ACP::Protocol::ClientMethod.known?("session/request_permission").should be_true
+  end
+
+  it "returns false for unknown methods" do
+    ACP::Protocol::ClientMethod.known?("unknown/method").should be_false
+    ACP::Protocol::ClientMethod.known?("session/prompt").should be_false
+  end
+
+  it "classifies fs methods" do
+    ACP::Protocol::ClientMethod.fs_method?("fs/read_text_file").should be_true
+    ACP::Protocol::ClientMethod.fs_method?("fs/write_text_file").should be_true
+    ACP::Protocol::ClientMethod.fs_method?("terminal/create").should be_false
+  end
+
+  it "classifies terminal methods" do
+    ACP::Protocol::ClientMethod.terminal_method?("terminal/create").should be_true
+    ACP::Protocol::ClientMethod.terminal_method?("terminal/output").should be_true
+    ACP::Protocol::ClientMethod.terminal_method?("terminal/release").should be_true
+    ACP::Protocol::ClientMethod.terminal_method?("terminal/wait_for_exit").should be_true
+    ACP::Protocol::ClientMethod.terminal_method?("terminal/kill").should be_true
+    ACP::Protocol::ClientMethod.terminal_method?("fs/read_text_file").should be_false
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# ACP Error Code Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::ErrorCode do
+  it "defines standard JSON-RPC 2.0 error codes" do
+    ACP::Protocol::ErrorCode::PARSE_ERROR.should eq(-32700)
+    ACP::Protocol::ErrorCode::INVALID_REQUEST.should eq(-32600)
+    ACP::Protocol::ErrorCode::METHOD_NOT_FOUND.should eq(-32601)
+    ACP::Protocol::ErrorCode::INVALID_PARAMS.should eq(-32602)
+    ACP::Protocol::ErrorCode::INTERNAL_ERROR.should eq(-32603)
+  end
+
+  it "defines ACP-specific error codes" do
+    ACP::Protocol::ErrorCode::AUTH_REQUIRED.should eq(-32000)
+    ACP::Protocol::ErrorCode::RESOURCE_NOT_FOUND.should eq(-32002)
+  end
+end
+
+describe ACP::JsonRpcError do
+  it "detects auth_required errors" do
+    error = ACP::JsonRpcError.new(-32000, "Authentication required")
+    error.auth_required?.should be_true
+    error.resource_not_found?.should be_false
+  end
+
+  it "detects resource_not_found errors" do
+    error = ACP::JsonRpcError.new(-32002, "File not found")
+    error.resource_not_found?.should be_true
+    error.auth_required?.should be_false
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# SessionUpdate config_options_update alias Spec
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "SessionUpdate config_options_update alias" do
+  it "parses config_option_update (schema name)" do
+    json = %({
+      "sessionId": "sess-001",
+      "update": {
+        "sessionUpdate": "config_option_update",
+        "configOptions": []
+      }
+    })
+    params = ACP::Protocol::SessionUpdateParams.from_json(json)
+    params.update.should be_a(ACP::Protocol::ConfigOptionUpdate)
+  end
+
+  it "parses config_options_update (doc alias)" do
+    json = %({
+      "sessionId": "sess-001",
+      "update": {
+        "sessionUpdate": "config_options_update",
+        "configOptions": []
+      }
+    })
+    params = ACP::Protocol::SessionUpdateParams.from_json(json)
+    params.update.should be_a(ACP::Protocol::ConfigOptionUpdate)
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Typed Client Method Handler Dispatch Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Client typed handler dispatch" do
+  it "dispatches fs/read_text_file to typed handler" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    handler_called = false
+    received_path = ""
+
+    client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) do
+      handler_called = true
+      received_path = params.path
+      ACP::Protocol::ReadTextFileResult.new(content: "file content here")
+    end
+
+    # Initialize
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(build_init_response(msg["id"].as_i64))
+      end
+    end
+    client.initialize_connection
+
+    # Simulate agent sending fs/read_text_file request
+    transport.inject_raw(%({
+      "jsonrpc": "2.0",
+      "id": "agent-req-1",
+      "method": "fs/read_text_file",
+      "params": {
+        "sessionId": "sess-001",
+        "path": "/home/user/main.py"
+      }
+    }))
+
+    sleep 50.milliseconds
+
+    handler_called.should be_true
+    received_path.should eq("/home/user/main.py")
+
+    # Verify the response was sent back
+    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-1" }
+    response.should_not be_nil
+    response.not_nil!["result"]["content"].as_s.should eq("file content here")
+
+    client.close
+  end
+
+  it "dispatches fs/write_text_file to typed handler" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    written_path = ""
+    written_content = ""
+
+    client.on_write_text_file = ->(params : ACP::Protocol::WriteTextFileParams) do
+      written_path = params.path
+      written_content = params.content
+      ACP::Protocol::WriteTextFileResult.new
+    end
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(build_init_response(msg["id"].as_i64))
+      end
+    end
+    client.initialize_connection
+
+    transport.inject_raw(%({
+      "jsonrpc": "2.0",
+      "id": "agent-req-2",
+      "method": "fs/write_text_file",
+      "params": {
+        "sessionId": "sess-001",
+        "path": "/home/user/output.txt",
+        "content": "hello world"
+      }
+    }))
+
+    sleep 50.milliseconds
+
+    written_path.should eq("/home/user/output.txt")
+    written_content.should eq("hello world")
+
+    client.close
+  end
+
+  it "dispatches terminal/create to typed handler" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    received_command = ""
+
+    client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+      received_command = params.command
+      ACP::Protocol::CreateTerminalResult.new(terminal_id: "term_001")
+    end
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(build_init_response(msg["id"].as_i64))
+      end
+    end
+    client.initialize_connection
+
+    transport.inject_raw(%({
+      "jsonrpc": "2.0",
+      "id": "agent-req-3",
+      "method": "terminal/create",
+      "params": {
+        "sessionId": "sess-001",
+        "command": "npm",
+        "args": ["test"]
+      }
+    }))
+
+    sleep 50.milliseconds
+
+    received_command.should eq("npm")
+
+    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-3" }
+    response.should_not be_nil
+    response.not_nil!["result"]["terminalId"].as_s.should eq("term_001")
+
+    client.close
+  end
+
+  it "falls back to on_agent_request when typed handler not set" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    fallback_called = false
+    fallback_method = ""
+
+    client.on_agent_request = ->(method : String, params : JSON::Any) do
+      fallback_called = true
+      fallback_method = method
+      JSON.parse(%({"content": "fallback response"}))
+    end
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(build_init_response(msg["id"].as_i64))
+      end
+    end
+    client.initialize_connection
+
+    transport.inject_raw(%({
+      "jsonrpc": "2.0",
+      "id": "agent-req-4",
+      "method": "fs/read_text_file",
+      "params": {
+        "sessionId": "sess-001",
+        "path": "/some/file.txt"
+      }
+    }))
+
+    sleep 50.milliseconds
+
+    fallback_called.should be_true
+    fallback_method.should eq("fs/read_text_file")
+
+    client.close
+  end
+
+  it "returns method-not-found error when no handler is set" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(build_init_response(msg["id"].as_i64))
+      end
+    end
+    client.initialize_connection
+
+    transport.inject_raw(%({
+      "jsonrpc": "2.0",
+      "id": "agent-req-5",
+      "method": "terminal/create",
+      "params": {
+        "sessionId": "sess-001",
+        "command": "ls"
+      }
+    }))
+
+    sleep 50.milliseconds
+
+    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-5" }
+    response.should_not be_nil
+    response.not_nil!["error"]["code"].as_i.should eq(-32601)
+
+    client.close
+  end
+end

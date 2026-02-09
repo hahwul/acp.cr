@@ -5,11 +5,14 @@ An unofficial Crystal implementation of the [Agent Client Protocol (ACP)](https:
 ## Features
 
 - **Full ACP Protocol Support** — Initialize, authenticate, create sessions, send prompts, handle streaming updates, and manage permissions.
-- **JSON-RPC 2.0 Compliant** — Proper request/response correlation, notification handling, and error codes.
+- **JSON-RPC 2.0 Compliant** — Proper request/response correlation, notification handling, and error codes (including ACP-specific codes like `AUTH_REQUIRED` and `RESOURCE_NOT_FOUND`).
 - **Stdio Transport** — Newline-delimited JSON over stdin/stdout pipes to a spawned agent process.
 - **Async Architecture** — Background dispatcher fiber routes incoming messages via Crystal channels.
 - **Streaming Updates** — Real-time handling of agent message chunks, tool calls, thoughts, plans, slash commands, mode changes, and config option updates.
 - **Permission Handling** — Built-in support for `session/request_permission` agent-initiated requests.
+- **Typed Client Method Handlers** — Register strongly-typed handlers for `fs/read_text_file`, `fs/write_text_file`, and all `terminal/*` methods with automatic JSON deserialization.
+- **Protocol Enums** — Strongly-typed enums for `StopReason`, `ToolKind`, `ToolCallStatus`, `PermissionOptionKind`, `PlanEntryPriority`, `PlanEntryStatus`, `SessionConfigOptionCategory`, and `Role`.
+- **Tool Call Content Types** — Typed structs for tool call content variants: standard content blocks, file diffs (`ToolCallDiff`), and embedded terminals (`ToolCallTerminal`), plus `ToolCallLocation` for file tracking.
 - **Type-Safe** — All protocol types use `JSON::Serializable` with discriminated unions for polymorphic content.
 - **Zero External Dependencies** — Uses only the Crystal standard library.
 - **Ergonomic API** — High-level `Session` wrapper and `PromptBuilder` DSL on top of the low-level `Client`.
@@ -111,6 +114,13 @@ crystal run examples/content_blocks.cr -- my-agent --stdio
 | Module | Description |
 |--------|-------------|
 | `ACP::Protocol` | All JSON-RPC 2.0 and ACP schema types (params, results, content blocks, updates) |
+| `ACP::Protocol::StopReason` | Enum for prompt turn stop reasons (`EndTurn`, `MaxTokens`, `Cancelled`, etc.) |
+| `ACP::Protocol::ToolKind` | Enum for tool call categories (`Read`, `Edit`, `Execute`, `SwitchMode`, etc.) |
+| `ACP::Protocol::ToolCallStatus` | Enum for tool call lifecycle (`Pending`, `InProgress`, `Completed`, `Failed`) |
+| `ACP::Protocol::ToolCallContent` | Typed content variants for tool calls (content blocks, diffs, terminals) |
+| `ACP::Protocol::ToolCallLocation` | File location tracking for tool call "follow-along" features |
+| `ACP::Protocol::ClientMethod` | Constants and helpers for client-side method names (`fs/*`, `terminal/*`) |
+| `ACP::Protocol::ErrorCode` | All standard JSON-RPC and ACP-specific error code constants |
 | `ACP::Transport` | Abstract transport base class |
 | `ACP::StdioTransport` | Newline-delimited JSON over any `IO` pair |
 | `ACP::ProcessTransport` | Spawns a child process and wraps its stdin/stdout as a `StdioTransport` |
@@ -219,7 +229,32 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
   nil
 end
 
+# ── Typed Client Method Handlers (fs/*, terminal/*) ──
+# Register these when advertising the corresponding capabilities.
+
+# Handle fs/read_text_file requests from the agent.
+client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) do
+  content = File.read(params.path)
+  ACP::Protocol::ReadTextFileResult.new(content: content)
+end
+
+# Handle fs/write_text_file requests from the agent.
+client.on_write_text_file = ->(params : ACP::Protocol::WriteTextFileParams) do
+  File.write(params.path, params.content)
+  ACP::Protocol::WriteTextFileResult.new
+end
+
+# Handle terminal/create requests from the agent.
+client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+  # ... spawn process, track terminal ...
+  ACP::Protocol::CreateTerminalResult.new(terminal_id: "term_001")
+end
+
+# Other terminal handlers: on_terminal_output, on_release_terminal,
+# on_wait_for_terminal_exit, on_kill_terminal
+
 # Handle agent-initiated requests (e.g., permission prompts).
+# This is the generic fallback for methods without typed handlers.
 client.on_agent_request = ->(method : String, params : JSON::Any) do
   if method == "session/request_permission"
     # Return the user's choice using the ACP-spec outcome format
@@ -322,6 +357,48 @@ These follow the [ACP Content specification](https://agentclientprotocol.com/pro
 
 All content blocks inherit from `ACP::Protocol::ContentBlock` and are deserialized automatically via the `"type"` discriminator. `FileContentBlock` is a backward-compatible alias for `ResourceLinkContentBlock`.
 
+### Tool Call Content Types
+
+Tool calls can produce three types of content, defined as typed structs inheriting from `ACP::Protocol::ToolCallContent`:
+
+| Type | Class | Key Fields |
+|------|-------|------------|
+| `"content"` | `ToolCallContentBlock` | `content : ContentBlock` — Standard content block wrapper |
+| `"diff"` | `ToolCallDiff` | `path : String`, `old_text : String?`, `new_text : String` — File modification diff |
+| `"terminal"` | `ToolCallTerminal` | `terminal_id : String` — Embedded live terminal output |
+
+Additionally, `ToolCallLocation` tracks file locations with `path : String` and `line : Int32?` for "follow-along" features.
+
+### Protocol Enums
+
+Strongly-typed enums for protocol constants (all serialize to/from their wire-format strings):
+
+| Enum | Values | Description |
+|------|--------|-------------|
+| `StopReason` | `EndTurn`, `MaxTokens`, `MaxTurnRequests`, `Refusal`, `Cancelled` | Why a prompt turn stopped |
+| `ToolKind` | `Read`, `Edit`, `Delete`, `Move`, `Search`, `Execute`, `Think`, `Fetch`, `SwitchMode`, `Other` | Tool call categories |
+| `ToolCallStatus` | `Pending`, `InProgress`, `Completed`, `Failed` | Tool call lifecycle |
+| `PermissionOptionKind` | `AllowOnce`, `AllowAlways`, `RejectOnce`, `RejectAlways` | Permission option types |
+| `PlanEntryPriority` | `High`, `Medium`, `Low` | Plan entry importance |
+| `PlanEntryStatus` | `Pending`, `InProgress`, `Completed` | Plan entry lifecycle |
+| `SessionConfigOptionCategory` | `Mode`, `Model`, `ThoughtLevel`, `Other` | Config option categories |
+| `Role` | `Assistant`, `User` | Conversation roles |
+
+```crystal
+# Parse from wire string
+reason = ACP::Protocol::StopReason.parse("end_turn")  # => StopReason::EndTurn
+reason = ACP::Protocol::StopReason.parse?("unknown")   # => nil
+
+# Use in comparisons
+if reason == ACP::Protocol::StopReason::Cancelled
+  puts "Turn was cancelled"
+end
+
+# JSON round-trip
+json = ACP::Protocol::ToolKind::Execute.to_json  # => "\"execute\""
+ACP::Protocol::ToolKind.from_json(json)           # => ToolKind::Execute
+```
+
 ### Session Update Types
 
 These are the `session/update` notification types sent from the agent via the `sessionUpdate` discriminator.
@@ -412,12 +489,24 @@ client = ACP.connect(
 | `ACP::ProtocolError` | Protocol-level issue |
 | `ACP::VersionMismatchError` | Incompatible protocol versions |
 | `ACP::InvalidStateError` | Wrong client state for operation |
-| `ACP::JsonRpcError` | JSON-RPC 2.0 error from agent |
+| `ACP::JsonRpcError` | JSON-RPC 2.0 error from agent (includes `auth_required?` and `resource_not_found?` helpers) |
 | `ACP::SessionNotFoundError` | Referenced session doesn't exist |
 | `ACP::NoActiveSessionError` | No session established yet |
 | `ACP::AuthenticationError` | Authentication failed |
 | `ACP::RequestTimeoutError` | Request timed out |
 | `ACP::RequestCancelledError` | Request was cancelled |
+
+**Error Code Constants** (`ACP::Protocol::ErrorCode`):
+
+| Constant | Code | Description |
+|----------|------|-------------|
+| `PARSE_ERROR` | -32700 | Invalid JSON received |
+| `INVALID_REQUEST` | -32600 | Not a valid request object |
+| `METHOD_NOT_FOUND` | -32601 | Method does not exist |
+| `INVALID_PARAMS` | -32602 | Invalid method parameters |
+| `INTERNAL_ERROR` | -32603 | Internal JSON-RPC error |
+| `AUTH_REQUIRED` | -32000 | Authentication required (ACP-specific) |
+| `RESOURCE_NOT_FOUND` | -32002 | Resource not found (ACP-specific) |
 
 ## Interactive Client Example
 
@@ -511,9 +600,13 @@ This library implements the [Agent Client Protocol v1](https://agentclientprotoc
 | Method | Status | Notes |
 |--------|--------|-------|
 | `session/request_permission` | ✅ | With auto-cancel fallback when no handler set |
-| `fs/read_text_file` | ⬜ | Not yet implemented (client must handle via `on_agent_request`) |
-| `fs/write_text_file` | ⬜ | Not yet implemented (client must handle via `on_agent_request`) |
-| `terminal/*` | ⬜ | Not yet implemented (client must handle via `on_agent_request`) |
+| `fs/read_text_file` | ✅ | Typed handler via `on_read_text_file`, or generic `on_agent_request` fallback |
+| `fs/write_text_file` | ✅ | Typed handler via `on_write_text_file`, or generic `on_agent_request` fallback |
+| `terminal/create` | ✅ | Typed handler via `on_create_terminal`, or generic `on_agent_request` fallback |
+| `terminal/output` | ✅ | Typed handler via `on_terminal_output`, or generic `on_agent_request` fallback |
+| `terminal/release` | ✅ | Typed handler via `on_release_terminal`, or generic `on_agent_request` fallback |
+| `terminal/wait_for_exit` | ✅ | Typed handler via `on_wait_for_terminal_exit`, or generic `on_agent_request` fallback |
+| `terminal/kill` | ✅ | Typed handler via `on_kill_terminal`, or generic `on_agent_request` fallback |
 
 ### Session Update Notifications
 
@@ -528,6 +621,20 @@ This library implements the [Agent Client Protocol v1](https://agentclientprotoc
 | `available_commands_update` | ✅ |
 | `current_mode_update` | ✅ |
 | `config_option_update` | ✅ |
+| `config_options_update` | ✅ | Alias for `config_option_update` (spec doc variant) |
+
+### Protocol Types
+
+| Category | Status | Notes |
+|----------|--------|-------|
+| Content Blocks | ✅ | `text`, `image`, `audio`, `resource`, `resource_link` |
+| Tool Call Content | ✅ | `ToolCallContentBlock`, `ToolCallDiff`, `ToolCallTerminal` |
+| Tool Call Location | ✅ | `ToolCallLocation` with path and line |
+| Terminal Exit Status | ✅ | `TerminalExitStatus` with exit code and signal |
+| Protocol Enums | ✅ | `StopReason`, `ToolKind`, `ToolCallStatus`, `PermissionOptionKind`, `PlanEntryPriority`, `PlanEntryStatus`, `SessionConfigOptionCategory`, `Role` |
+| Error Codes | ✅ | Standard JSON-RPC + ACP-specific (`AUTH_REQUIRED`, `RESOURCE_NOT_FOUND`) |
+| MCP Server Config | ✅ | Stdio, HTTP, SSE transports |
+| Capabilities | ✅ | Client and Agent capabilities with all spec fields |
 
 ## Development
 
@@ -546,6 +653,25 @@ crystal build examples/interactive_client.cr -o bin/acp-client
 ```
 
 ## Project Structure
+
+```
+src/acp/
+├── acp.cr                       # Main entry point and ACP.connect convenience
+├── client.cr                    # Core client with typed handler dispatch
+├── errors.cr                    # Error types with ACP-specific codes
+├── session.cr                   # High-level session wrapper and PromptBuilder
+├── transport.cr                 # Stdio/Process transports
+├── version.cr                   # Version constants
+└── protocol/
+    ├── capabilities.cr          # Client/Agent capabilities, MCP server configs
+    ├── client_methods.cr        # fs/*, terminal/* request/response types
+    ├── content_block.cr         # ContentBlock discriminated union
+    ├── enums.cr                 # StopReason, ToolKind, ToolCallStatus, etc.
+    ├── tool_call_content.cr     # ToolCallContent, Diff, Terminal, Location
+    ├── types.cr                 # All method params/results, JSON-RPC builders
+    └── updates.cr               # SessionUpdate discriminated union
+```
+
 
 ```
 src/

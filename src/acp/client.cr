@@ -49,6 +49,33 @@ module ACP
   # name and raw params.
   alias NotificationHandler = (String, JSON::Any?) -> Nil
 
+  # ─── Typed Client Method Handlers ─────────────────────────────────
+  # These aliases provide strongly-typed handlers for agent-initiated
+  # client methods (fs/*, terminal/*), as defined in the ACP spec.
+  # See: https://agentclientprotocol.com/protocol/file-system
+  # See: https://agentclientprotocol.com/protocol/terminals
+
+  # Handler for `fs/read_text_file` requests from the agent.
+  alias ReadTextFileHandler = Protocol::ReadTextFileParams -> Protocol::ReadTextFileResult
+
+  # Handler for `fs/write_text_file` requests from the agent.
+  alias WriteTextFileHandler = Protocol::WriteTextFileParams -> Protocol::WriteTextFileResult
+
+  # Handler for `terminal/create` requests from the agent.
+  alias CreateTerminalHandler = Protocol::CreateTerminalParams -> Protocol::CreateTerminalResult
+
+  # Handler for `terminal/output` requests from the agent.
+  alias TerminalOutputHandler = Protocol::TerminalOutputParams -> Protocol::TerminalOutputResult
+
+  # Handler for `terminal/release` requests from the agent.
+  alias ReleaseTerminalHandler = Protocol::ReleaseTerminalParams -> Protocol::ReleaseTerminalResult
+
+  # Handler for `terminal/wait_for_exit` requests from the agent.
+  alias WaitForTerminalExitHandler = Protocol::WaitForTerminalExitParams -> Protocol::WaitForTerminalExitResult
+
+  # Handler for `terminal/kill` requests from the agent.
+  alias KillTerminalHandler = Protocol::KillTerminalParams -> Protocol::KillTerminalResult
+
   # The state of the client through its lifecycle.
   enum ClientState
     # Client has been created but not yet initialized.
@@ -121,6 +148,44 @@ module ACP
 
     # Callback invoked when the transport connection is lost.
     property on_disconnect : (-> Nil)?
+
+    # ─── Typed Client Method Handlers ───────────────────────────────
+    # These handlers are invoked when the agent calls the corresponding
+    # client method. Register them to provide file system and terminal
+    # access to the agent. If a handler is not set but the corresponding
+    # capability was advertised, the agent request will fall through to
+    # `on_agent_request` or receive a "method not found" error.
+    #
+    # See: https://agentclientprotocol.com/protocol/file-system
+    # See: https://agentclientprotocol.com/protocol/terminals
+
+    # Handler for `fs/read_text_file` — read file contents from the editor.
+    # Set this when advertising `fs.readTextFile` capability.
+    property on_read_text_file : ReadTextFileHandler?
+
+    # Handler for `fs/write_text_file` — write file contents.
+    # Set this when advertising `fs.writeTextFile` capability.
+    property on_write_text_file : WriteTextFileHandler?
+
+    # Handler for `terminal/create` — create a new terminal and execute a command.
+    # Set this when advertising the `terminal` capability.
+    property on_create_terminal : CreateTerminalHandler?
+
+    # Handler for `terminal/output` — get terminal output and exit status.
+    # Set this when advertising the `terminal` capability.
+    property on_terminal_output : TerminalOutputHandler?
+
+    # Handler for `terminal/release` — release a terminal.
+    # Set this when advertising the `terminal` capability.
+    property on_release_terminal : ReleaseTerminalHandler?
+
+    # Handler for `terminal/wait_for_exit` — wait for terminal command to exit.
+    # Set this when advertising the `terminal` capability.
+    property on_wait_for_terminal_exit : WaitForTerminalExitHandler?
+
+    # Handler for `terminal/kill` — kill terminal command without releasing.
+    # Set this when advertising the `terminal` capability.
+    property on_kill_terminal : KillTerminalHandler?
 
     # ─── Internal State ─────────────────────────────────────────────
 
@@ -674,6 +739,11 @@ module ACP
     # Handles a method call from the agent (e.g., session/request_permission).
     # If we have a registered handler, we invoke it and send the result back.
     # Otherwise, we respond with a method-not-found error.
+    #
+    # Dispatch order:
+    #   1. Well-known methods with typed handlers (permission, fs/*, terminal/*)
+    #   2. Generic `on_agent_request` callback
+    #   3. Method-not-found error
     private def handle_agent_request(msg : JSON::Any) : Nil
       id = Protocol.extract_id(msg)
       return unless id
@@ -687,8 +757,22 @@ module ACP
 
       # Special handling for well-known agent methods.
       case method_name
-      when "session/request_permission"
+      when Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
         handle_permission_request(id, params)
+      when Protocol::ClientMethod::FS_READ_TEXT_FILE
+        handle_typed_client_method(id, params, @on_read_text_file, Protocol::ReadTextFileParams, method_name)
+      when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
+        handle_typed_client_method(id, params, @on_write_text_file, Protocol::WriteTextFileParams, method_name)
+      when Protocol::ClientMethod::TERMINAL_CREATE
+        handle_typed_client_method(id, params, @on_create_terminal, Protocol::CreateTerminalParams, method_name)
+      when Protocol::ClientMethod::TERMINAL_OUTPUT
+        handle_typed_client_method(id, params, @on_terminal_output, Protocol::TerminalOutputParams, method_name)
+      when Protocol::ClientMethod::TERMINAL_RELEASE
+        handle_typed_client_method(id, params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name)
+      when Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT
+        handle_typed_client_method(id, params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name)
+      when Protocol::ClientMethod::TERMINAL_KILL
+        handle_typed_client_method(id, params, @on_kill_terminal, Protocol::KillTerminalParams, method_name)
       else
         # Delegate to the generic agent request handler.
         if handler = @on_agent_request
@@ -707,6 +791,44 @@ module ACP
             "Client does not handle method: #{method_name}"
           )
         end
+      end
+    end
+
+    # Generic typed dispatch for client methods. Tries the typed handler
+    # first, then falls back to `on_agent_request`, then returns an error.
+    private def handle_typed_client_method(
+      id : Protocol::RequestId,
+      params : JSON::Any?,
+      handler,
+      params_type,
+      method_name : String,
+    ) : Nil
+      if h = handler
+        begin
+          typed_params = params_type.from_json((params || JSON::Any.new(nil)).to_json)
+          result = h.call(typed_params)
+          respond_to_agent(id, JSON.parse(result.to_json))
+        rescue ex : JSON::SerializableError
+          ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
+          respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
+        rescue ex
+          ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
+          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
+        end
+      elsif fallback = @on_agent_request
+        begin
+          result = fallback.call(method_name, params || JSON::Any.new(nil))
+          respond_to_agent(id, result)
+        rescue ex
+          ClientLog.error { "Error in agent request handler for #{method_name}: #{ex.message}" }
+          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
+        end
+      else
+        respond_to_agent_error(
+          id,
+          JsonRpcError::METHOD_NOT_FOUND,
+          "Client does not handle method: #{method_name}"
+        )
       end
     end
 

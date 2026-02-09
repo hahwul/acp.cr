@@ -69,6 +69,15 @@ module ACP
     SERVER_ERROR_START = -32099
     SERVER_ERROR_END   = -32000
 
+    # ACP-specific error codes (reserved range -32000 to -32099).
+    # See: https://agentclientprotocol.com/protocol/schema#errorcode
+
+    # Authentication is required before this operation can be performed.
+    AUTH_REQUIRED = -32000
+
+    # A given resource, such as a file, was not found.
+    RESOURCE_NOT_FOUND = -32002
+
     # The integer error code.
     getter code : Int32
 
@@ -107,6 +116,16 @@ module ACP
     # Returns true if the error code falls in the server-defined range.
     def server_error? : Bool
       @code >= SERVER_ERROR_START && @code <= SERVER_ERROR_END
+    end
+
+    # Returns true if this is an ACP authentication-required error.
+    def auth_required? : Bool
+      @code == AUTH_REQUIRED
+    end
+
+    # Returns true if this is an ACP resource-not-found error.
+    def resource_not_found? : Bool
+      @code == RESOURCE_NOT_FOUND
     end
 
     # Builds a human-readable representation including the code.

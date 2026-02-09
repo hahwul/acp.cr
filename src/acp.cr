@@ -51,10 +51,13 @@
 
 require "./acp/version"
 require "./acp/errors"
+require "./acp/protocol/enums"
 require "./acp/protocol/capabilities"
 require "./acp/protocol/content_block"
+require "./acp/protocol/tool_call_content"
 require "./acp/protocol/updates"
 require "./acp/protocol/types"
+require "./acp/protocol/client_methods"
 require "./acp/transport"
 require "./acp/client"
 require "./acp/session"

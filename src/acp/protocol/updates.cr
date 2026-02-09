@@ -67,15 +67,16 @@ module ACP
 
       use_json_discriminator "sessionUpdate", {
         # ── ACP Spec Standard Types ──
-        "user_message_chunk"         => UserMessageChunkUpdate,
-        "agent_message_chunk"        => AgentMessageChunkUpdate,
-        "agent_thought_chunk"        => AgentThoughtChunkUpdate,
-        "tool_call"                  => ToolCallUpdate,
-        "tool_call_update"           => ToolCallStatusUpdate,
-        "plan"                       => PlanUpdate,
-        "available_commands_update"  => AvailableCommandsUpdate,
-        "current_mode_update"        => CurrentModeUpdate,
-        "config_option_update"       => ConfigOptionUpdate,
+        "user_message_chunk"        => UserMessageChunkUpdate,
+        "agent_message_chunk"       => AgentMessageChunkUpdate,
+        "agent_thought_chunk"       => AgentThoughtChunkUpdate,
+        "tool_call"                 => ToolCallUpdate,
+        "tool_call_update"          => ToolCallStatusUpdate,
+        "plan"                      => PlanUpdate,
+        "available_commands_update" => AvailableCommandsUpdate,
+        "current_mode_update"       => CurrentModeUpdate,
+        "config_option_update"      => ConfigOptionUpdate,
+        "config_options_update"     => ConfigOptionUpdate,
         # ── Non-Standard / Backward Compatibility ──
         "agent_message_start" => AgentMessageStartUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
