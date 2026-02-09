@@ -1,9 +1,17 @@
 name: acp
 version: 0.1.0
+description: |
+  Unofficial Crystal Shard for Agent Client Protocol (ACP).
+  Provides a JSON-RPC 2.0 based client for communicating with
+  AI coding agents over stdio transport.
 
 authors:
   - hahwul <hahwul@gmail.com>
 
-crystal: '>= 1.19.1'
+crystal: ">= 1.19.1"
 
 license: MIT
+
+targets:
+  interactive_client:
+    main: examples/interactive_client.cr
