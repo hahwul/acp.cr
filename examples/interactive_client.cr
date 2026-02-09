@@ -240,7 +240,6 @@ client = ACP::Client.new(
     fs: ACP::Protocol::FsCapabilities.new(
       read_text_file: false,
       write_text_file: false,
-      list_directory: false
     ),
     terminal: false
   )
@@ -298,22 +297,15 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
       Term.error("  Tool error: #{err}")
     end
   when ACP::Protocol::PlanUpdate
-    if title = u.title
-      STDERR.puts "  📋 Plan: #{title}".colorize(:cyan)
-    end
-    if steps = u.steps
-      steps.each_with_index do |step, i|
-        status_icon = case step.status
-                      when "completed"   then "✓"
-                      when "in_progress" then "▶"
-                      when "failed"      then "✗"
-                      else                    "○"
-                      end
-        STDERR.puts "     #{status_icon} #{i + 1}. #{step.title}".colorize(:white)
-      end
-    end
-    if content = u.content
-      STDERR.puts "  📋 #{content}".colorize(:cyan)
+    STDERR.puts "  📋 Plan:".colorize(:cyan)
+    u.entries.each_with_index do |entry, i|
+      status_icon = case entry.status
+                    when "completed"   then "✓"
+                    when "in_progress" then "▶"
+                    when "failed"      then "✗"
+                    else                    "○"
+                    end
+      STDERR.puts "     #{status_icon} #{i + 1}. #{entry.content}".colorize(:white)
     end
   when ACP::Protocol::StatusUpdate
     STDERR.puts "  ⏳ #{u.status}#{u.message ? ": #{u.message}" : ""}".colorize(:dark_gray)

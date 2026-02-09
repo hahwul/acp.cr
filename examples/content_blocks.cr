@@ -27,16 +27,16 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
   case u = update.update
   when ACP::Protocol::AgentMessageChunkUpdate
     print u.text
-  when ACP::Protocol::ThoughtUpdate
+  when ACP::Protocol::AgentThoughtChunkUpdate
     puts "
-[Thought: #{u.title || "Reasoning"}]".colorize(:magenta)
+[Thought]".colorize(:magenta)
     puts u.text.colorize(:dark_gray)
-  when ACP::Protocol::ToolCallStartUpdate
+  when ACP::Protocol::ToolCallUpdate
     puts "
-[Tool Call: #{u.title || u.tool_name}] Status: #{u.status}".colorize(:cyan)
-  when ACP::Protocol::ToolCallEndUpdate
+[Tool Call: #{u.title}] Status: #{u.status}".colorize(:cyan)
+  when ACP::Protocol::ToolCallStatusUpdate
     puts "
-[Tool Done] Status: #{u.status}".colorize(:green)
+[Tool Update: #{u.tool_call_id}] Status: #{u.status}".colorize(:green)
   when ACP::Protocol::StatusUpdate
     puts "
 [Status: #{u.status}] #{u.message}".colorize(:yellow)

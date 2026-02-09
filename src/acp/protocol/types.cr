@@ -10,6 +10,8 @@
 #   - Notification: {"jsonrpc":"2.0", "method": "...", "params": {...}}
 #
 # IDs can be Int64 or String per JSON-RPC 2.0 spec.
+#
+# Reference: https://agentclientprotocol.com/protocol/schema
 
 require "json"
 require "./capabilities"
@@ -92,6 +94,7 @@ module ACP
     end
 
     # ─── Initialize Method ────────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/initialization
 
     # Params for the `initialize` method (Client → Agent).
     struct InitializeParams
@@ -106,13 +109,19 @@ module ACP
       property client_capabilities : ClientCapabilities
 
       # Metadata about the client application.
+      # Note: in future versions of the protocol, this will be required.
       @[JSON::Field(key: "clientInfo")]
-      property client_info : ClientInfo
+      property client_info : ClientInfo?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @protocol_version : UInt16,
         @client_capabilities : ClientCapabilities,
-        @client_info : ClientInfo,
+        @client_info : ClientInfo? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
@@ -135,19 +144,26 @@ module ACP
       property auth_methods : Array(JSON::Any)?
 
       # Metadata about the agent.
+      # Note: in future versions of the protocol, this will be required.
       @[JSON::Field(key: "agentInfo")]
       property agent_info : AgentInfo?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @protocol_version : UInt16,
         @agent_capabilities : AgentCapabilities = AgentCapabilities.new,
-        @auth_methods : Array(String)? = nil,
+        @auth_methods : Array(JSON::Any)? = nil,
         @agent_info : AgentInfo? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
 
     # ─── Authenticate Method ──────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/initialization
 
     # Params for the `authenticate` method (Client → Agent).
     struct AuthenticateParams
@@ -160,7 +176,11 @@ module ACP
       # Optional credentials or token data, depending on the auth method.
       property credentials : JSON::Any?
 
-      def initialize(@method_id : String, @credentials : JSON::Any? = nil)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@method_id : String, @credentials : JSON::Any? = nil, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
@@ -168,11 +188,16 @@ module ACP
     struct AuthenticateResult
       include JSON::Serializable
 
-      def initialize
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
     # ─── Session/New Method ───────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-setup#creating-a-session
 
     # Params for the `session/new` method (Client → Agent).
     struct SessionNewParams
@@ -181,170 +206,361 @@ module ACP
       # The current working directory (absolute path).
       property cwd : String
 
-      # Optional list of MCP servers the agent should connect to.
+      # List of MCP servers the agent should connect to.
+      # See: https://agentclientprotocol.com/protocol/session-setup#mcp-servers
       @[JSON::Field(key: "mcpServers")]
-      property mcp_servers : Array(McpServer) = [] of McpServer
+      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @cwd : String,
-        @mcp_servers : Array(McpServer) = [] of McpServer,
+        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Convenience constructor that accepts typed McpServer values.
+      def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil)
+        json_servers = mcp_servers.map { |s|
+          case s
+          when McpServerStdio
+            JSON.parse(s.to_json)
+          when McpServerHttp
+            JSON.parse(s.to_json)
+          when McpServerSse
+            JSON.parse(s.to_json)
+          else
+            JSON::Any.new(nil)
+          end
+        }
+        inst = allocate
+        inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta)
+        inst
+      end
+    end
+
+    # ─── Session Mode Types ───────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-modes
+
+    # A mode the agent can operate in.
+    struct SessionMode
+      include JSON::Serializable
+
+      # Unique identifier for this mode (required).
+      property id : String
+
+      # Human-readable name of the mode (required).
+      property name : String
+
+      # Optional description providing more details about what this mode does.
+      property description : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@id : String, @name : String, @description : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      end
+
+      # Backward-compatible alias for `name`.
+      def label : String
+        @name
+      end
+    end
+
+    # Backward-compatible alias.
+    alias ModeOption = SessionMode
+
+    # The set of modes and the one currently active.
+    struct SessionModeState
+      include JSON::Serializable
+
+      # The current mode the Agent is in.
+      @[JSON::Field(key: "currentModeId")]
+      property current_mode_id : String
+
+      # The set of modes that the Agent can operate in.
+      @[JSON::Field(key: "availableModes")]
+      property available_modes : Array(SessionMode)
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @current_mode_id : String,
+        @available_modes : Array(SessionMode) = [] of SessionMode,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
 
-    # A single mode option that the agent supports.
-    struct ModeOption
+    # ─── Session Config Option Types ──────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-config-options
+
+    # A possible value for a session configuration option.
+    struct ConfigOptionValue
       include JSON::Serializable
 
-      # Unique identifier for this mode.
-      property id : String
+      # Unique identifier for this option value (required).
+      property value : String
 
-      # Human-readable label for this mode.
-      property label : String
+      # Human-readable label for this option value (required).
+      property name : String
 
-      # Human-readable description of what this mode does.
+      # Optional description for this option value.
       property description : String?
 
-      def initialize(@id : String, @label : String, @description : String? = nil)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @value : String,
+        @name : String,
+        @description : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
       end
     end
 
-    # A single config option that the agent supports.
+    # A single session configuration option and its current state.
+    # See: https://agentclientprotocol.com/protocol/session-config-options#configoption
     struct ConfigOption
       include JSON::Serializable
 
-      # Unique identifier for this config option.
+      # Unique identifier for this config option (required).
       property id : String
 
-      # Human-readable label.
-      property label : String
+      # Human-readable label (required).
+      property name : String
 
-      # The type of this config option (e.g., "boolean", "string", "enum").
-      @[JSON::Field(key: "type")]
-      property config_type : String?
-
-      # The current/default value.
-      property value : JSON::Any?
-
-      # For enum-type options, the allowed values.
-      property options : Array(JSON::Any)?
-
-      # Human-readable description.
+      # Optional description providing more details.
       property description : String?
+
+      # Optional semantic category to help Clients provide consistent UX.
+      # Reserved categories: "mode", "model", "thought_level".
+      # Names beginning with `_` are free for custom use.
+      property category : String?
+
+      # The type of input control (required). Currently only "select" is supported.
+      @[JSON::Field(key: "type")]
+      property config_type : String = "select"
+
+      # The currently selected value (required).
+      @[JSON::Field(key: "currentValue")]
+      property current_value : String?
+
+      # The available values for this option (required for "select" type).
+      property options : Array(ConfigOptionValue)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @id : String,
-        @label : String,
-        @config_type : String? = nil,
-        @value : JSON::Any? = nil,
-        @options : Array(JSON::Any)? = nil,
+        @name : String,
+        @config_type : String = "select",
+        @current_value : String? = nil,
+        @options : Array(ConfigOptionValue)? = nil,
         @description : String? = nil,
+        @category : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
+
+      # Backward-compatible alias for `name`.
+      def label : String
+        @name
+      end
+
+      # Backward-compatible alias for `current_value`.
+      def value : String?
+        @current_value
+      end
     end
+
+    # ─── Session/New Result ───────────────────────────────────────────
 
     # Result of the `session/new` method (Agent → Client).
     struct SessionNewResult
       include JSON::Serializable
 
-      # The unique session identifier assigned by the agent.
+      # The unique session identifier assigned by the agent (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Optional modes the agent supports for this session.
-      property modes : Array(ModeOption)?
+      # Initial mode state if supported by the Agent.
+      # See: https://agentclientprotocol.com/protocol/session-modes
+      property modes : SessionModeState?
 
-      # Optional config options the agent exposes for this session.
+      # Initial session configuration options if supported by the Agent.
+      # See: https://agentclientprotocol.com/protocol/session-config-options
       @[JSON::Field(key: "configOptions")]
       property config_options : Array(ConfigOption)?
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @session_id : String,
-        @modes : Array(ModeOption)? = nil,
+        @modes : SessionModeState? = nil,
         @config_options : Array(ConfigOption)? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
 
     # ─── Session/Load Method ──────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-setup#loading-sessions
 
     # Params for the `session/load` method (Client → Agent).
     struct SessionLoadParams
       include JSON::Serializable
 
-      # The session ID to load/resume.
+      # The session ID to load/resume (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # The current working directory (absolute path).
-      property cwd : String?
+      # The current working directory (absolute path) (required).
+      property cwd : String
 
-      def initialize(@session_id : String, @cwd : String? = nil)
+      # List of MCP servers the agent should connect to (required).
+      @[JSON::Field(key: "mcpServers")]
+      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @session_id : String,
+        @cwd : String,
+        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
       end
     end
 
-    # Result of the `session/load` method. Same shape as session/new result.
-    alias SessionLoadResult = SessionNewResult
+    # Result of the `session/load` method. Contains mode/config state
+    # but NOT a sessionId (unlike session/new).
+    struct SessionLoadResult
+      include JSON::Serializable
+
+      # Mode state if supported by the Agent.
+      property modes : SessionModeState?
+
+      # Session configuration options if supported by the Agent.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(ConfigOption)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @modes : SessionModeState? = nil,
+        @config_options : Array(ConfigOption)? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Backward-compatible: return a provided session_id or empty string.
+      # (session/load doesn't return a sessionId in the ACP spec,
+      # so this is for code that expects it.)
+      def session_id : String
+        ""
+      end
+    end
 
     # ─── Session/Prompt Method ────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/prompt-turn
 
     # Params for the `session/prompt` method (Client → Agent).
     struct SessionPromptParams
       include JSON::Serializable
 
-      # The session to send the prompt to.
+      # The session to send the prompt to (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # The prompt content as an array of content blocks.
+      # The prompt content as an array of content blocks (required).
+      # As a baseline, the Agent MUST support ContentBlock::Text and
+      # ContentBlock::ResourceLink. Other types require capabilities.
       property prompt : Array(ContentBlock)
 
-      def initialize(@session_id : String, @prompt : Array(ContentBlock))
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@session_id : String, @prompt : Array(ContentBlock), @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
     # Result of the `session/prompt` method (Agent → Client).
+    # See: https://agentclientprotocol.com/protocol/prompt-turn#stop-reasons
     struct SessionPromptResult
       include JSON::Serializable
 
-      # Reason the agent stopped generating.
-      # Possible values: "end_turn", "max_tokens", "refusal", "cancelled", etc.
+      # Reason the agent stopped generating (required).
+      # Values: "end_turn", "max_tokens", "max_turn_requests",
+      #         "refusal", "cancelled"
       @[JSON::Field(key: "stopReason")]
       property stop_reason : String
 
-      def initialize(@stop_reason : String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@stop_reason : String, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
     # ─── Session/Cancel Notification ──────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/prompt-turn#cancellation
 
     # Params for the `session/cancel` notification (Client → Agent).
     struct SessionCancelParams
       include JSON::Serializable
 
-      # The session to cancel the current operation for.
+      # The session to cancel the current operation for (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      def initialize(@session_id : String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
     # ─── Session/SetMode Method ───────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-modes#from-the-client
 
     # Params for the `session/set_mode` method (Client → Agent).
     struct SessionSetModeParams
       include JSON::Serializable
 
-      # The session to change the mode for.
+      # The session to change the mode for (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # The mode ID to switch to.
+      # The mode ID to switch to (required). Must be one of the modes
+      # listed in availableModes.
       @[JSON::Field(key: "modeId")]
       property mode_id : String
 
-      def initialize(@session_id : String, @mode_id : String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@session_id : String, @mode_id : String, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
@@ -352,27 +568,111 @@ module ACP
     struct SessionSetModeResult
       include JSON::Serializable
 
-      def initialize
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # ─── Session/SetConfigOption Method ───────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-config-options#from-the-client
+
+    # Params for the `session/set_config_option` method (Client → Agent).
+    struct SessionSetConfigOptionParams
+      include JSON::Serializable
+
+      # The session to set the config option for (required).
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # The ID of the configuration option to change (required).
+      @[JSON::Field(key: "configId")]
+      property config_id : String
+
+      # The new value to set (required). Must be one of the values
+      # listed in the option's options array.
+      property value : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @session_id : String,
+        @config_id : String,
+        @value : String,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Result of the `session/set_config_option` method (Agent → Client).
+    # The response always contains the complete configuration state.
+    struct SessionSetConfigOptionResult
+      include JSON::Serializable
+
+      # The full set of configuration options and their current values (required).
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(ConfigOption)
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @config_options : Array(ConfigOption) = [] of ConfigOption,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
       end
     end
 
     # ─── Session/RequestPermission (Agent → Client) ───────────────────
+    # See: https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
 
     # A single permission option the client can choose from.
+    # See: https://agentclientprotocol.com/protocol/tool-calls#permission-options
     struct PermissionOption
       include JSON::Serializable
 
-      # Unique identifier for this option (e.g., "allow_once", "allow_always", "deny").
-      property id : String
+      # Unique identifier for this option (required).
+      @[JSON::Field(key: "optionId")]
+      property option_id : String
 
-      # Human-readable label for this option.
-      property label : String
+      # Human-readable label to display to the user (required).
+      property name : String
 
-      def initialize(@id : String, @label : String)
+      # Hint about the nature of this permission option (required).
+      # Values: "allow_once", "allow_always", "reject_once", "reject_always"
+      property kind : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @option_id : String,
+        @name : String,
+        @kind : String = "allow_once",
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Backward-compatible alias: `id` maps to `option_id`.
+      def id : String
+        @option_id
+      end
+
+      # Backward-compatible alias: `label` maps to `name`.
+      def label : String
+        @name
       end
     end
 
     # Describes the tool call that triggered the permission request.
+    # This is a ToolCallUpdate-like object.
+    # See: https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
     struct ToolCallInfo
       include JSON::Serializable
 
@@ -383,18 +683,35 @@ module ACP
       # Human-readable title or summary of the tool call.
       property title : String?
 
-      # The name of the tool being invoked.
+      # The category of tool being invoked.
+      property kind : String?
+
+      # Current execution status.
+      property status : String?
+
+      # Content produced by the tool call.
+      property content : Array(JSON::Any)?
+
+      # The name of the tool being invoked (backward compat).
       @[JSON::Field(key: "toolName")]
       property tool_name : String?
 
       # The input/arguments to the tool call.
       property input : JSON::Any?
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @tool_call_id : String? = nil,
         @title : String? = nil,
+        @kind : String? = nil,
+        @status : String? = nil,
+        @content : Array(JSON::Any)? = nil,
         @tool_name : String? = nil,
         @input : JSON::Any? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
@@ -404,44 +721,121 @@ module ACP
     struct RequestPermissionParams
       include JSON::Serializable
 
-      # The session this permission request belongs to.
+      # The session this permission request belongs to (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Information about the tool call requesting permission.
+      # Information about the tool call requesting permission (required).
       @[JSON::Field(key: "toolCall")]
       property tool_call : ToolCallInfo
 
-      # The options the user can choose from.
+      # The options the user can choose from (required).
       property options : Array(PermissionOption)
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @session_id : String,
         @tool_call : ToolCallInfo,
         @options : Array(PermissionOption),
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
 
-    # The outcome chosen by the user for a permission request.
-    struct PermissionOutcome
+    # The outcome when the user selected one of the provided options.
+    struct SelectedPermissionOutcome
       include JSON::Serializable
 
-      # The ID of the selected option (e.g., "allow_once").
-      property selected : String
+      # Must be "selected".
+      property outcome : String = "selected"
 
-      def initialize(@selected : String)
+      # The ID of the option the user selected (required).
+      @[JSON::Field(key: "optionId")]
+      property option_id : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @option_id : String,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+        @outcome = "selected"
+      end
+    end
+
+    # The outcome when the prompt turn was cancelled.
+    struct CancelledPermissionOutcome
+      include JSON::Serializable
+
+      # Must be "cancelled".
+      property outcome : String = "cancelled"
+
+      def initialize
+        @outcome = "cancelled"
       end
     end
 
     # Result of `session/request_permission` (Client → Agent).
+    # See: https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
     struct RequestPermissionResult
       include JSON::Serializable
 
-      # The user's chosen outcome. Nil or a special value indicates cancellation.
-      property outcome : PermissionOutcome | String
+      # The user's decision on the permission request (required).
+      # Either a SelectedPermissionOutcome or CancelledPermissionOutcome,
+      # serialized as a JSON object.
+      property outcome : JSON::Any
 
-      def initialize(@outcome : PermissionOutcome | String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@outcome : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+      end
+
+      # Creates a "selected" outcome result.
+      def self.selected(option_id : String) : RequestPermissionResult
+        outcome_hash = Hash(String, JSON::Any).new
+        outcome_hash["outcome"] = JSON::Any.new("selected")
+        outcome_hash["optionId"] = JSON::Any.new(option_id)
+        new(outcome: JSON::Any.new(outcome_hash))
+      end
+
+      # Creates a "cancelled" outcome result.
+      def self.cancelled : RequestPermissionResult
+        outcome_hash = Hash(String, JSON::Any).new
+        outcome_hash["outcome"] = JSON::Any.new("cancelled")
+        new(outcome: JSON::Any.new(outcome_hash))
+      end
+
+      # Returns true if the outcome was "cancelled".
+      def cancelled? : Bool
+        if h = @outcome.as_h?
+          h["outcome"]?.try(&.as_s?) == "cancelled"
+        elsif s = @outcome.as_s?
+          s == "cancelled"
+        else
+          false
+        end
+      end
+
+      # Returns the selected option ID, or nil if cancelled.
+      def selected_option_id : String?
+        if h = @outcome.as_h?
+          return nil if h["outcome"]?.try(&.as_s?) == "cancelled"
+          h["optionId"]?.try(&.as_s?)
+        else
+          nil
+        end
+      end
+
+      # Backward-compatible: returns the selected option ID as a string.
+      def selected : String?
+        selected_option_id
       end
     end
 

@@ -78,7 +78,11 @@ def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
         "promptCapabilities": {
           "image": true,
           "audio": false,
-          "file": true
+          "embeddedContext": true
+        },
+        "mcpCapabilities": {
+          "http": false,
+          "sse": false
         }
       },
       "authMethods": [],
@@ -96,10 +100,13 @@ def build_session_new_response(id : Int64, session_id : String = "sess-001") : S
     "id": #{id},
     "result": {
       "sessionId": "#{session_id}",
-      "modes": [
-        {"id": "code", "label": "Code Mode", "description": "Write code"},
-        {"id": "chat", "label": "Chat Mode", "description": "Just chat"}
-      ],
+      "modes": {
+        "currentModeId": "code",
+        "availableModes": [
+          {"id": "code", "name": "Code Mode", "description": "Write code"},
+          {"id": "chat", "name": "Chat Mode", "description": "Just chat"}
+        ]
+      },
       "configOptions": []
     }
   })
@@ -138,27 +145,23 @@ describe ACP::Protocol do
       fs = ACP::Protocol::FsCapabilities.new(
         read_text_file: true,
         write_text_file: false,
-        list_directory: true
       )
       json = JSON.parse(fs.to_json)
       json["readTextFile"].as_bool.should eq(true)
       json["writeTextFile"].as_bool.should eq(false)
-      json["listDirectory"].as_bool.should eq(true)
     end
 
     it "deserializes from JSON" do
-      json_str = %({"readTextFile": true, "writeTextFile": true, "listDirectory": false})
+      json_str = %({"readTextFile": true, "writeTextFile": true})
       fs = ACP::Protocol::FsCapabilities.from_json(json_str)
       fs.read_text_file.should eq(true)
       fs.write_text_file.should eq(true)
-      fs.list_directory.should eq(false)
     end
 
     it "defaults all capabilities to false" do
       fs = ACP::Protocol::FsCapabilities.new
       fs.read_text_file.should eq(false)
       fs.write_text_file.should eq(false)
-      fs.list_directory.should eq(false)
     end
   end
 
@@ -183,30 +186,44 @@ describe ACP::Protocol do
 
   describe ACP::Protocol::AgentCapabilities do
     it "deserializes from JSON" do
-      json_str = %({"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "file": true}})
+      json_str = %({"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true}})
       caps = ACP::Protocol::AgentCapabilities.from_json(json_str)
       caps.load_session.should eq(true)
       caps.prompt_capabilities.should_not be_nil
       caps.prompt_capabilities.not_nil!.image.should eq(true)
       caps.prompt_capabilities.not_nil!.audio.should eq(false)
-      caps.prompt_capabilities.not_nil!.file.should eq(true)
+      caps.prompt_capabilities.not_nil!.embedded_context.should eq(true)
+    end
+
+    it "deserializes with mcpCapabilities" do
+      json_str = %({"loadSession": false, "mcpCapabilities": {"http": true, "sse": false}})
+      caps = ACP::Protocol::AgentCapabilities.from_json(json_str)
+      caps.mcp_capabilities.should_not be_nil
+      caps.mcp_capabilities.not_nil!.http.should eq(true)
+      caps.mcp_capabilities.not_nil!.sse.should eq(false)
     end
 
     it "defaults to no capabilities" do
       caps = ACP::Protocol::AgentCapabilities.new
       caps.load_session.should eq(false)
       caps.prompt_capabilities.should be_nil
+      caps.mcp_capabilities.should be_nil
     end
   end
 
   describe ACP::Protocol::PromptCapabilities do
     it "round-trips through JSON" do
-      original = ACP::Protocol::PromptCapabilities.new(image: true, audio: true, file: false)
+      original = ACP::Protocol::PromptCapabilities.new(image: true, audio: true, embedded_context: false)
       json_str = original.to_json
       restored = ACP::Protocol::PromptCapabilities.from_json(json_str)
       restored.image.should eq(true)
       restored.audio.should eq(true)
-      restored.file.should eq(false)
+      restored.embedded_context.should eq(false)
+    end
+
+    it "provides backward-compatible file alias" do
+      caps = ACP::Protocol::PromptCapabilities.new(embedded_context: true)
+      caps.file.should eq(true)
     end
   end
 
@@ -217,6 +234,12 @@ describe ACP::Protocol do
       json["name"].as_s.should eq("my-editor")
       json["version"].as_s.should eq("2.1.0")
     end
+
+    it "serializes with title" do
+      info = ACP::Protocol::ClientInfo.new("my-editor", "2.1.0", title: "My Editor")
+      json = JSON.parse(info.to_json)
+      json["title"].as_s.should eq("My Editor")
+    end
   end
 
   describe ACP::Protocol::AgentInfo do
@@ -225,21 +248,47 @@ describe ACP::Protocol do
       info.name.should eq("cool-agent")
       info.version.should eq("3.0")
     end
-  end
 
-  describe ACP::Protocol::McpServer do
-    it "serializes with optional auth" do
-      server = ACP::Protocol::McpServer.new("https://mcp.example.com", auth: "token-123")
-      json = JSON.parse(server.to_json)
-      json["url"].as_s.should eq("https://mcp.example.com")
-      json["auth"].as_s.should eq("token-123")
+    it "deserializes with title" do
+      info = ACP::Protocol::AgentInfo.from_json(%({"name": "cool-agent", "version": "3.0", "title": "Cool Agent"}))
+      info.title.should eq("Cool Agent")
+      info.display_name.should eq("Cool Agent")
     end
 
-    it "serializes without auth" do
-      server = ACP::Protocol::McpServer.new("https://mcp.example.com")
+    it "falls back to name for display_name" do
+      info = ACP::Protocol::AgentInfo.from_json(%({"name": "cool-agent", "version": "3.0"}))
+      info.display_name.should eq("cool-agent")
+    end
+  end
+
+  describe ACP::Protocol::McpServerStdio do
+    it "serializes stdio transport" do
+      server = ACP::Protocol::McpServerStdio.new(
+        name: "filesystem",
+        command: "/path/to/mcp-server",
+        args: ["--stdio"],
+        env: [ACP::Protocol::EnvVariable.new("API_KEY", "secret123")]
+      )
       json = JSON.parse(server.to_json)
-      json["url"].as_s.should eq("https://mcp.example.com")
-      json["auth"]?.try(&.raw).should be_nil
+      json["name"].as_s.should eq("filesystem")
+      json["command"].as_s.should eq("/path/to/mcp-server")
+      json["args"].as_a.size.should eq(1)
+      json["env"][0]["name"].as_s.should eq("API_KEY")
+    end
+  end
+
+  describe ACP::Protocol::McpServerHttp do
+    it "serializes http transport" do
+      server = ACP::Protocol::McpServerHttp.new(
+        name: "api-server",
+        url: "https://api.example.com/mcp",
+        headers: [ACP::Protocol::HttpHeader.new("Authorization", "Bearer token123")]
+      )
+      json = JSON.parse(server.to_json)
+      json["type"].as_s.should eq("http")
+      json["name"].as_s.should eq("api-server")
+      json["url"].as_s.should eq("https://api.example.com/mcp")
+      json["headers"][0]["name"].as_s.should eq("Authorization")
     end
   end
 
@@ -259,27 +308,39 @@ describe ACP::Protocol do
       block.should be_a(ACP::Protocol::TextContentBlock)
       block.as(ACP::Protocol::TextContentBlock).content.should eq("Test content")
     end
+
+    it "provides backward-compatible content alias" do
+      block = ACP::Protocol::TextContentBlock.new("hello")
+      block.content.should eq("hello")
+      block.text.should eq("hello")
+    end
   end
 
   describe ACP::Protocol::ImageContentBlock do
-    it "serializes with URL" do
-      block = ACP::Protocol::ImageContentBlock.new(url: "https://example.com/img.png", mime_type: "image/png")
+    it "serializes with data and mimeType" do
+      block = ACP::Protocol::ImageContentBlock.new(data: "base64data==", mime_type: "image/png")
       json = JSON.parse(block.to_json)
       json["type"].as_s.should eq("image")
-      json["url"].as_s.should eq("https://example.com/img.png")
+      json["data"].as_s.should eq("base64data==")
       json["mimeType"].as_s.should eq("image/png")
     end
 
+    it "serializes with optional uri" do
+      block = ACP::Protocol::ImageContentBlock.new(data: "base64data==", mime_type: "image/png", uri: "file:///tmp/img.png")
+      json = JSON.parse(block.to_json)
+      json["uri"].as_s.should eq("file:///tmp/img.png")
+    end
+
     it "deserializes via ContentBlock discriminator" do
-      json_str = %({"type": "image", "url": "file:///tmp/img.jpg"})
+      json_str = %({"type": "image", "data": "base64data==", "mimeType": "image/png"})
       block = ACP::Protocol::ContentBlock.from_json(json_str)
       block.should be_a(ACP::Protocol::ImageContentBlock)
-      block.as(ACP::Protocol::ImageContentBlock).url.should eq("file:///tmp/img.jpg")
+      block.as(ACP::Protocol::ImageContentBlock).data.should eq("base64data==")
     end
   end
 
   describe ACP::Protocol::AudioContentBlock do
-    it "serializes with data" do
+    it "serializes with data and mimeType" do
       block = ACP::Protocol::AudioContentBlock.new(data: "base64data==", mime_type: "audio/wav")
       json = JSON.parse(block.to_json)
       json["type"].as_s.should eq("audio")
@@ -288,26 +349,62 @@ describe ACP::Protocol do
     end
 
     it "deserializes via ContentBlock discriminator" do
-      json_str = %({"type": "audio", "url": "https://example.com/audio.mp3"})
+      json_str = %({"type": "audio", "data": "base64audio==", "mimeType": "audio/mp3"})
       block = ACP::Protocol::ContentBlock.from_json(json_str)
       block.should be_a(ACP::Protocol::AudioContentBlock)
     end
   end
 
   describe ACP::Protocol::ResourceContentBlock do
-    it "serializes with URI" do
-      block = ACP::Protocol::ResourceContentBlock.new("/home/user/code.cr", mime_type: "text/x-crystal")
+    it "creates with text resource" do
+      block = ACP::Protocol::ResourceContentBlock.text(
+        uri: "file:///home/user/code.cr",
+        text: "puts :hello",
+        mime_type: "text/x-crystal"
+      )
       json = JSON.parse(block.to_json)
       json["type"].as_s.should eq("resource")
-      json["uri"].as_s.should eq("file:///home/user/code.cr")
-      json["mimeType"].as_s.should eq("text/x-crystal")
+      json["resource"]["uri"].as_s.should eq("file:///home/user/code.cr")
+      json["resource"]["text"].as_s.should eq("puts :hello")
+      json["resource"]["mimeType"].as_s.should eq("text/x-crystal")
     end
 
     it "deserializes via ContentBlock discriminator" do
-      json_str = %({"type": "resource", "uri": "file:///tmp/test.txt"})
+      json_str = %({"type": "resource", "resource": {"uri": "file:///tmp/test.txt", "text": "content"}})
       block = ACP::Protocol::ContentBlock.from_json(json_str)
       block.should be_a(ACP::Protocol::ResourceContentBlock)
       block.as(ACP::Protocol::ResourceContentBlock).uri.should eq("file:///tmp/test.txt")
+      block.as(ACP::Protocol::ResourceContentBlock).text.should eq("content")
+    end
+  end
+
+  describe ACP::Protocol::ResourceLinkContentBlock do
+    it "serializes with required fields" do
+      block = ACP::Protocol::ResourceLinkContentBlock.new(
+        uri: "file:///home/user/doc.pdf",
+        name: "doc.pdf",
+        mime_type: "application/pdf",
+        size: 1024_i64
+      )
+      json = JSON.parse(block.to_json)
+      json["type"].as_s.should eq("resource_link")
+      json["uri"].as_s.should eq("file:///home/user/doc.pdf")
+      json["name"].as_s.should eq("doc.pdf")
+      json["mimeType"].as_s.should eq("application/pdf")
+      json["size"].as_i64.should eq(1024)
+    end
+
+    it "deserializes via ContentBlock discriminator" do
+      json_str = %({"type": "resource_link", "uri": "file:///tmp/test.txt", "name": "test.txt"})
+      block = ACP::Protocol::ContentBlock.from_json(json_str)
+      block.should be_a(ACP::Protocol::ResourceLinkContentBlock)
+    end
+
+    it "creates from file path" do
+      block = ACP::Protocol::ResourceLinkContentBlock.from_path("/path/to/file.txt")
+      block.uri.should eq("file:///path/to/file.txt")
+      block.name.should eq("file.txt")
+      block.path.should eq("/path/to/file.txt")
     end
   end
 
@@ -318,32 +415,120 @@ describe ACP::Protocol do
       block.content.should eq("hello")
     end
 
-    it "creates image URL blocks" do
-      block = ACP::Protocol::ContentBlocks.image_url("https://img.com/pic.png", "image/png")
+    it "creates image blocks" do
+      block = ACP::Protocol::ContentBlocks.image("base64data==", "image/png")
       block.should be_a(ACP::Protocol::ImageContentBlock)
-      block.url.should eq("https://img.com/pic.png")
+      block.data.should eq("base64data==")
       block.mime_type.should eq("image/png")
     end
 
-    it "creates file blocks" do
+    it "creates resource link blocks from file path" do
       block = ACP::Protocol::ContentBlocks.file("/path/to/file.txt")
-      block.should be_a(ACP::Protocol::FileContentBlock)
+      block.should be_a(ACP::Protocol::ResourceLinkContentBlock)
       block.path.should eq("/path/to/file.txt")
+    end
+
+    it "creates resource link blocks" do
+      block = ACP::Protocol::ContentBlocks.resource_link("file:///tmp/f.txt", "f.txt")
+      block.should be_a(ACP::Protocol::ResourceLinkContentBlock)
+      block.uri.should eq("file:///tmp/f.txt")
+      block.name.should eq("f.txt")
     end
   end
 
   # ─── Session Update Types ──────────────────────────────────────────
 
   describe ACP::Protocol::SessionUpdate do
+    # ── ACP Spec Standard Types (using "sessionUpdate" discriminator) ──
+
     it "deserializes agent_message_chunk" do
-      json_str = %({"type": "agent_message_chunk", "content": "Hello from agent"})
+      json_str = %({"sessionUpdate": "agent_message_chunk", "content": "Hello from agent"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::AgentMessageChunkUpdate)
       update.as(ACP::Protocol::AgentMessageChunkUpdate).text.should eq("Hello from agent")
     end
 
-    it "deserializes agent_message_start" do
-      json_str = %({"type": "agent_message_start", "messageId": "msg-1", "role": "assistant"})
+    it "deserializes agent_thought_chunk" do
+      json_str = %({"sessionUpdate": "agent_thought_chunk", "content": "Let me think..."})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::AgentThoughtChunkUpdate)
+      u = update.as(ACP::Protocol::AgentThoughtChunkUpdate)
+      u.text.should eq("Let me think...")
+    end
+
+    it "deserializes tool_call" do
+      json_str = %({"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "toolName": "fs.read", "status": "pending"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::ToolCallUpdate)
+      u = update.as(ACP::Protocol::ToolCallUpdate)
+      u.tool_call_id.should eq("tc-1")
+      u.title.should eq("Read file")
+      u.tool_name.should eq("fs.read")
+      u.status.should eq("pending")
+    end
+
+    it "deserializes tool_call_update" do
+      json_str = %({"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "in_progress"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::ToolCallStatusUpdate)
+      u = update.as(ACP::Protocol::ToolCallStatusUpdate)
+      u.tool_call_id.should eq("tc-1")
+      u.status.should eq("in_progress")
+    end
+
+    it "deserializes plan with entries" do
+      json_str = %({"sessionUpdate": "plan", "entries": [{"content": "Step 1", "priority": "high", "status": "completed"}, {"content": "Step 2", "priority": "medium", "status": "pending"}]})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::PlanUpdate)
+      u = update.as(ACP::Protocol::PlanUpdate)
+      entries = u.entries
+      entries.size.should eq(2)
+      entries[0].content.should eq("Step 1")
+      entries[0].priority.should eq("high")
+      entries[0].status.should eq("completed")
+      entries[1].content.should eq("Step 2")
+      entries[1].status.should eq("pending")
+      # backward-compat alias
+      u.steps.size.should eq(2)
+      entries[0].title.should eq("Step 1")
+    end
+
+    it "deserializes available_commands_update" do
+      json_str = %({"sessionUpdate": "available_commands_update", "availableCommands": [{"name": "web", "description": "Search the web"}]})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::AvailableCommandsUpdate)
+      u = update.as(ACP::Protocol::AvailableCommandsUpdate)
+      u.available_commands.size.should eq(1)
+      u.available_commands[0].name.should eq("web")
+    end
+
+    it "deserializes current_mode_update" do
+      json_str = %({"sessionUpdate": "current_mode_update", "currentModeId": "code"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::CurrentModeUpdate)
+      u = update.as(ACP::Protocol::CurrentModeUpdate)
+      u.current_mode_id.should eq("code")
+      u.mode_id.should eq("code")
+    end
+
+    it "deserializes config_option_update" do
+      json_str = %({"sessionUpdate": "config_option_update", "configOptions": [{"id": "mode", "name": "Mode", "type": "select", "currentValue": "code"}]})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::ConfigOptionUpdate)
+    end
+
+    it "deserializes user_message_chunk" do
+      json_str = %({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "hello"}})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.should be_a(ACP::Protocol::UserMessageChunkUpdate)
+      u = update.as(ACP::Protocol::UserMessageChunkUpdate)
+      u.text.should eq("hello")
+    end
+
+    # ── Non-Standard / Backward Compatibility Types ──
+
+    it "deserializes agent_message_start (non-standard)" do
+      json_str = %({"sessionUpdate": "agent_message_start", "messageId": "msg-1", "role": "assistant"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::AgentMessageStartUpdate)
       u = update.as(ACP::Protocol::AgentMessageStartUpdate)
@@ -351,35 +536,27 @@ describe ACP::Protocol do
       u.role.should eq("assistant")
     end
 
-    it "deserializes agent_message_end" do
-      json_str = %({"type": "agent_message_end", "stopReason": "end_turn"})
+    it "deserializes agent_message_end (non-standard)" do
+      json_str = %({"sessionUpdate": "agent_message_end", "stopReason": "end_turn"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::AgentMessageEndUpdate)
       update.as(ACP::Protocol::AgentMessageEndUpdate).stop_reason.should eq("end_turn")
     end
 
-    it "deserializes thought" do
-      json_str = %({"type": "thought", "content": "Let me think...", "title": "Reasoning"})
+    it "deserializes thought as alias for agent_thought_chunk" do
+      json_str = %({"sessionUpdate": "thought", "content": "Let me think..."})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
-      update.should be_a(ACP::Protocol::ThoughtUpdate)
-      u = update.as(ACP::Protocol::ThoughtUpdate)
-      u.text.should eq("Let me think...")
-      u.title.should eq("Reasoning")
+      update.should be_a(ACP::Protocol::AgentThoughtChunkUpdate)
     end
 
-    it "deserializes tool_call_start" do
-      json_str = %({"type": "tool_call_start", "toolCallId": "tc-1", "title": "Read file", "toolName": "fs.read", "status": "pending"})
+    it "deserializes tool_call_start as alias for tool_call" do
+      json_str = %({"sessionUpdate": "tool_call_start", "toolCallId": "tc-1", "title": "Read file", "status": "pending"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
-      update.should be_a(ACP::Protocol::ToolCallStartUpdate)
-      u = update.as(ACP::Protocol::ToolCallStartUpdate)
-      u.tool_call_id.should eq("tc-1")
-      u.title.should eq("Read file")
-      u.tool_name.should eq("fs.read")
-      u.status.should eq("pending")
+      update.should be_a(ACP::Protocol::ToolCallUpdate)
     end
 
-    it "deserializes tool_call_chunk" do
-      json_str = %({"type": "tool_call_chunk", "toolCallId": "tc-1", "content": "file data", "kind": "output"})
+    it "deserializes tool_call_chunk (non-standard)" do
+      json_str = %({"sessionUpdate": "tool_call_chunk", "toolCallId": "tc-1", "content": "file data", "kind": "output"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::ToolCallChunkUpdate)
       u = update.as(ACP::Protocol::ToolCallChunkUpdate)
@@ -388,8 +565,8 @@ describe ACP::Protocol do
       u.kind.should eq("output")
     end
 
-    it "deserializes tool_call_end" do
-      json_str = %({"type": "tool_call_end", "toolCallId": "tc-1", "status": "completed", "result": "done"})
+    it "deserializes tool_call_end (non-standard)" do
+      json_str = %({"sessionUpdate": "tool_call_end", "toolCallId": "tc-1", "status": "completed", "result": "done"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::ToolCallEndUpdate)
       u = update.as(ACP::Protocol::ToolCallEndUpdate)
@@ -398,22 +575,8 @@ describe ACP::Protocol do
       u.result.should eq("done")
     end
 
-    it "deserializes plan with steps" do
-      json_str = %({"type": "plan", "title": "Implementation Plan", "steps": [{"title": "Step 1", "status": "completed"}, {"title": "Step 2", "status": "pending"}]})
-      update = ACP::Protocol::SessionUpdate.from_json(json_str)
-      update.should be_a(ACP::Protocol::PlanUpdate)
-      u = update.as(ACP::Protocol::PlanUpdate)
-      u.title.should eq("Implementation Plan")
-      steps = u.steps.not_nil!
-      steps.size.should eq(2)
-      steps[0].title.should eq("Step 1")
-      steps[0].status.should eq("completed")
-      steps[1].title.should eq("Step 2")
-      steps[1].status.should eq("pending")
-    end
-
-    it "deserializes status" do
-      json_str = %({"type": "status", "status": "thinking", "message": "Processing your request"})
+    it "deserializes status (non-standard)" do
+      json_str = %({"sessionUpdate": "status", "status": "thinking", "message": "Processing your request"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::StatusUpdate)
       u = update.as(ACP::Protocol::StatusUpdate)
@@ -421,8 +584,8 @@ describe ACP::Protocol do
       u.message.should eq("Processing your request")
     end
 
-    it "deserializes error" do
-      json_str = %({"type": "error", "message": "Something went wrong", "code": -1, "detail": "stack trace here"})
+    it "deserializes error (non-standard)" do
+      json_str = %({"sessionUpdate": "error", "message": "Something went wrong", "code": -1, "detail": "stack trace here"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::ErrorUpdate)
       u = update.as(ACP::Protocol::ErrorUpdate)
@@ -430,11 +593,26 @@ describe ACP::Protocol do
       u.code.should eq(-1)
       u.detail.should eq("stack trace here")
     end
+
+    # ── Serialization ──
+
+    it "serializes with sessionUpdate discriminator field" do
+      update = ACP::Protocol::AgentMessageChunkUpdate.new(content: JSON::Any.new("test"))
+      json = JSON.parse(update.to_json)
+      json["sessionUpdate"].as_s.should eq("agent_message_chunk")
+      json.as_h.has_key?("type").should be_false
+    end
+
+    it "exposes backward-compatible .type accessor" do
+      json_str = %({"sessionUpdate": "agent_message_chunk", "content": "Hello"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      update.type.should eq("agent_message_chunk")
+    end
   end
 
   describe ACP::Protocol::SessionUpdateParams do
-    it "deserializes full update notification params" do
-      json_str = %({"sessionId": "sess-001", "update": {"type": "agent_message_chunk", "content": "Hi"}})
+    it "deserializes full update notification params with sessionUpdate discriminator" do
+      json_str = %({"sessionId": "sess-001", "update": {"sessionUpdate": "agent_message_chunk", "content": "Hi"}})
       params = ACP::Protocol::SessionUpdateParams.from_json(json_str)
       params.session_id.should eq("sess-001")
       params.update.should be_a(ACP::Protocol::AgentMessageChunkUpdate)
@@ -462,7 +640,7 @@ describe ACP::Protocol do
     it "deserializes from JSON" do
       json_str = %({
         "protocolVersion": 1,
-        "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "file": false}},
+        "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false}},
         "authMethods": [{"id": "oauth"}],
         "agentInfo": {"name": "agent", "version": "1.0"}
       })
@@ -492,12 +670,17 @@ describe ACP::Protocol do
 
   describe ACP::Protocol::SessionNewParams do
     it "serializes cwd and mcpServers" do
-      servers = [ACP::Protocol::McpServer.new("https://mcp.example.com")]
+      server = ACP::Protocol::McpServerStdio.new(
+        name: "filesystem",
+        command: "/path/to/mcp",
+        args: ["--stdio"]
+      )
+      servers = [server.as(ACP::Protocol::McpServer)]
       params = ACP::Protocol::SessionNewParams.new("/home/user/project", servers)
       json = JSON.parse(params.to_json)
       json["cwd"].as_s.should eq("/home/user/project")
       json["mcpServers"].as_a.size.should eq(1)
-      json["mcpServers"][0]["url"].as_s.should eq("https://mcp.example.com")
+      json["mcpServers"][0]["name"].as_s.should eq("filesystem")
     end
 
     it "serializes without mcpServers" do
@@ -512,13 +695,17 @@ describe ACP::Protocol do
     it "deserializes session ID with modes" do
       json_str = %({
         "sessionId": "sess-abc",
-        "modes": [{"id": "code", "label": "Code"}],
-        "configOptions": [{"id": "opt1", "label": "Option 1"}]
+        "modes": {
+          "currentModeId": "code",
+          "availableModes": [{"id": "code", "name": "Code"}]
+        },
+        "configOptions": [{"id": "opt1", "name": "Option 1", "type": "select", "currentValue": "v1"}]
       })
       result = ACP::Protocol::SessionNewResult.from_json(json_str)
       result.session_id.should eq("sess-abc")
-      result.modes.not_nil!.size.should eq(1)
-      result.modes.not_nil![0].id.should eq("code")
+      result.modes.not_nil!.available_modes.size.should eq(1)
+      result.modes.not_nil!.available_modes[0].id.should eq("code")
+      result.modes.not_nil!.current_mode_id.should eq("code")
       result.config_options.not_nil!.size.should eq(1)
     end
 
@@ -532,11 +719,12 @@ describe ACP::Protocol do
   end
 
   describe ACP::Protocol::SessionLoadParams do
-    it "serializes with session ID and cwd" do
+    it "serializes with session ID, cwd, and mcpServers" do
       params = ACP::Protocol::SessionLoadParams.new("sess-123", "/tmp")
       json = JSON.parse(params.to_json)
       json["sessionId"].as_s.should eq("sess-123")
       json["cwd"].as_s.should eq("/tmp")
+      json["mcpServers"].as_a.should be_empty
     end
   end
 
@@ -601,20 +789,27 @@ describe ACP::Protocol do
     it "round-trips through JSON" do
       opt = ACP::Protocol::ConfigOption.new(
         id: "theme",
-        label: "Theme",
-        config_type: "enum",
-        value: JSON::Any.new("dark"),
-        options: [JSON::Any.new("light"), JSON::Any.new("dark")],
-        description: "UI Theme"
+        name: "Theme",
+        config_type: "select",
+        current_value: "dark",
+        options: [
+          ACP::Protocol::ConfigOptionValue.new("light", "Light"),
+          ACP::Protocol::ConfigOptionValue.new("dark", "Dark"),
+        ],
+        description: "UI Theme",
+        category: "mode"
       )
       json_str = opt.to_json
       restored = ACP::Protocol::ConfigOption.from_json(json_str)
       restored.id.should eq("theme")
+      restored.name.should eq("Theme")
       restored.label.should eq("Theme")
-      restored.config_type.should eq("enum")
-      restored.value.not_nil!.as_s.should eq("dark")
+      restored.config_type.should eq("select")
+      restored.current_value.should eq("dark")
+      restored.value.should eq("dark")
       restored.options.not_nil!.size.should eq(2)
       restored.description.should eq("UI Theme")
+      restored.category.should eq("mode")
     end
   end
 
@@ -629,9 +824,9 @@ describe ACP::Protocol do
           "input": {"path": "/tmp/file.txt", "content": "data"}
         },
         "options": [
-          {"id": "allow_once", "label": "Allow Once"},
-          {"id": "allow_always", "label": "Allow Always"},
-          {"id": "deny", "label": "Deny"}
+          {"optionId": "allow_once", "name": "Allow Once", "kind": "allow_once"},
+          {"optionId": "allow_always", "name": "Allow Always", "kind": "allow_always"},
+          {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
         ]
       })
       params = ACP::Protocol::RequestPermissionParams.from_json(json_str)
@@ -639,35 +834,80 @@ describe ACP::Protocol do
       params.tool_call.tool_call_id.should eq("tc-1")
       params.tool_call.tool_name.should eq("fs.write")
       params.options.size.should eq(3)
+      params.options[0].option_id.should eq("allow_once")
       params.options[0].id.should eq("allow_once")
+      params.options[0].kind.should eq("allow_once")
       params.options[1].label.should eq("Allow Always")
     end
   end
 
-  describe ACP::Protocol::ModeOption do
+  describe ACP::Protocol::RequestPermissionResult do
+    it "creates selected outcome" do
+      result = ACP::Protocol::RequestPermissionResult.selected("allow_once")
+      result.cancelled?.should eq(false)
+      result.selected_option_id.should eq("allow_once")
+    end
+
+    it "creates cancelled outcome" do
+      result = ACP::Protocol::RequestPermissionResult.cancelled
+      result.cancelled?.should eq(true)
+      result.selected_option_id.should be_nil
+    end
+  end
+
+  describe ACP::Protocol::SessionMode do
     it "round-trips through JSON" do
-      mode = ACP::Protocol::ModeOption.new("code", "Code Mode", "Write and edit code")
+      mode = ACP::Protocol::SessionMode.new("code", "Code Mode", "Write and edit code")
       json_str = mode.to_json
-      restored = ACP::Protocol::ModeOption.from_json(json_str)
+      restored = ACP::Protocol::SessionMode.from_json(json_str)
       restored.id.should eq("code")
+      restored.name.should eq("Code Mode")
       restored.label.should eq("Code Mode")
       restored.description.should eq("Write and edit code")
     end
   end
 
-  describe ACP::Protocol::PlanStep do
+  describe ACP::Protocol::SessionModeState do
     it "round-trips through JSON" do
-      step = ACP::Protocol::PlanStep.new("Implement feature", id: "s1", status: "in_progress")
-      json_str = step.to_json
-      restored = ACP::Protocol::PlanStep.from_json(json_str)
+      state = ACP::Protocol::SessionModeState.new(
+        current_mode_id: "code",
+        available_modes: [
+          ACP::Protocol::SessionMode.new("code", "Code"),
+          ACP::Protocol::SessionMode.new("chat", "Chat"),
+        ]
+      )
+      json_str = state.to_json
+      restored = ACP::Protocol::SessionModeState.from_json(json_str)
+      restored.current_mode_id.should eq("code")
+      restored.available_modes.size.should eq(2)
+    end
+  end
+
+  describe ACP::Protocol::PlanEntry do
+    it "round-trips through JSON" do
+      entry = ACP::Protocol::PlanEntry.new("Implement feature", priority: "high", status: "in_progress")
+      json_str = entry.to_json
+      restored = ACP::Protocol::PlanEntry.from_json(json_str)
+      restored.content.should eq("Implement feature")
       restored.title.should eq("Implement feature")
-      restored.id.should eq("s1")
+      restored.priority.should eq("high")
       restored.status.should eq("in_progress")
     end
 
     it "defaults status to pending" do
-      step = ACP::Protocol::PlanStep.new("Some step")
-      step.status.should eq("pending")
+      entry = ACP::Protocol::PlanEntry.new("Some step")
+      entry.status.should eq("pending")
+      entry.priority.should eq("medium")
+    end
+  end
+
+  describe ACP::Protocol::SessionSetConfigOptionParams do
+    it "serializes correctly" do
+      params = ACP::Protocol::SessionSetConfigOptionParams.new("sess-001", "mode", "code")
+      json = JSON.parse(params.to_json)
+      json["sessionId"].as_s.should eq("sess-001")
+      json["configId"].as_s.should eq("mode")
+      json["value"].as_s.should eq("code")
     end
   end
 
@@ -1217,7 +1457,7 @@ describe ACP::Client do
 
       result = client.session_new("/tmp/project")
       result.session_id.should eq("sess-test-001")
-      result.modes.not_nil!.size.should eq(2)
+      result.modes.not_nil!.available_modes.size.should eq(2)
 
       client.state.should eq(ACP::ClientState::SessionActive)
       client.session_id.should eq("sess-test-001")
@@ -1244,7 +1484,8 @@ describe ACP::Client do
         transport.inject_raw(build_session_new_response(sent["id"].as_i64))
       end
 
-      servers = [ACP::Protocol::McpServer.new("https://mcp.test")]
+      server = ACP::Protocol::McpServerStdio.new(name: "test", command: "/bin/test")
+      servers = [JSON.parse(server.to_json)]
       client.session_new("/my/project", servers)
 
       # Find the session/new request
@@ -1252,7 +1493,8 @@ describe ACP::Client do
       session_req.should_not be_nil
       params = session_req.not_nil!["params"]
       params["cwd"].as_s.should eq("/my/project")
-      params["mcpServers"].as_a.size.should eq(1)
+      json_servers = params["mcpServers"].as_a
+      json_servers.size.should eq(1)
 
       transport.close
     end
@@ -1283,11 +1525,21 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-loaded"))
+        transport.inject_raw(%({
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "modes": {
+              "currentModeId": "code",
+              "availableModes": [
+                {"id": "code", "name": "Code Mode"}
+              ]
+            }
+          }
+        }))
       end
 
-      result = client.session_load("sess-loaded")
-      result.session_id.should eq("sess-loaded")
+      result = client.session_load("sess-loaded", "/tmp")
       client.session_id.should eq("sess-loaded")
       client.state.should eq(ACP::ClientState::SessionActive)
 
@@ -1505,7 +1757,7 @@ describe ACP::Client do
         "params": {
           "sessionId": "sess-001",
           "update": {
-            "type": "agent_message_chunk",
+            "sessionUpdate": "agent_message_chunk",
             "content": "Hello from agent"
           }
         }
@@ -1571,7 +1823,7 @@ describe ACP::Client do
         "params": {
           "sessionId": "sess-001",
           "toolCall": {"toolCallId": "tc-1", "toolName": "fs.write"},
-          "options": [{"id": "allow_once", "label": "Allow Once"}]
+          "options": [{"optionId": "allow_once", "name": "Allow Once", "kind": "allow_once"}]
         }
       }))
 
@@ -1598,7 +1850,7 @@ describe ACP::Client do
         "params": {
           "sessionId": "sess-001",
           "toolCall": {"toolCallId": "tc-1"},
-          "options": [{"id": "allow_once", "label": "Allow"}]
+          "options": [{"optionId": "allow_once", "name": "Allow", "kind": "allow_once"}]
         }
       }))
 
@@ -1720,7 +1972,7 @@ describe ACP::Session do
       session = ACP::Session.create(client, cwd: "/my/project")
       session.id.should eq("sess-via-create")
       session.closed?.should eq(false)
-      session.modes.not_nil!.size.should eq(2)
+      session.modes.not_nil!.available_modes.size.should eq(2)
 
       transport.close
     end
@@ -1733,10 +1985,14 @@ describe ACP::Session do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-existing"))
+        transport.inject_raw(%({
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {}
+        }))
       end
 
-      session = ACP::Session.load(client, session_id: "sess-existing")
+      session = ACP::Session.load(client, session_id: "sess-existing", cwd: "/tmp")
       session.id.should eq("sess-existing")
       session.closed?.should eq(false)
 
@@ -1981,14 +2237,14 @@ describe ACP::PromptBuilder do
     builder = ACP::PromptBuilder.new
     builder
       .text("Look at this image:")
-      .image("https://example.com/img.png", "image/png")
+      .image("base64data==", "image/png")
       .file("/path/to/code.cr")
 
     blocks = builder.build
     blocks.size.should eq(3)
     blocks[0].should be_a(ACP::Protocol::TextContentBlock)
     blocks[1].should be_a(ACP::Protocol::ImageContentBlock)
-    blocks[2].should be_a(ACP::Protocol::ResourceContentBlock)
+    blocks[2].should be_a(ACP::Protocol::ResourceLinkContentBlock)
   end
 
   it "supports method chaining" do
@@ -2010,8 +2266,8 @@ describe ACP::PromptBuilder do
 
   it "builds audio blocks" do
     builder = ACP::PromptBuilder.new
-    builder.audio("https://example.com/sound.mp3")
-    builder.audio_data("base64audio==", "audio/mp3")
+    builder.audio("base64audio==", "audio/mp3")
+    builder.audio_data("base64audio2==", "audio/wav")
     blocks = builder.build
     blocks.size.should eq(2)
     blocks[0].should be_a(ACP::Protocol::AudioContentBlock)
@@ -2091,7 +2347,7 @@ describe "Full ACP flow simulation" do
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
-              "update": {"type": "agent_message_chunk", "content": "Hello, ", "messageId": "m1"}
+              "update": {"sessionUpdate": "agent_message_chunk", "content": "Hello, ", "messageId": "m1"}
             }
           }))
 
@@ -2102,7 +2358,7 @@ describe "Full ACP flow simulation" do
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
-              "update": {"type": "agent_message_chunk", "content": "world!", "messageId": "m1"}
+              "update": {"sessionUpdate": "agent_message_chunk", "content": "world!", "messageId": "m1"}
             }
           }))
 

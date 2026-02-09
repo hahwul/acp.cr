@@ -86,8 +86,8 @@ module ACP
     # The active session ID, if any.
     getter session_id : String?
 
-    # Modes available for the current session.
-    getter session_modes : Array(Protocol::ModeOption)?
+    # Mode state for the current session.
+    getter session_modes : Protocol::SessionModeState?
 
     # Config options available for the current session.
     getter session_config_options : Array(Protocol::ConfigOption)?
@@ -238,7 +238,7 @@ module ACP
     # Raises `InvalidStateError` if not initialized.
     def session_new(
       cwd : String,
-      mcp_servers : Array(Protocol::McpServer) = [] of Protocol::McpServer,
+      mcp_servers : Array(JSON::Any) = [] of JSON::Any,
     ) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, "session/new")
 
@@ -265,20 +265,21 @@ module ACP
     # Raises `JsonRpcError` if the agent can't load the session.
     def session_load(
       session_id : String,
-      cwd : String? = nil,
+      cwd : String,
+      mcp_servers : Array(JSON::Any) = [] of JSON::Any,
     ) : Protocol::SessionLoadResult
       ensure_state(ClientState::Initialized, "session/load")
 
-      params = Protocol::SessionLoadParams.new(session_id, cwd)
+      params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers)
       raw_result = send_request("session/load", params)
-      result = Protocol::SessionNewResult.from_json(raw_result.to_json)
+      result = Protocol::SessionLoadResult.from_json(raw_result.to_json)
 
-      @session_id = result.session_id
+      @session_id = session_id
       @session_modes = result.modes
       @session_config_options = result.config_options
       @state = ClientState::SessionActive
 
-      ClientLog.info { "Session loaded: #{result.session_id}" }
+      ClientLog.info { "Session loaded: #{session_id}" }
 
       result
     end
@@ -349,6 +350,33 @@ module ACP
       send_request("session/set_mode", params)
 
       ClientLog.info { "Mode set to: #{mode_id}" }
+    end
+
+    # Changes a configuration option for the active session.
+    #
+    # - `config_id` — the ID of the configuration option to change.
+    # - `value` — the new value to set.
+    # - `session_id` — optional session ID override.
+    #
+    # Returns the full set of configuration options and their current values.
+    # See: https://agentclientprotocol.com/protocol/session-config-options#from-the-client
+    def session_set_config_option(
+      config_id : String,
+      value : String,
+      session_id : String? = nil,
+    ) : Protocol::SessionSetConfigOptionResult
+      sid = session_id || @session_id
+      raise NoActiveSessionError.new unless sid
+
+      params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
+      raw_result = send_request("session/set_config_option", params)
+      result = Protocol::SessionSetConfigOptionResult.from_json(raw_result.to_json)
+
+      @session_config_options = result.config_options
+
+      ClientLog.info { "Config option '#{config_id}' set to '#{value}'" }
+
+      result
     end
 
     # Closes the client, stopping the dispatcher and closing the transport.
@@ -734,12 +762,15 @@ module ACP
     private def handle_session_update(params : JSON::Any?) : Nil
       return unless params
 
-      # Compatibility: Ensure 'type' is present for discriminator if only 'sessionUpdate' exists.
+      # Compatibility: Ensure 'sessionUpdate' is present for discriminator.
+      # The ACP spec uses "sessionUpdate" as the discriminator field.
+      # Some legacy agents may send "type" instead, so we normalize
+      # "type" → "sessionUpdate" for backward compatibility.
       raw_params = params.as_h.dup
       if update = raw_params["update"]?
         update_h = update.as_h.dup
-        if !update_h.has_key?("type") && update_h.has_key?("sessionUpdate")
-          update_h["type"] = update_h["sessionUpdate"]
+        if !update_h.has_key?("sessionUpdate") && update_h.has_key?("type")
+          update_h["sessionUpdate"] = update_h["type"]
           raw_params["update"] = JSON::Any.new(update_h)
         end
       end
