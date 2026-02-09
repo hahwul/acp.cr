@@ -245,7 +245,7 @@ module ACP
       property output : String
 
       # Whether the output was truncated due to byte limits (required).
-      property truncated : Bool
+      property? truncated : Bool
 
       # Exit status if the command has completed. Nil if still running.
       @[JSON::Field(key: "exitStatus")]

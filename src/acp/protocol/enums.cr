@@ -55,7 +55,6 @@ module ACP
         when "max_turn_requests" then MaxTurnRequests
         when "refusal"           then Refusal
         when "cancelled"         then Cancelled
-        else                          nil
         end
       end
 
@@ -140,7 +139,6 @@ module ACP
         when "fetch"       then Fetch
         when "switch_mode" then SwitchMode
         when "other"       then Other
-        else                    nil
         end
       end
 
@@ -195,7 +193,6 @@ module ACP
         when "in_progress" then InProgress
         when "completed"   then Completed
         when "failed"      then Failed
-        else                    nil
         end
       end
 
@@ -250,7 +247,6 @@ module ACP
         when "allow_always"  then AllowAlways
         when "reject_once"   then RejectOnce
         when "reject_always" then RejectAlways
-        else                      nil
         end
       end
 
@@ -300,7 +296,6 @@ module ACP
         when "high"   then High
         when "medium" then Medium
         when "low"    then Low
-        else               nil
         end
       end
 
@@ -350,7 +345,6 @@ module ACP
         when "pending"     then Pending
         when "in_progress" then InProgress
         when "completed"   then Completed
-        else                    nil
         end
       end
 
@@ -409,7 +403,6 @@ module ACP
         when "model"         then Model
         when "thought_level" then ThoughtLevel
         when "other"         then Other
-        else                      nil
         end
       end
 
@@ -453,7 +446,6 @@ module ACP
         case value
         when "assistant" then Assistant
         when "user"      then User
-        else                  nil
         end
       end
 

@@ -40,7 +40,7 @@ require "colorize"
 LOG_LEVEL   = ENV.fetch("ACP_LOG_LEVEL", "warn")
 SESSION_CWD = ENV.fetch("ACP_CWD", Dir.current)
 TIMEOUT_RAW = ENV.fetch("ACP_TIMEOUT", "30")
-TIMEOUT     = TIMEOUT_RAW.to_f64?.try { |t| t > 0 ? t : nil }
+TIMEOUT     = TIMEOUT_RAW.to_f64?.try { |timeout_val| timeout_val > 0 ? timeout_val : nil }
 
 # Configure logging based on the environment variable.
 log_severity = case LOG_LEVEL.downcase
@@ -105,6 +105,68 @@ module Term
     STDERR.puts "  💭 #{text}".colorize(:magenta)
   end
 
+  # Prints the end-of-message marker with optional stop reason.
+  def self.message_end(stop_reason : String?)
+    if reason = stop_reason
+      unless reason == "end_turn"
+        STDERR.puts ""
+        info("[Stop: #{reason}]")
+      end
+    end
+    STDERR.puts "" # Newline after message
+  end
+
+  # Prints a tool call chunk line.
+  def self.tool_chunk(tool_call_id : String, content : String?, kind : String?, active_tools : Hash(String, String))
+    if text = content
+      kind_label = kind ? " [#{kind}]" : ""
+      title = active_tools[tool_call_id]? || tool_call_id
+      STDERR.puts "  🔧 #{title}#{kind_label}: #{text}".colorize(:dark_gray)
+    end
+  end
+
+  # Registers a tool call start and prints its status line.
+  def self.tool_start(update : ACP::Protocol::ToolCallStartUpdate, active_tools : Hash(String, String))
+    active_tools[update.tool_call_id] = update.title || update.tool_name || update.tool_call_id
+    tool(update.tool_call_id, update.title || update.tool_name, update.status || "pending")
+  end
+
+  # Prints the tool call end status and any error.
+  def self.tool_end(tool_call_id : String, tool_status : String, tool_error : String?, active_tools : Hash(String, String))
+    title = active_tools.delete(tool_call_id) || tool_call_id
+    tool(tool_call_id, title, tool_status)
+    if err = tool_error
+      error("  Tool error: #{err}")
+    end
+  end
+
+  # Prints a plan with entries.
+  def self.plan(entries : Array(ACP::Protocol::PlanEntry))
+    STDERR.puts "  📋 Plan:".colorize(:cyan)
+    entries.each_with_index do |entry, idx|
+      status_icon = case entry.status
+                    when "completed"   then "✓"
+                    when "in_progress" then "▶"
+                    when "failed"      then "✗"
+                    else                    "○"
+                    end
+      STDERR.puts "     #{status_icon} #{idx + 1}. #{entry.content}".colorize(:white)
+    end
+  end
+
+  # Prints a status update line.
+  def self.status(update_status : String, message : String?)
+    STDERR.puts "  ⏳ #{update_status}#{message ? ": #{message}" : ""}".colorize(:dark_gray)
+  end
+
+  # Prints an agent error with optional detail.
+  def self.agent_error(message : String, detail : String?)
+    error("Agent error: #{message}")
+    if detail_text = detail
+      STDERR.puts "    #{detail_text}".colorize(:dark_gray)
+    end
+  end
+
   # Prints the prompt indicator and reads a line from the TTY.
   def self.prompt : String?
     STDERR.print "\n> ".colorize(:green).bold
@@ -161,8 +223,6 @@ module Term
     idx = input.to_i? || 0
     if idx >= 1 && idx <= options.size
       options[idx - 1][:id]
-    else
-      nil
     end
   end
 end
@@ -194,7 +254,7 @@ cancel_channel = Channel(Nil).new(1)
 client_ref : ACP::Client? = nil
 prompting = false
 
-Signal::INT.trap do
+Process.on_terminate do
   if prompting && (c = client_ref)
     # Send cancel signal to the main loop.
     begin
@@ -265,55 +325,26 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
     in_message = true
     current_message.clear
     STDERR.puts "" # Blank line before agent response
-
   when ACP::Protocol::AgentMessageChunkUpdate
     Term.agent(u.text)
     current_message.print(u.text)
   when ACP::Protocol::AgentMessageEndUpdate
     in_message = false
-    if reason = u.stop_reason
-      unless reason == "end_turn"
-        STDERR.puts ""
-        Term.info("[Stop: #{reason}]")
-      end
-    end
-    STDERR.puts "" # Newline after message
-
+    Term.message_end(u.stop_reason)
   when ACP::Protocol::ThoughtUpdate
     Term.thought(u.text)
   when ACP::Protocol::ToolCallStartUpdate
-    active_tools[u.tool_call_id] = u.title || u.tool_name || u.tool_call_id
-    Term.tool(u.tool_call_id, u.title || u.tool_name, u.status || "pending")
+    Term.tool_start(u, active_tools)
   when ACP::Protocol::ToolCallChunkUpdate
-    if content = u.content
-      kind_label = u.kind ? " [#{u.kind}]" : ""
-      title = active_tools[u.tool_call_id]? || u.tool_call_id
-      STDERR.puts "  🔧 #{title}#{kind_label}: #{content}".colorize(:dark_gray)
-    end
+    Term.tool_chunk(u.tool_call_id, u.content, u.kind, active_tools)
   when ACP::Protocol::ToolCallEndUpdate
-    title = active_tools.delete(u.tool_call_id) || u.tool_call_id
-    Term.tool(u.tool_call_id, title, u.status)
-    if err = u.error
-      Term.error("  Tool error: #{err}")
-    end
+    Term.tool_end(u.tool_call_id, u.status, u.error, active_tools)
   when ACP::Protocol::PlanUpdate
-    STDERR.puts "  📋 Plan:".colorize(:cyan)
-    u.entries.each_with_index do |entry, i|
-      status_icon = case entry.status
-                    when "completed"   then "✓"
-                    when "in_progress" then "▶"
-                    when "failed"      then "✗"
-                    else                    "○"
-                    end
-      STDERR.puts "     #{status_icon} #{i + 1}. #{entry.content}".colorize(:white)
-    end
+    Term.plan(u.entries)
   when ACP::Protocol::StatusUpdate
-    STDERR.puts "  ⏳ #{u.status}#{u.message ? ": #{u.message}" : ""}".colorize(:dark_gray)
+    Term.status(u.status, u.message)
   when ACP::Protocol::ErrorUpdate
-    Term.error("Agent error: #{u.message}")
-    if detail = u.detail
-      STDERR.puts "    #{detail}".colorize(:dark_gray)
-    end
+    Term.agent_error(u.message, u.detail)
   end
 
   nil
@@ -382,18 +413,18 @@ begin
 
   if caps = init_result.agent_capabilities
     features = [] of String
-    features << "load_session" if caps.load_session
+    features << "load_session" if caps.load_session?
     if pc = caps.prompt_capabilities
-      features << "image" if pc.image
-      features << "audio" if pc.audio
+      features << "image" if pc.image?
+      features << "audio" if pc.audio?
       features << "file" if pc.file
     end
     Term.info("Agent capabilities: #{features.empty? ? "basic" : features.join(", ")}")
   end
 rescue ex : Exception
-  msg = if (vm_ex = ex.as?(ACP::VersionMismatchError))
+  msg = if vm_ex = ex.as?(ACP::VersionMismatchError)
           vm_ex.message || "Version mismatch"
-        elsif (rpc_ex = ex.as?(ACP::JsonRpcError))
+        elsif rpc_ex = ex.as?(ACP::JsonRpcError)
           "Initialize failed: [#{rpc_ex.code}] #{rpc_ex.message}"
         else
           "Initialize failed: #{ex.message}"
@@ -415,9 +446,9 @@ if (ir = init_result) && (methods = ir.auth_methods)
     method_id = if methods.size == 1
                   methods[0].as_h["id"].as_s
                 else
-                  options = methods.map do |m|
-                    h = m.as_h
-                    {id: h["id"].as_s, label: h["name"]?.try(&.as_s) || h["id"].as_s}
+                  options = methods.map do |auth_method|
+                    auth_hash = auth_method.as_h
+                    {id: auth_hash["id"].as_s, label: auth_hash["name"]?.try(&.as_s) || auth_hash["id"].as_s}
                   end
                   Term.pick("Select authentication method:", options)
                 end
@@ -447,15 +478,17 @@ session : ACP::Session? = nil
 
 begin
   session = ACP::Session.create(client, cwd: SESSION_CWD)
-  Term.success("Session created: #{session.not_nil!.id}")
+  if s = session
+    Term.success("Session created: #{s.id}")
 
-  if modes = session.not_nil!.modes
-    if modes.available_modes.size > 0
-      Term.info("Available modes: #{modes.available_modes.map(&.id).join(", ")}")
+    if modes = s.modes
+      if modes.available_modes.size > 0
+        Term.info("Available modes: #{modes.available_modes.map(&.id).join(", ")}")
+      end
     end
   end
 rescue ex : Exception
-  msg = if (rpc_ex = ex.as?(ACP::JsonRpcError))
+  msg = if rpc_ex = ex.as?(ACP::JsonRpcError)
           "Failed to create session: [#{rpc_ex.code}] #{rpc_ex.message}"
         else
           "Failed to create session: #{ex.message}"
@@ -558,7 +591,7 @@ loop do
 
   # Spawn a fiber to listen for cancel signals during the prompt.
   cancel_sent = false
-  cancel_fiber = spawn do
+  _cancel_fiber = spawn do
     loop do
       begin
         cancel_channel.receive
@@ -601,7 +634,7 @@ loop do
       Term.info("[Request cancelled]")
     elsif ex.is_a?(ACP::RequestTimeoutError)
       Term.warn("[Request timed out]")
-    elsif (rpc_ex = ex.as?(ACP::JsonRpcError))
+    elsif rpc_ex = ex.as?(ACP::JsonRpcError)
       Term.error("Agent error [#{rpc_ex.code}]: #{rpc_ex.message}")
     else
       Term.error("Error: #{ex.message}")

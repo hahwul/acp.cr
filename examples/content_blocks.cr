@@ -28,18 +28,30 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
   when ACP::Protocol::AgentMessageChunkUpdate
     print u.text
   when ACP::Protocol::AgentThoughtChunkUpdate
-    puts "
-[Thought]".colorize(:magenta)
+    puts <<-MSG
+
+      [Thought]
+      MSG
+      .colorize(:magenta)
     puts u.text.colorize(:dark_gray)
   when ACP::Protocol::ToolCallUpdate
-    puts "
-[Tool Call: #{u.title}] Status: #{u.status}".colorize(:cyan)
+    puts <<-MSG
+
+      [Tool Call: #{u.title}] Status: #{u.status}
+      MSG
+      .colorize(:cyan)
   when ACP::Protocol::ToolCallStatusUpdate
-    puts "
-[Tool Update: #{u.tool_call_id}] Status: #{u.status}".colorize(:green)
+    puts <<-MSG
+
+      [Tool Update: #{u.tool_call_id}] Status: #{u.status}
+      MSG
+      .colorize(:green)
   when ACP::Protocol::StatusUpdate
-    puts "
-[Status: #{u.status}] #{u.message}".colorize(:yellow)
+    puts <<-MSG
+
+      [Status: #{u.status}] #{u.message}
+      MSG
+      .colorize(:yellow)
   end
   nil
 }
@@ -60,8 +72,10 @@ begin
   puts "Sending rich prompt with file attachment..."
   result = session.prompt(prompt)
 
-  puts "
-Final Stop Reason: #{result.stop_reason}"
+  puts <<-MSG
+
+    Final Stop Reason: #{result.stop_reason}
+    MSG
 ensure
   client.close
 end

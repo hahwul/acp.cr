@@ -252,10 +252,10 @@ module ACP
 
       # Validate protocol version compatibility.
       if result.protocol_version != ACP::PROTOCOL_VERSION
-        ClientLog.error {
+        ClientLog.error do
           "Protocol version mismatch: client=#{ACP::PROTOCOL_VERSION}, " \
           "agent=#{result.protocol_version}"
-        }
+        end
         close
         raise VersionMismatchError.new(ACP::PROTOCOL_VERSION, result.protocol_version)
       end
@@ -267,11 +267,11 @@ module ACP
       @auth_methods = result.auth_methods
       @state = ClientState::Initialized
 
-      ClientLog.info {
+      ClientLog.info do
         agent_name = result.agent_info.try(&.name) || "unknown"
         agent_ver = result.agent_info.try(&.version) || "?"
         "Initialized with agent: #{agent_name} v#{agent_ver}"
-      }
+      end
 
       result
     end
@@ -453,11 +453,11 @@ module ACP
 
       # Cancel all pending requests.
       @pending_mutex.synchronize do
-        @pending.each do |_id, ch|
+        @pending.each do |_id, channel|
           begin
             # Send a nil-like error response to unblock waiters.
             error_any = JSON.parse(%({"error": "Client closed"}))
-            ch.send(error_any)
+            channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
           end
@@ -503,7 +503,7 @@ module ACP
     def send_request(
       method : String,
       params : JSON::Serializable,
-      timeout : Float64? | Nil = @request_timeout,
+      timeout : Float64? = @request_timeout,
     ) : JSON::Any
       raise ConnectionClosedError.new if closed?
 
@@ -678,10 +678,10 @@ module ACP
 
       # Notify pending requests that the connection is lost.
       @pending_mutex.synchronize do
-        @pending.each do |_id, ch|
+        @pending.each do |_id, channel|
           begin
             error_any = JSON.parse(%({"error": "Connection lost"}))
-            ch.send(error_any)
+            channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
           end
@@ -774,23 +774,32 @@ module ACP
       when Protocol::ClientMethod::TERMINAL_KILL
         handle_typed_client_method(id, params, @on_kill_terminal, Protocol::KillTerminalParams, method_name)
       else
-        # Delegate to the generic agent request handler.
-        if handler = @on_agent_request
-          begin
-            result = handler.call(method_name, params || JSON::Any.new(nil))
-            respond_to_agent(id, result)
-          rescue ex
-            ClientLog.error { "Error in agent request handler: #{ex.message}" }
-            respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
-          end
-        else
-          # No handler registered — respond with method not found.
-          respond_to_agent_error(
-            id,
-            JsonRpcError::METHOD_NOT_FOUND,
-            "Client does not handle method: #{method_name}"
-          )
+        handle_unknown_agent_request(id, method_name, params)
+      end
+    end
+
+    # Delegates an unrecognized agent request to the generic handler,
+    # or responds with a method-not-found error if no handler is set.
+    private def handle_unknown_agent_request(
+      id : Protocol::RequestId,
+      method_name : String,
+      params : JSON::Any?,
+    ) : Nil
+      if handler = @on_agent_request
+        begin
+          result = handler.call(method_name, params || JSON::Any.new(nil))
+          respond_to_agent(id, result)
+        rescue ex
+          ClientLog.error { "Error in agent request handler: #{ex.message}" }
+          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
         end
+      else
+        # No handler registered — respond with method not found.
+        respond_to_agent_error(
+          id,
+          JsonRpcError::METHOD_NOT_FOUND,
+          "Client does not handle method: #{method_name}"
+        )
       end
     end
 

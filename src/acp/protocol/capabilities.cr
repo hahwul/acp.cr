@@ -21,12 +21,12 @@ module ACP
       # Whether the client can read text files on behalf of the agent.
       # Enables the `fs/read_text_file` method.
       @[JSON::Field(key: "readTextFile")]
-      property read_text_file : Bool = false
+      property? read_text_file : Bool = false
 
       # Whether the client can write text files on behalf of the agent.
       # Enables the `fs/write_text_file` method.
       @[JSON::Field(key: "writeTextFile")]
-      property write_text_file : Bool = false
+      property? write_text_file : Bool = false
 
       def initialize(
         @read_text_file : Bool = false,
@@ -47,7 +47,7 @@ module ACP
       # Whether the client supports all `terminal/*` methods.
       # Serialized as a plain bool in the protocol.
       @[JSON::Field(key: "terminal")]
-      property terminal : Bool = false
+      property? terminal : Bool = false
 
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
@@ -71,15 +71,15 @@ module ACP
       include JSON::Serializable
 
       # Whether the agent accepts image content blocks.
-      property image : Bool = false
+      property? image : Bool = false
 
       # Whether the agent accepts audio content blocks.
-      property audio : Bool = false
+      property? audio : Bool = false
 
       # Whether the agent accepts embedded resource content blocks
       # (ContentBlock::Resource) in session/prompt requests.
       @[JSON::Field(key: "embeddedContext")]
-      property embedded_context : Bool = false
+      property? embedded_context : Bool = false
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -105,11 +105,11 @@ module ACP
       include JSON::Serializable
 
       # Whether the agent supports connecting to MCP servers over HTTP.
-      property http : Bool = false
+      property? http : Bool = false
 
       # Whether the agent supports connecting to MCP servers over SSE.
       # Note: SSE transport has been deprecated by the MCP spec.
-      property sse : Bool = false
+      property? sse : Bool = false
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -148,7 +148,7 @@ module ACP
 
       # Whether the agent supports loading previous sessions via `session/load`.
       @[JSON::Field(key: "loadSession")]
-      property load_session : Bool = false
+      property? load_session : Bool = false
 
       # Describes which prompt content types the agent can accept.
       @[JSON::Field(key: "promptCapabilities")]

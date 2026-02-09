@@ -112,7 +112,7 @@ module ACP
     # message is available. Returns nil if the transport is closed
     # or the reader encountered EOF.
     def receive : JSON::Any?
-      return nil if @closed
+      return if @closed
 
       begin
         msg = @incoming.receive
@@ -130,7 +130,7 @@ module ACP
     # Receives with a timeout. Returns nil if no message arrives
     # within the given duration.
     def receive(timeout : Time::Span) : JSON::Any?
-      return nil if @closed
+      return if @closed
 
       select
       when msg = @incoming.receive

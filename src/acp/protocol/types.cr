@@ -80,7 +80,7 @@ module ACP
     # Handles both integer and string IDs.
     def self.extract_id(msg : JSON::Any) : RequestId?
       raw = msg["id"]?
-      return nil unless raw
+      return unless raw
       case v = raw.raw
       when Int64  then v
       when String then v
@@ -224,18 +224,18 @@ module ACP
 
       # Convenience constructor that accepts typed McpServer values.
       def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil)
-        json_servers = mcp_servers.map { |s|
-          case s
+        json_servers = mcp_servers.map do |server|
+          case server
           when McpServerStdio
-            JSON.parse(s.to_json)
+            JSON.parse(server.to_json)
           when McpServerHttp
-            JSON.parse(s.to_json)
+            JSON.parse(server.to_json)
           when McpServerSse
-            JSON.parse(s.to_json)
+            JSON.parse(server.to_json)
           else
             JSON::Any.new(nil)
           end
-        }
+        end
         inst = allocate
         inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta)
         inst
@@ -826,10 +826,8 @@ module ACP
       # Returns the selected option ID, or nil if cancelled.
       def selected_option_id : String?
         if h = @outcome.as_h?
-          return nil if h["outcome"]?.try(&.as_s?) == "cancelled"
+          return if h["outcome"]?.try(&.as_s?) == "cancelled"
           h["optionId"]?.try(&.as_s?)
-        else
-          nil
         end
       end
 

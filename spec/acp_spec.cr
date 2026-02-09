@@ -29,7 +29,7 @@ class TestTransport < ACP::Transport
   end
 
   def receive : JSON::Any?
-    return nil if @closed
+    return if @closed
     begin
       @incoming.receive
     rescue Channel::ClosedError
@@ -68,69 +68,77 @@ end
 
 # Helper to build a standard initialize response for tests.
 def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
-  %({
-    "jsonrpc": "2.0",
-    "id": #{id},
-    "result": {
-      "protocolVersion": #{protocol_version},
-      "agentCapabilities": {
-        "loadSession": true,
-        "promptCapabilities": {
-          "image": true,
-          "audio": false,
-          "embeddedContext": true
+  <<-JSON
+    {
+      "jsonrpc": "2.0",
+      "id": #{id},
+      "result": {
+        "protocolVersion": #{protocol_version},
+        "agentCapabilities": {
+          "loadSession": true,
+          "promptCapabilities": {
+            "image": true,
+            "audio": false,
+            "embeddedContext": true
+          },
+          "mcpCapabilities": {
+            "http": false,
+            "sse": false
+          }
         },
-        "mcpCapabilities": {
-          "http": false,
-          "sse": false
+        "authMethods": [],
+        "agentInfo": {
+          "name": "test-agent",
+          "version": "1.0.0"
         }
-      },
-      "authMethods": [],
-      "agentInfo": {
-        "name": "test-agent",
-        "version": "1.0.0"
       }
     }
-  })
+    JSON
 end
 
 def build_session_new_response(id : Int64, session_id : String = "sess-001") : String
-  %({
-    "jsonrpc": "2.0",
-    "id": #{id},
-    "result": {
-      "sessionId": "#{session_id}",
-      "modes": {
-        "currentModeId": "code",
-        "availableModes": [
-          {"id": "code", "name": "Code Mode", "description": "Write code"},
-          {"id": "chat", "name": "Chat Mode", "description": "Just chat"}
-        ]
-      },
-      "configOptions": []
+  <<-JSON
+    {
+      "jsonrpc": "2.0",
+      "id": #{id},
+      "result": {
+        "sessionId": "#{session_id}",
+        "modes": {
+          "currentModeId": "code",
+          "availableModes": [
+            {"id": "code", "name": "Code Mode", "description": "Write code"},
+            {"id": "chat", "name": "Chat Mode", "description": "Just chat"}
+          ]
+        },
+        "configOptions": []
+      }
     }
-  })
+    JSON
 end
 
 def build_prompt_response(id : Int64, stop_reason : String = "end_turn") : String
-  %({
-    "jsonrpc": "2.0",
-    "id": #{id},
-    "result": {
-      "stopReason": "#{stop_reason}"
+  <<-JSON
+    {
+      "jsonrpc": "2.0",
+      "id": #{id},
+      "result": {
+        "stopReason": "#{stop_reason}"
+      }
     }
-  })
+    JSON
 end
 
 def build_error_response(id : Int64, code : Int32 = -32600, message : String = "Invalid Request") : String
-  %({
-    "jsonrpc": "2.0",
-    "id": #{id},
-    "error": {
-      "code": #{code},
-      "message": "#{message}"
+  <<-JSON
+    {
+      "jsonrpc": "2.0",
+      "id": #{id},
+      "error": {
+        "code": #{code},
+        "message": "#{message}"
+      }
     }
-  })
+    JSON
 end
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -147,21 +155,21 @@ describe ACP::Protocol do
         write_text_file: false,
       )
       json = JSON.parse(fs.to_json)
-      json["readTextFile"].as_bool.should eq(true)
-      json["writeTextFile"].as_bool.should eq(false)
+      json["readTextFile"].as_bool.should be_true
+      json["writeTextFile"].as_bool.should be_false
     end
 
     it "deserializes from JSON" do
       json_str = %({"readTextFile": true, "writeTextFile": true})
       fs = ACP::Protocol::FsCapabilities.from_json(json_str)
-      fs.read_text_file.should eq(true)
-      fs.write_text_file.should eq(true)
+      fs.read_text_file?.should be_true
+      fs.write_text_file?.should be_true
     end
 
     it "defaults all capabilities to false" do
       fs = ACP::Protocol::FsCapabilities.new
-      fs.read_text_file.should eq(false)
-      fs.write_text_file.should eq(false)
+      fs.read_text_file?.should be_false
+      fs.write_text_file?.should be_false
     end
   end
 
@@ -172,14 +180,14 @@ describe ACP::Protocol do
         terminal: true
       )
       json = JSON.parse(caps.to_json)
-      json["terminal"].as_bool.should eq(true)
-      json["fs"]["readTextFile"].as_bool.should eq(true)
+      json["terminal"].as_bool.should be_true
+      json["fs"]["readTextFile"].as_bool.should be_true
     end
 
     it "serializes with nil fs" do
       caps = ACP::Protocol::ClientCapabilities.new(terminal: false)
       json = JSON.parse(caps.to_json)
-      json["terminal"].as_bool.should eq(false)
+      json["terminal"].as_bool.should be_false
       json["fs"]?.try(&.raw).should be_nil
     end
   end
@@ -188,24 +196,26 @@ describe ACP::Protocol do
     it "deserializes from JSON" do
       json_str = %({"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true}})
       caps = ACP::Protocol::AgentCapabilities.from_json(json_str)
-      caps.load_session.should eq(true)
+      caps.load_session?.should be_true
       caps.prompt_capabilities.should_not be_nil
-      caps.prompt_capabilities.not_nil!.image.should eq(true)
-      caps.prompt_capabilities.not_nil!.audio.should eq(false)
-      caps.prompt_capabilities.not_nil!.embedded_context.should eq(true)
+      pc = caps.prompt_capabilities.as(ACP::Protocol::PromptCapabilities)
+      pc.image?.should be_true
+      pc.audio?.should be_false
+      pc.embedded_context?.should be_true
     end
 
     it "deserializes with mcpCapabilities" do
       json_str = %({"loadSession": false, "mcpCapabilities": {"http": true, "sse": false}})
       caps = ACP::Protocol::AgentCapabilities.from_json(json_str)
       caps.mcp_capabilities.should_not be_nil
-      caps.mcp_capabilities.not_nil!.http.should eq(true)
-      caps.mcp_capabilities.not_nil!.sse.should eq(false)
+      mc = caps.mcp_capabilities.as(ACP::Protocol::McpCapabilities)
+      mc.http?.should be_true
+      mc.sse?.should be_false
     end
 
     it "defaults to no capabilities" do
       caps = ACP::Protocol::AgentCapabilities.new
-      caps.load_session.should eq(false)
+      caps.load_session?.should be_false
       caps.prompt_capabilities.should be_nil
       caps.mcp_capabilities.should be_nil
     end
@@ -216,14 +226,14 @@ describe ACP::Protocol do
       original = ACP::Protocol::PromptCapabilities.new(image: true, audio: true, embedded_context: false)
       json_str = original.to_json
       restored = ACP::Protocol::PromptCapabilities.from_json(json_str)
-      restored.image.should eq(true)
-      restored.audio.should eq(true)
-      restored.embedded_context.should eq(false)
+      restored.image?.should be_true
+      restored.audio?.should be_true
+      restored.embedded_context?.should be_false
     end
 
     it "provides backward-compatible file alias" do
       caps = ACP::Protocol::PromptCapabilities.new(embedded_context: true)
-      caps.file.should eq(true)
+      caps.file.should be_true
     end
   end
 
@@ -630,7 +640,7 @@ describe ACP::Protocol do
       )
       json = JSON.parse(params.to_json)
       json["protocolVersion"].as_i.should eq(1)
-      json["clientCapabilities"]["terminal"].as_bool.should eq(true)
+      json["clientCapabilities"]["terminal"].as_bool.should be_true
       json["clientInfo"]["name"].as_s.should eq("test")
       json["clientInfo"]["version"].as_s.should eq("0.1")
     end
@@ -638,18 +648,20 @@ describe ACP::Protocol do
 
   describe ACP::Protocol::InitializeResult do
     it "deserializes from JSON" do
-      json_str = %({
-        "protocolVersion": 1,
-        "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false}},
-        "authMethods": [{"id": "oauth"}],
-        "agentInfo": {"name": "agent", "version": "1.0"}
-      })
+      json_str = <<-JSON
+        {
+          "protocolVersion": 1,
+          "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": false}},
+          "authMethods": [{"id": "oauth"}],
+          "agentInfo": {"name": "agent", "version": "1.0"}
+        }
+        JSON
       result = ACP::Protocol::InitializeResult.from_json(json_str)
       result.protocol_version.should eq(1)
-      result.agent_capabilities.load_session.should eq(true)
-      result.agent_capabilities.prompt_capabilities.not_nil!.image.should eq(true)
-      result.auth_methods.not_nil![0]["id"].as_s.should eq("oauth")
-      result.agent_info.not_nil!.name.should eq("agent")
+      result.agent_capabilities.load_session?.should be_true
+      result.agent_capabilities.prompt_capabilities.as(ACP::Protocol::PromptCapabilities).image?.should be_true
+      result.auth_methods.as(Array(JSON::Any))[0]["id"].as_s.should eq("oauth")
+      result.agent_info.as(ACP::Protocol::AgentInfo).name.should eq("agent")
     end
 
     it "deserializes with empty auth methods" do
@@ -693,20 +705,23 @@ describe ACP::Protocol do
 
   describe ACP::Protocol::SessionNewResult do
     it "deserializes session ID with modes" do
-      json_str = %({
-        "sessionId": "sess-abc",
-        "modes": {
-          "currentModeId": "code",
-          "availableModes": [{"id": "code", "name": "Code"}]
-        },
-        "configOptions": [{"id": "opt1", "name": "Option 1", "type": "select", "currentValue": "v1"}]
-      })
+      json_str = <<-JSON
+        {
+          "sessionId": "sess-123",
+          "modes": {
+            "currentModeId": "code",
+            "availableModes": [{"id": "code", "name": "Code"}]
+          },
+          "configOptions": [{"id": "model", "name": "Model", "configType": "select", "currentValue": "gpt4"}]
+        }
+        JSON
       result = ACP::Protocol::SessionNewResult.from_json(json_str)
-      result.session_id.should eq("sess-abc")
-      result.modes.not_nil!.available_modes.size.should eq(1)
-      result.modes.not_nil!.available_modes[0].id.should eq("code")
-      result.modes.not_nil!.current_mode_id.should eq("code")
-      result.config_options.not_nil!.size.should eq(1)
+      result.session_id.should eq("sess-123")
+      modes = result.modes.as(ACP::Protocol::SessionModeState)
+      modes.available_modes.size.should eq(1)
+      modes.available_modes[0].id.should eq("code")
+      modes.current_mode_id.should eq("code")
+      result.config_options.as(Array(ACP::Protocol::ConfigOption)).size.should eq(1)
     end
 
     it "deserializes minimal response" do
@@ -807,7 +822,7 @@ describe ACP::Protocol do
       restored.config_type.should eq("select")
       restored.current_value.should eq("dark")
       restored.value.should eq("dark")
-      restored.options.not_nil!.size.should eq(2)
+      restored.options.as(Array(ACP::Protocol::ConfigOptionValue)).size.should eq(2)
       restored.description.should eq("UI Theme")
       restored.category.should eq("mode")
     end
@@ -815,7 +830,8 @@ describe ACP::Protocol do
 
   describe ACP::Protocol::RequestPermissionParams do
     it "deserializes permission request" do
-      json_str = %({
+      json_str = <<-JSON
+        {
         "sessionId": "sess-001",
         "toolCall": {
           "toolCallId": "tc-1",
@@ -828,7 +844,8 @@ describe ACP::Protocol do
           {"optionId": "allow_always", "name": "Allow Always", "kind": "allow_always"},
           {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
         ]
-      })
+        }
+        JSON
       params = ACP::Protocol::RequestPermissionParams.from_json(json_str)
       params.session_id.should eq("sess-001")
       params.tool_call.tool_call_id.should eq("tc-1")
@@ -844,13 +861,13 @@ describe ACP::Protocol do
   describe ACP::Protocol::RequestPermissionResult do
     it "creates selected outcome" do
       result = ACP::Protocol::RequestPermissionResult.selected("allow_once")
-      result.cancelled?.should eq(false)
+      result.cancelled?.should be_false
       result.selected_option_id.should eq("allow_once")
     end
 
     it "creates cancelled outcome" do
       result = ACP::Protocol::RequestPermissionResult.cancelled
-      result.cancelled?.should eq(true)
+      result.cancelled?.should be_true
       result.selected_option_id.should be_nil
     end
   end
@@ -977,7 +994,7 @@ describe ACP::Protocol do
       msg = ACP::Protocol.build_notification("session/cancel", params)
       msg["jsonrpc"].should eq(JSON::Any.new("2.0"))
       msg["method"].should eq(JSON::Any.new("session/cancel"))
-      msg.has_key?("id").should eq(false)
+      msg.has_key?("id").should be_false
     end
   end
 
@@ -1032,21 +1049,21 @@ describe ACP::VersionMismatchError do
     error = ACP::VersionMismatchError.new(1_u16, 2_u16)
     error.client_version.should eq(1_u16)
     error.agent_version.should eq(2_u16)
-    error.message.not_nil!.should contain("1")
-    error.message.not_nil!.should contain("2")
+    error.message.as(String).should contain("1")
+    error.message.as(String).should contain("2")
   end
 
   it "handles nil agent version" do
     error = ACP::VersionMismatchError.new(1_u16)
     error.agent_version.should be_nil
-    error.message.not_nil!.should contain("unknown")
+    error.message.as(String).should contain("unknown")
   end
 end
 
 describe ACP::InvalidStateError do
   it "has a default message" do
     error = ACP::InvalidStateError.new
-    error.message.not_nil!.should contain("Invalid client state")
+    error.message.as(String).should contain("Invalid client state")
   end
 end
 
@@ -1060,19 +1077,19 @@ describe ACP::JsonRpcError do
   end
 
   it "identifies standard error types" do
-    ACP::JsonRpcError.new(-32700, "Parse error").parse_error?.should eq(true)
-    ACP::JsonRpcError.new(-32600, "Invalid Request").invalid_request?.should eq(true)
-    ACP::JsonRpcError.new(-32601, "Method not found").method_not_found?.should eq(true)
-    ACP::JsonRpcError.new(-32602, "Invalid params").invalid_params?.should eq(true)
-    ACP::JsonRpcError.new(-32603, "Internal error").internal_error?.should eq(true)
+    ACP::JsonRpcError.new(-32700, "Parse error").parse_error?.should be_true
+    ACP::JsonRpcError.new(-32600, "Invalid Request").invalid_request?.should be_true
+    ACP::JsonRpcError.new(-32601, "Method not found").method_not_found?.should be_true
+    ACP::JsonRpcError.new(-32602, "Invalid params").invalid_params?.should be_true
+    ACP::JsonRpcError.new(-32603, "Internal error").internal_error?.should be_true
   end
 
   it "identifies server errors" do
-    ACP::JsonRpcError.new(-32000, "Server error").server_error?.should eq(true)
-    ACP::JsonRpcError.new(-32050, "Server error").server_error?.should eq(true)
-    ACP::JsonRpcError.new(-32099, "Server error").server_error?.should eq(true)
-    ACP::JsonRpcError.new(-32100, "Not server error").server_error?.should eq(false)
-    ACP::JsonRpcError.new(-31999, "Not server error").server_error?.should eq(false)
+    ACP::JsonRpcError.new(-32000, "Server error").server_error?.should be_true
+    ACP::JsonRpcError.new(-32050, "Server error").server_error?.should be_true
+    ACP::JsonRpcError.new(-32099, "Server error").server_error?.should be_true
+    ACP::JsonRpcError.new(-32100, "Not server error").server_error?.should be_false
+    ACP::JsonRpcError.new(-31999, "Not server error").server_error?.should be_false
   end
 
   it "creates from JSON::Any" do
@@ -1080,7 +1097,7 @@ describe ACP::JsonRpcError do
     error = ACP::JsonRpcError.from_json_any(obj)
     error.code.should eq(-32601)
     error.message.should eq("Method not found")
-    error.data.not_nil!["method"].as_s.should eq("foo")
+    error.data.as(JSON::Any)["method"].as_s.should eq("foo")
   end
 
   it "handles malformed JSON::Any gracefully" do
@@ -1102,14 +1119,14 @@ describe ACP::SessionNotFoundError do
   it "includes session ID" do
     error = ACP::SessionNotFoundError.new("sess-123")
     error.session_id.should eq("sess-123")
-    error.message.not_nil!.should contain("sess-123")
+    error.message.as(String).should contain("sess-123")
   end
 end
 
 describe ACP::NoActiveSessionError do
   it "has a default message" do
     error = ACP::NoActiveSessionError.new
-    error.message.not_nil!.should contain("No active session")
+    error.message.as(String).should contain("No active session")
   end
 end
 
@@ -1117,8 +1134,8 @@ describe ACP::RequestTimeoutError do
   it "includes request ID and timeout" do
     error = ACP::RequestTimeoutError.new(42_i64, 30.0)
     error.request_id.should eq(42_i64)
-    error.message.not_nil!.should contain("42")
-    error.message.not_nil!.should contain("30.0")
+    error.message.as(String).should contain("42")
+    error.message.as(String).should contain("30.0")
   end
 end
 
@@ -1126,7 +1143,7 @@ describe ACP::RequestCancelledError do
   it "includes request ID" do
     error = ACP::RequestCancelledError.new(7_i64)
     error.request_id.should eq(7_i64)
-    error.message.not_nil!.should contain("7")
+    error.message.as(String).should contain("7")
   end
 end
 
@@ -1157,9 +1174,9 @@ describe ACP::StdioTransport do
     reader_io = IO::Memory.new
     writer_io = IO::Memory.new
     transport = ACP::StdioTransport.new(reader_io, writer_io)
-    transport.closed?.should eq(false)
+    transport.closed?.should be_false
     transport.close
-    transport.closed?.should eq(true)
+    transport.closed?.should be_true
   end
 
   it "raises ConnectionClosedError when sending after close" do
@@ -1190,7 +1207,7 @@ describe ACP::StdioTransport do
     # Receive should return the parsed message
     msg = transport.receive
     msg.should_not be_nil
-    msg.not_nil!["method"].as_s.should eq("test")
+    msg.as(JSON::Any)["method"].as_s.should eq("test")
 
     reader_w.close
     transport.close
@@ -1225,7 +1242,7 @@ describe ACP::StdioTransport do
     # The transport should skip the bad line and deliver the valid one
     msg = transport.receive
     msg.should_not be_nil
-    msg.not_nil!["method"].as_s.should eq("valid")
+    msg.as(JSON::Any)["method"].as_s.should eq("valid")
 
     reader_w.close
     transport.close
@@ -1246,9 +1263,9 @@ describe ACP::StdioTransport do
     msg2 = transport.receive
     msg3 = transport.receive
 
-    msg1.not_nil!["id"].as_i.should eq(1)
-    msg2.not_nil!["id"].as_i.should eq(2)
-    msg3.not_nil!["id"].as_i.should eq(3)
+    msg1.as(JSON::Any)["id"].as_i.should eq(1)
+    msg2.as(JSON::Any)["id"].as_i.should eq(2)
+    msg3.as(JSON::Any)["id"].as_i.should eq(3)
 
     reader_w.close
     transport.close
@@ -1262,7 +1279,7 @@ describe TestTransport do
     msg["test"] = JSON::Any.new("hello")
     t.send(msg)
     t.sent_messages.size.should eq(1)
-    t.last_sent.not_nil!["test"].as_s.should eq("hello")
+    t.last_sent.as(JSON::Any)["test"].as_s.should eq("hello")
   end
 
   it "delivers injected messages" do
@@ -1270,7 +1287,7 @@ describe TestTransport do
     t.inject_raw(%({"method": "test"}))
     msg = t.receive
     msg.should_not be_nil
-    msg.not_nil!["method"].as_s.should eq("test")
+    msg.as(JSON::Any)["method"].as_s.should eq("test")
     t.close
   end
 
@@ -1294,7 +1311,7 @@ describe ACP::Client do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
       client.state.should eq(ACP::ClientState::Created)
-      client.closed?.should eq(false)
+      client.closed?.should be_false
       transport.close
     end
 
@@ -1332,12 +1349,12 @@ describe ACP::Client do
 
       result = client.initialize_connection
       result.protocol_version.should eq(1_u16)
-      result.agent_info.not_nil!.name.should eq("test-agent")
-      result.agent_capabilities.load_session.should eq(true)
+      result.agent_info.as(ACP::Protocol::AgentInfo).name.should eq("test-agent")
+      result.agent_capabilities.load_session?.should be_true
 
       client.state.should eq(ACP::ClientState::Initialized)
-      client.agent_capabilities.not_nil!.load_session.should eq(true)
-      client.agent_info.not_nil!.name.should eq("test-agent")
+      client.agent_capabilities.as(ACP::Protocol::AgentCapabilities).load_session?.should be_true
+      client.agent_info.as(ACP::Protocol::AgentInfo).name.should eq("test-agent")
       client.negotiated_protocol_version.should eq(1_u16)
 
       transport.close
@@ -1387,8 +1404,8 @@ describe ACP::Client do
       params = sent["params"]
       params["protocolVersion"].as_i.should eq(1)
       params["clientInfo"]["name"].as_s.should eq("test-editor")
-      params["clientCapabilities"]["terminal"].as_bool.should eq(true)
-      params["clientCapabilities"]["fs"]["readTextFile"].as_bool.should eq(true)
+      params["clientCapabilities"]["terminal"].as_bool.should be_true
+      params["clientCapabilities"]["fs"]["readTextFile"].as_bool.should be_true
 
       transport.close
     end
@@ -1457,11 +1474,11 @@ describe ACP::Client do
 
       result = client.session_new("/tmp/project")
       result.session_id.should eq("sess-test-001")
-      result.modes.not_nil!.available_modes.size.should eq(2)
+      result.modes.as(ACP::Protocol::SessionModeState).available_modes.size.should eq(2)
 
       client.state.should eq(ACP::ClientState::SessionActive)
       client.session_id.should eq("sess-test-001")
-      client.session_active?.should eq(true)
+      client.session_active?.should be_true
 
       transport.close
     end
@@ -1489,9 +1506,9 @@ describe ACP::Client do
       client.session_new("/my/project", servers)
 
       # Find the session/new request
-      session_req = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+      session_req = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "session/new" }
       session_req.should_not be_nil
-      params = session_req.not_nil!["params"]
+      params = session_req.as(JSON::Any)["params"]
       params["cwd"].as_s.should eq("/my/project")
       json_servers = params["mcpServers"].as_a
       json_servers.size.should eq(1)
@@ -1525,7 +1542,8 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({
+        transport.inject_raw(<<-JSON
+          {
           "jsonrpc": "2.0",
           "id": #{sent["id"].as_i64},
           "result": {
@@ -1536,10 +1554,12 @@ describe ACP::Client do
               ]
             }
           }
-        }))
+          }
+          JSON
+        )
       end
 
-      result = client.session_load("sess-loaded", "/tmp")
+      _result = client.session_load("sess-loaded", "/tmp")
       client.session_id.should eq("sess-loaded")
       client.state.should eq(ACP::ClientState::SessionActive)
 
@@ -1570,11 +1590,14 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({
+        transport.inject_raw(<<-JSON
+          {
           "jsonrpc": "2.0",
           "id": #{sent["id"].as_i64},
           "result": {}
-        }))
+          }
+          JSON
+        )
       end
 
       client.session_set_mode("chat")
@@ -1620,9 +1643,9 @@ describe ACP::Client do
       result.stop_reason.should eq("end_turn")
 
       # Verify the prompt message structure
-      prompt_req = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/prompt" }
+      prompt_req = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "session/prompt" }
       prompt_req.should_not be_nil
-      params = prompt_req.not_nil!["params"]
+      params = prompt_req.as(JSON::Any)["params"]
       params["sessionId"].as_s.should_not be_empty
       params["prompt"].as_a.size.should eq(1)
       params["prompt"][0]["type"].as_s.should eq("text")
@@ -1678,9 +1701,10 @@ describe ACP::Client do
       # Verify the cancel notification
       cancel_msg = transport.last_sent
       cancel_msg.should_not be_nil
-      cancel_msg.not_nil!["method"].as_s.should eq("session/cancel")
-      cancel_msg.not_nil!.as_h.has_key?("id").should eq(false)
-      cancel_msg.not_nil!["params"]["sessionId"].as_s.should eq("sess-cancel-test")
+      cancel = cancel_msg.as(JSON::Any)
+      cancel["method"].as_s.should eq("session/cancel")
+      cancel.as_h.has_key?("id").should be_false
+      cancel["params"]["sessionId"].as_s.should eq("sess-cancel-test")
 
       transport.close
     end
@@ -1710,7 +1734,7 @@ describe ACP::Client do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
       client.close
-      client.closed?.should eq(true)
+      client.closed?.should be_true
       client.state.should eq(ACP::ClientState::Closed)
     end
 
@@ -1719,14 +1743,14 @@ describe ACP::Client do
       client = ACP::Client.new(transport)
       client.close
       client.close # Should not raise
-      client.closed?.should eq(true)
+      client.closed?.should be_true
     end
 
     it "closes the transport" do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
       client.close
-      transport.closed?.should eq(true)
+      transport.closed?.should be_true
     end
   end
 
@@ -1751,7 +1775,8 @@ describe ACP::Client do
       client.initialize_connection
 
       # Inject a session/update notification
-      transport.inject_raw(%({
+      transport.inject_raw(<<-JSON
+        {
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
@@ -1761,7 +1786,9 @@ describe ACP::Client do
             "content": "Hello from agent"
           }
         }
-      }))
+        }
+        JSON
+      )
 
       # Give the dispatcher time to process
       sleep 50.milliseconds
@@ -1786,17 +1813,20 @@ describe ACP::Client do
       end
 
       # Inject a custom notification
-      transport.inject_raw(%({
+      transport.inject_raw(<<-JSON
+        {
         "jsonrpc": "2.0",
         "method": "_custom/event",
         "params": {"data": "test"}
-      }))
+        }
+        JSON
+      )
 
       sleep 50.milliseconds
 
       received_notifications.size.should eq(1)
       received_notifications[0][0].should eq("_custom/event")
-      received_notifications[0][1].not_nil!["data"].as_s.should eq("test")
+      received_notifications[0][1].as(JSON::Any)["data"].as_s.should eq("test")
 
       transport.close
     end
@@ -1807,7 +1837,7 @@ describe ACP::Client do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
 
-      client.on_agent_request = ->(method : String, params : JSON::Any) do
+      client.on_agent_request = ->(method : String, _params : JSON::Any) do
         if method == "session/request_permission"
           JSON.parse(%({"outcome": {"selected": "allow_once"}}))
         else
@@ -1816,69 +1846,78 @@ describe ACP::Client do
       end
 
       # Inject a permission request from the agent
-      transport.inject_raw(%({
+      transport.inject_raw(<<-JSON
+        {
         "jsonrpc": "2.0",
         "id": "perm-1",
         "method": "session/request_permission",
         "params": {
-          "sessionId": "sess-001",
-          "toolCall": {"toolCallId": "tc-1", "toolName": "fs.write"},
+          "sessionId": "sess-perm-1",
+          "toolCall": {"toolCallId": "tc-1", "title": "Test"},
           "options": [{"optionId": "allow_once", "name": "Allow Once", "kind": "allow_once"}]
         }
-      }))
+        }
+        JSON
+      )
 
       sleep 50.milliseconds
 
       # Check that the client sent a response
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "perm-1" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-1" }
       response.should_not be_nil
-      response.not_nil!["result"]["outcome"]["selected"].as_s.should eq("allow_once")
+      response.as(JSON::Any)["result"]["outcome"]["selected"].as_s.should eq("allow_once")
 
       transport.close
     end
 
     it "auto-cancels permission requests when no handler is set" do
       transport = TestTransport.new
-      client = ACP::Client.new(transport)
+      _client = ACP::Client.new(transport)
 
       # No on_agent_request handler set
 
-      transport.inject_raw(%({
+      transport.inject_raw(<<-JSON
+        {
         "jsonrpc": "2.0",
         "id": "perm-2",
         "method": "session/request_permission",
         "params": {
-          "sessionId": "sess-001",
-          "toolCall": {"toolCallId": "tc-1"},
+          "sessionId": "sess-perm-2",
+          "toolCall": {"toolCallId": "tc-2", "title": "Auto-cancel"},
           "options": [{"optionId": "allow_once", "name": "Allow", "kind": "allow_once"}]
         }
-      }))
+        }
+        JSON
+      )
 
       sleep 50.milliseconds
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "perm-2" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-2" }
       response.should_not be_nil
-      response.not_nil!["result"]["outcome"].as_s.should eq("cancelled")
+      response.as(JSON::Any)["result"]["outcome"].as_s.should eq("cancelled")
 
       transport.close
     end
 
     it "returns method-not-found for unknown agent methods without handler" do
       transport = TestTransport.new
-      client = ACP::Client.new(transport)
+      _client = ACP::Client.new(transport)
 
-      transport.inject_raw(%({
+      transport.inject_raw(<<-JSON
+        {
         "jsonrpc": "2.0",
         "id": "unk-1",
         "method": "unknown/method",
         "params": {}
-      }))
+        }
+        JSON
+      )
 
       sleep 50.milliseconds
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "unk-1" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "unk-1" }
       response.should_not be_nil
-      response.not_nil!["error"]["code"].as_i.should eq(-32601)
+      response.as(JSON::Any)["error"]["code"].as_i.should eq(-32601)
 
       transport.close
     end
@@ -1900,7 +1939,7 @@ describe ACP::Client do
 
       sleep 50.milliseconds
 
-      disconnected.should eq(true)
+      disconnected.should be_true
 
       transport.close
     end
@@ -1971,8 +2010,8 @@ describe ACP::Session do
 
       session = ACP::Session.create(client, cwd: "/my/project")
       session.id.should eq("sess-via-create")
-      session.closed?.should eq(false)
-      session.modes.not_nil!.available_modes.size.should eq(2)
+      session.closed?.should be_false
+      session.modes.as(ACP::Protocol::SessionModeState).available_modes.size.should eq(2)
 
       transport.close
     end
@@ -1985,16 +2024,19 @@ describe ACP::Session do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({
+        transport.inject_raw(<<-JSON
+          {
           "jsonrpc": "2.0",
           "id": #{sent["id"].as_i64},
           "result": {}
-        }))
+          }
+          JSON
+        )
       end
 
       session = ACP::Session.load(client, session_id: "sess-existing", cwd: "/tmp")
       session.id.should eq("sess-existing")
-      session.closed?.should eq(false)
+      session.closed?.should be_false
 
       transport.close
     end
@@ -2061,8 +2103,9 @@ describe ACP::Session do
 
       cancel_msg = transport.last_sent
       cancel_msg.should_not be_nil
-      cancel_msg.not_nil!["method"].as_s.should eq("session/cancel")
-      cancel_msg.not_nil!["params"]["sessionId"].as_s.should eq("sess-cancel")
+      cancel = cancel_msg.as(JSON::Any)
+      cancel["method"].as_s.should eq("session/cancel")
+      cancel["params"]["sessionId"].as_s.should eq("sess-cancel")
 
       transport.close
     end
@@ -2098,9 +2141,9 @@ describe ACP::Session do
       end
 
       session = ACP::Session.create(client, cwd: "/tmp")
-      session.closed?.should eq(false)
+      session.closed?.should be_false
       session.close
-      session.closed?.should eq(true)
+      session.closed?.should be_true
 
       transport.close
     end
@@ -2128,11 +2171,14 @@ describe ACP::Session do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({
+        transport.inject_raw(<<-JSON
+          {
           "jsonrpc": "2.0",
           "id": #{sent["id"].as_i64},
           "result": {"sessionId": "sess-no-modes"}
-        }))
+          }
+          JSON
+        )
       end
 
       session = ACP::Session.create(client, cwd: "/tmp")
@@ -2192,11 +2238,14 @@ describe ACP::Session do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({
+        transport.inject_raw(<<-JSON
+          {
           "jsonrpc": "2.0",
           "id": #{sent["id"].as_i64},
           "result": {}
-        }))
+          }
+          JSON
+        )
       end
 
       session.set_mode("chat")
@@ -2217,7 +2266,7 @@ end
 describe ACP::PromptBuilder do
   it "starts empty" do
     builder = ACP::PromptBuilder.new
-    builder.empty?.should eq(true)
+    builder.empty?.should be_true
     builder.size.should eq(0)
   end
 
@@ -2331,47 +2380,59 @@ describe "Full ACP flow simulation" do
           next unless id
 
           # Simulate streaming response: start → chunks → end → result
-          transport.inject_raw(%({
+          transport.inject_raw(<<-JSON
+            {
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
               "update": {"type": "agent_message_start", "messageId": "m1", "role": "assistant"}
             }
-          }))
+            }
+            JSON
+          )
 
           sleep 5.milliseconds
 
-          transport.inject_raw(%({
+          transport.inject_raw(<<-JSON
+            {
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
               "update": {"sessionUpdate": "agent_message_chunk", "content": "Hello, ", "messageId": "m1"}
             }
-          }))
+            }
+            JSON
+          )
 
           sleep 5.milliseconds
 
-          transport.inject_raw(%({
+          transport.inject_raw(<<-JSON
+            {
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
               "update": {"sessionUpdate": "agent_message_chunk", "content": "world!", "messageId": "m1"}
             }
-          }))
+            }
+            JSON
+          )
 
           sleep 5.milliseconds
 
-          transport.inject_raw(%({
+          transport.inject_raw(<<-JSON
+            {
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
               "sessionId": "integration-sess",
               "update": {"type": "agent_message_end", "messageId": "m1", "stopReason": "end_turn"}
             }
-          }))
+            }
+            JSON
+          )
 
           sleep 5.milliseconds
 
@@ -2384,7 +2445,7 @@ describe "Full ACP flow simulation" do
 
     # Execute the full flow
     init_result = client.initialize_connection
-    init_result.agent_info.not_nil!.name.should eq("test-agent")
+    init_result.agent_info.as(ACP::Protocol::AgentInfo).name.should eq("test-agent")
 
     session = ACP::Session.create(client, cwd: "/tmp/integration")
     session.id.should eq("integration-sess")
@@ -2400,18 +2461,18 @@ describe "Full ACP flow simulation" do
     updates_received.size.should be >= 3
 
     # Find the chunks and concatenate them
-    chunks = updates_received.select(&.is_a?(ACP::Protocol::AgentMessageChunkUpdate))
-    full_message = chunks.map { |c| c.as(ACP::Protocol::AgentMessageChunkUpdate).text }.join
+    chunks = updates_received.select(ACP::Protocol::AgentMessageChunkUpdate)
+    full_message = chunks.map { |chunk| chunk.as(ACP::Protocol::AgentMessageChunkUpdate).text }.join
     full_message.should eq("Hello, world!")
 
     # Verify message start and end
-    updates_received.any?(&.is_a?(ACP::Protocol::AgentMessageStartUpdate)).should eq(true)
-    updates_received.any?(&.is_a?(ACP::Protocol::AgentMessageEndUpdate)).should eq(true)
+    updates_received.any?(ACP::Protocol::AgentMessageStartUpdate).should be_true
+    updates_received.any?(ACP::Protocol::AgentMessageEndUpdate).should be_true
 
     # Clean up
     session.close
     client.close
-    client.closed?.should eq(true)
+    client.closed?.should be_true
   end
 
   it "handles permission request during a prompt" do
@@ -2420,7 +2481,7 @@ describe "Full ACP flow simulation" do
 
     # Set up permission handler
     permission_requests_received = 0
-    client.on_agent_request = ->(method : String, params : JSON::Any) do
+    client.on_agent_request = ->(method : String, _params : JSON::Any) do
       if method == "session/request_permission"
         permission_requests_received += 1
         JSON.parse(%({"outcome": {"selected": "allow_once"}}))
@@ -2454,7 +2515,8 @@ describe "Full ACP flow simulation" do
           next unless id
 
           # Agent asks for permission before proceeding
-          transport.inject_raw(%({
+          transport.inject_raw(<<-JSON
+            {
             "jsonrpc": "2.0",
             "id": "perm-req-1",
             "method": "session/request_permission",
@@ -2466,7 +2528,9 @@ describe "Full ACP flow simulation" do
                 {"id": "deny", "label": "Deny"}
               ]
             }
-          }))
+            }
+            JSON
+          )
 
           sleep 30.milliseconds
 
@@ -2486,9 +2550,9 @@ describe "Full ACP flow simulation" do
     permission_requests_received.should eq(1)
 
     # Verify the permission response was sent back
-    perm_response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "perm-req-1" }
+    perm_response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-req-1" }
     perm_response.should_not be_nil
-    perm_response.not_nil!["result"]["outcome"]["selected"].as_s.should eq("allow_once")
+    perm_response.as(JSON::Any)["result"]["outcome"]["selected"].as_s.should eq("allow_once")
 
     client.close
   end
@@ -2662,13 +2726,15 @@ end
 describe ACP::Protocol::ToolCallContent do
   describe "ToolCallContentBlock" do
     it "deserializes from JSON with type=content" do
-      json = %({
+      json = <<-JSON
+        {
         "type": "content",
         "content": {
           "type": "text",
           "text": "Analysis complete. Found 3 issues."
         }
-      })
+        }
+        JSON
       block = ACP::Protocol::ToolCallContent.from_json(json)
       block.should be_a(ACP::Protocol::ToolCallContentBlock)
       block.type.should eq("content")
@@ -2689,12 +2755,14 @@ describe ACP::Protocol::ToolCallContent do
 
   describe "ToolCallDiff" do
     it "deserializes from JSON with type=diff" do
-      json = %({
+      json = <<-JSON
+        {
         "type": "diff",
         "path": "/home/user/project/src/config.json",
         "oldText": "{\\"debug\\": false}",
         "newText": "{\\"debug\\": true}"
-      })
+        }
+        JSON
       block = ACP::Protocol::ToolCallContent.from_json(json)
       block.should be_a(ACP::Protocol::ToolCallDiff)
 
@@ -2931,7 +2999,7 @@ describe ACP::Protocol::TerminalOutputResult do
     json = %({"output": "truncated...", "truncated": true})
     result = ACP::Protocol::TerminalOutputResult.from_json(json)
     result.output.should eq("truncated...")
-    result.truncated.should be_true
+    result.truncated?.should be_true
   end
 end
 
@@ -3024,25 +3092,29 @@ end
 
 describe "SessionUpdate config_options_update alias" do
   it "parses config_option_update (schema name)" do
-    json = %({
+    json = <<-JSON
+      {
       "sessionId": "sess-001",
       "update": {
         "sessionUpdate": "config_option_update",
         "configOptions": []
       }
-    })
+      }
+      JSON
     params = ACP::Protocol::SessionUpdateParams.from_json(json)
     params.update.should be_a(ACP::Protocol::ConfigOptionUpdate)
   end
 
   it "parses config_options_update (doc alias)" do
-    json = %({
+    json = <<-JSON
+      {
       "sessionId": "sess-001",
       "update": {
         "sessionUpdate": "config_options_update",
         "configOptions": []
       }
-    })
+      }
+      JSON
     params = ACP::Protocol::SessionUpdateParams.from_json(json)
     params.update.should be_a(ACP::Protocol::ConfigOptionUpdate)
   end
@@ -3076,7 +3148,8 @@ describe "Client typed handler dispatch" do
     client.initialize_connection
 
     # Simulate agent sending fs/read_text_file request
-    transport.inject_raw(%({
+    transport.inject_raw(<<-JSON
+      {
       "jsonrpc": "2.0",
       "id": "agent-req-1",
       "method": "fs/read_text_file",
@@ -3084,7 +3157,9 @@ describe "Client typed handler dispatch" do
         "sessionId": "sess-001",
         "path": "/home/user/main.py"
       }
-    }))
+      }
+      JSON
+    )
 
     sleep 50.milliseconds
 
@@ -3092,9 +3167,9 @@ describe "Client typed handler dispatch" do
     received_path.should eq("/home/user/main.py")
 
     # Verify the response was sent back
-    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-1" }
+    response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "agent-req-1" }
     response.should_not be_nil
-    response.not_nil!["result"]["content"].as_s.should eq("file content here")
+    response.as(JSON::Any)["result"]["content"].as_s.should eq("file content here")
 
     client.close
   end
@@ -3120,7 +3195,8 @@ describe "Client typed handler dispatch" do
     end
     client.initialize_connection
 
-    transport.inject_raw(%({
+    transport.inject_raw(<<-JSON
+      {
       "jsonrpc": "2.0",
       "id": "agent-req-2",
       "method": "fs/write_text_file",
@@ -3129,7 +3205,9 @@ describe "Client typed handler dispatch" do
         "path": "/home/user/output.txt",
         "content": "hello world"
       }
-    }))
+      }
+      JSON
+    )
 
     sleep 50.milliseconds
 
@@ -3158,7 +3236,8 @@ describe "Client typed handler dispatch" do
     end
     client.initialize_connection
 
-    transport.inject_raw(%({
+    transport.inject_raw(<<-JSON
+      {
       "jsonrpc": "2.0",
       "id": "agent-req-3",
       "method": "terminal/create",
@@ -3167,15 +3246,17 @@ describe "Client typed handler dispatch" do
         "command": "npm",
         "args": ["test"]
       }
-    }))
+      }
+      JSON
+    )
 
     sleep 50.milliseconds
 
     received_command.should eq("npm")
 
-    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-3" }
+    response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "agent-req-3" }
     response.should_not be_nil
-    response.not_nil!["result"]["terminalId"].as_s.should eq("term_001")
+    response.as(JSON::Any)["result"]["terminalId"].as_s.should eq("term_001")
 
     client.close
   end
@@ -3187,7 +3268,7 @@ describe "Client typed handler dispatch" do
     fallback_called = false
     fallback_method = ""
 
-    client.on_agent_request = ->(method : String, params : JSON::Any) do
+    client.on_agent_request = ->(method : String, _params : JSON::Any) do
       fallback_called = true
       fallback_method = method
       JSON.parse(%({"content": "fallback response"}))
@@ -3201,7 +3282,8 @@ describe "Client typed handler dispatch" do
     end
     client.initialize_connection
 
-    transport.inject_raw(%({
+    transport.inject_raw(<<-JSON
+      {
       "jsonrpc": "2.0",
       "id": "agent-req-4",
       "method": "fs/read_text_file",
@@ -3209,7 +3291,9 @@ describe "Client typed handler dispatch" do
         "sessionId": "sess-001",
         "path": "/some/file.txt"
       }
-    }))
+      }
+      JSON
+    )
 
     sleep 50.milliseconds
 
@@ -3231,7 +3315,8 @@ describe "Client typed handler dispatch" do
     end
     client.initialize_connection
 
-    transport.inject_raw(%({
+    transport.inject_raw(<<-JSON
+      {
       "jsonrpc": "2.0",
       "id": "agent-req-5",
       "method": "terminal/create",
@@ -3239,13 +3324,15 @@ describe "Client typed handler dispatch" do
         "sessionId": "sess-001",
         "command": "ls"
       }
-    }))
+      }
+      JSON
+    )
 
     sleep 50.milliseconds
 
-    response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "agent-req-5" }
+    response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "agent-req-5" }
     response.should_not be_nil
-    response.not_nil!["error"]["code"].as_i.should eq(-32601)
+    response.as(JSON::Any)["error"]["code"].as_i.should eq(-32601)
 
     client.close
   end

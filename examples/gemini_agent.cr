@@ -38,12 +38,18 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
     print u.text
     STDOUT.flush
   when ACP::Protocol::ThoughtUpdate
-    puts "
-[Thinking: #{u.title}]".colorize(:magenta)
+    puts <<-MSG
+
+      [Thinking: #{u.title}]
+      MSG
+      .colorize(:magenta)
     puts u.text.colorize(:dark_gray)
   when ACP::Protocol::StatusUpdate
-    puts "
-[Status: #{u.status}] #{u.message}".colorize(:yellow)
+    puts <<-MSG
+
+      [Status: #{u.status}] #{u.message}
+      MSG
+      .colorize(:yellow)
   end
   nil
 }
@@ -62,16 +68,20 @@ begin
   puts "Session #{session.id} active."
 
   # 6. Send a prompt.
-  puts "
-Prompt: 'Tell me a very short joke about Crystal programming language.'"
+  puts <<-MSG
+
+    Prompt: 'Tell me a very short joke about Crystal programming language.'
+    MSG
   print "Gemini: "
   STDOUT.flush
 
   result = session.prompt("Tell me a very short joke about Crystal programming language.")
 
-  puts "
+  puts <<-MSG
 
-(Finished with reason: #{result.stop_reason})"
+
+    (Finished with reason: #{result.stop_reason})
+    MSG
 rescue ex : Exception
   STDERR.puts "An error occurred: #{ex.message}"
   if rpc_ex = ex.as?(ACP::JsonRpcError)

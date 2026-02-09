@@ -45,15 +45,19 @@ begin
     nil
   }
 
-  puts "
-Sending prompt: 'Hello, who are you?'"
+  puts <<-MSG
+
+    Sending prompt: 'Hello, who are you?'
+    MSG
   print "Agent response: "
   STDOUT.flush
 
   result = session.prompt("Hello, who are you?")
-  puts "
+  puts <<-MSG
 
-Prompt finished with reason: #{result.stop_reason}"
+
+    Prompt finished with reason: #{result.stop_reason}
+    MSG
 ensure
   # 6. Cleanup.
   # Closing the client also closes the transport and terminates the agent process.

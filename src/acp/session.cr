@@ -113,7 +113,7 @@ module ACP
     # Sends a prompt with multiple text strings, each as a separate
     # TextContentBlock.
     def prompt(*texts : String) : Protocol::SessionPromptResult
-      blocks = texts.map { |t| Protocol::TextContentBlock.new(t.as(String)).as(Protocol::ContentBlock) }
+      blocks = texts.map { |text_item| Protocol::TextContentBlock.new(text_item.as(String)).as(Protocol::ContentBlock) }
       prompt(blocks.to_a)
     end
 
@@ -147,9 +147,16 @@ module ACP
     # Switches the session to the specified mode.
     #
     # - `mode_id` — the ID of the mode to activate.
-    def set_mode(mode_id : String) : Nil
+    def mode=(mode_id : String) : Nil
       ensure_open!
       @client.session_set_mode(mode_id, @id)
+    end
+
+    # :ditto:
+    # @deprecated Use `#mode=` instead.
+    # ameba:disable Naming/AccessorMethodName
+    def set_mode(mode_id : String) : Nil
+      self.mode = mode_id
     end
 
     # Returns the list of available mode IDs, or an empty array if

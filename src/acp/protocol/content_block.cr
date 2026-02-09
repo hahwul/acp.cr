@@ -297,22 +297,22 @@ module ACP
 
       # Helper: get the URI from the embedded resource.
       def uri : String?
-        @resource.as_h?.try { |h| h["uri"]?.try(&.as_s?) }
+        @resource.as_h?.try { |hash| hash["uri"]?.try(&.as_s?) }
       end
 
       # Helper: get the text from the embedded resource (nil if blob).
       def text : String?
-        @resource.as_h?.try { |h| h["text"]?.try(&.as_s?) }
+        @resource.as_h?.try { |hash| hash["text"]?.try(&.as_s?) }
       end
 
       # Helper: get the blob from the embedded resource (nil if text).
       def blob : String?
-        @resource.as_h?.try { |h| h["blob"]?.try(&.as_s?) }
+        @resource.as_h?.try { |hash| hash["blob"]?.try(&.as_s?) }
       end
 
       # Helper: get the MIME type from the embedded resource.
       def resource_mime_type : String?
-        @resource.as_h?.try { |h| h["mimeType"]?.try(&.as_s?) }
+        @resource.as_h?.try { |hash| hash["mimeType"]?.try(&.as_s?) }
       end
 
       # @deprecated Use ResourceContentBlock.text or .blob factory methods instead.
@@ -385,8 +385,6 @@ module ACP
       def path : String?
         if @uri.starts_with?("file://")
           @uri.sub("file://", "")
-        else
-          nil
         end
       end
     end
