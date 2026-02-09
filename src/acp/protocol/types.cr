@@ -132,7 +132,7 @@ module ACP
       # Authentication methods the agent supports.
       # If empty or nil, no authentication is required.
       @[JSON::Field(key: "authMethods")]
-      property auth_methods : Array(String)?
+      property auth_methods : Array(JSON::Any)?
 
       # Metadata about the agent.
       @[JSON::Field(key: "agentInfo")]
@@ -183,11 +183,11 @@ module ACP
 
       # Optional list of MCP servers the agent should connect to.
       @[JSON::Field(key: "mcpServers")]
-      property mcp_servers : Array(McpServer)?
+      property mcp_servers : Array(McpServer) = [] of McpServer
 
       def initialize(
         @cwd : String,
-        @mcp_servers : Array(McpServer)? = nil,
+        @mcp_servers : Array(McpServer) = [] of McpServer,
       )
       end
     end

@@ -40,7 +40,7 @@ begin
   # In this simple example, we'll just print updates as they come.
   client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
     if chunk = update.update.as?(ACP::Protocol::AgentMessageChunkUpdate)
-      print chunk.content
+      print chunk.text
     end
     nil
   }

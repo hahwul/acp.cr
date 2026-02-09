@@ -69,6 +69,29 @@ puts "\n[Done — stop reason: #{result.stop_reason}]"
 client.close
 ```
 
+## Examples
+
+Several examples are provided in the `examples/` directory to help you get started:
+
+- `simple_client.cr` — A minimal example showing basic connection and prompting.
+- `content_blocks.cr` — Demonstrates rich prompts with multiple content types (text, files) and tool handling.
+- `gemini_agent.cr` — Demonstrates how to use the **Gemini CLI** as an ACP agent.
+- `interactive_client.cr` — A full-featured interactive CLI client with streaming, tool calls, and permission handling.
+
+### Running Examples
+
+```sh
+# Basic usage
+crystal run examples/simple_client.cr -- <agent-command>
+
+# Using Gemini CLI as an agent
+# Requires: gemini CLI installed and GEMINI_API_KEY environment variable
+crystal run examples/gemini_agent.cr
+
+# Rich prompt example
+crystal run examples/content_blocks.cr -- my-agent --stdio
+```
+
 ## Architecture
 
 ```

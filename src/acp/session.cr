@@ -52,7 +52,7 @@ module ACP
       cwd : String,
       mcp_servers : Array(Protocol::McpServer)? = nil,
     ) : Session
-      result = client.session_new(cwd, mcp_servers)
+      result = client.session_new(cwd, mcp_servers || [] of Protocol::McpServer)
       new(client, result.session_id, result.modes, result.config_options)
     end
 
@@ -227,7 +227,7 @@ module ACP
 
     # Adds a file reference content block.
     def file(path : String, mime_type : String? = nil) : self
-      @blocks << Protocol::FileContentBlock.new(path, mime_type)
+      @blocks << Protocol::ResourceContentBlock.new(uri: path, mime_type: mime_type)
       self
     end
 

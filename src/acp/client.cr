@@ -78,7 +78,7 @@ module ACP
     getter agent_info : Protocol::AgentInfo?
 
     # Authentication methods the agent supports.
-    getter auth_methods : Array(String)?
+    getter auth_methods : Array(JSON::Any)?
 
     # The protocol version negotiated with the agent.
     getter negotiated_protocol_version : UInt16?
@@ -238,7 +238,7 @@ module ACP
     # Raises `InvalidStateError` if not initialized.
     def session_new(
       cwd : String,
-      mcp_servers : Array(Protocol::McpServer)? = nil,
+      mcp_servers : Array(Protocol::McpServer) = [] of Protocol::McpServer,
     ) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, "session/new")
 
@@ -734,9 +734,20 @@ module ACP
     private def handle_session_update(params : JSON::Any?) : Nil
       return unless params
 
+      # Compatibility: Ensure 'type' is present for discriminator if only 'sessionUpdate' exists.
+      raw_params = params.as_h.dup
+      if update = raw_params["update"]?
+        update_h = update.as_h.dup
+        if !update_h.has_key?("type") && update_h.has_key?("sessionUpdate")
+          update_h["type"] = update_h["sessionUpdate"]
+          raw_params["update"] = JSON::Any.new(update_h)
+        end
+      end
+      normalized_params = JSON::Any.new(raw_params)
+
       if handler = @on_update
         begin
-          update_params = Protocol::SessionUpdateParams.from_json(params.to_json)
+          update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
           handler.call(update_params)
         rescue ex : JSON::SerializableError
           ClientLog.warn { "Failed to parse session/update: #{ex.message}" }

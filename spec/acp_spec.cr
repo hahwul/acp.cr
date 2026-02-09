@@ -250,11 +250,11 @@ describe ACP::Protocol do
       block = ACP::Protocol::TextContentBlock.new("Hello, world!")
       json = JSON.parse(block.to_json)
       json["type"].as_s.should eq("text")
-      json["content"].as_s.should eq("Hello, world!")
+      json["text"].as_s.should eq("Hello, world!")
     end
 
     it "deserializes via ContentBlock discriminator" do
-      json_str = %({"type": "text", "content": "Test content"})
+      json_str = %({"type": "text", "text": "Test content"})
       block = ACP::Protocol::ContentBlock.from_json(json_str)
       block.should be_a(ACP::Protocol::TextContentBlock)
       block.as(ACP::Protocol::TextContentBlock).content.should eq("Test content")
@@ -294,20 +294,20 @@ describe ACP::Protocol do
     end
   end
 
-  describe ACP::Protocol::FileContentBlock do
-    it "serializes with path" do
-      block = ACP::Protocol::FileContentBlock.new("/home/user/code.cr", "text/x-crystal")
+  describe ACP::Protocol::ResourceContentBlock do
+    it "serializes with URI" do
+      block = ACP::Protocol::ResourceContentBlock.new("/home/user/code.cr", mime_type: "text/x-crystal")
       json = JSON.parse(block.to_json)
-      json["type"].as_s.should eq("file")
-      json["path"].as_s.should eq("/home/user/code.cr")
+      json["type"].as_s.should eq("resource")
+      json["uri"].as_s.should eq("file:///home/user/code.cr")
       json["mimeType"].as_s.should eq("text/x-crystal")
     end
 
     it "deserializes via ContentBlock discriminator" do
-      json_str = %({"type": "file", "path": "/tmp/test.txt"})
+      json_str = %({"type": "resource", "uri": "file:///tmp/test.txt"})
       block = ACP::Protocol::ContentBlock.from_json(json_str)
-      block.should be_a(ACP::Protocol::FileContentBlock)
-      block.as(ACP::Protocol::FileContentBlock).path.should eq("/tmp/test.txt")
+      block.should be_a(ACP::Protocol::ResourceContentBlock)
+      block.as(ACP::Protocol::ResourceContentBlock).uri.should eq("file:///tmp/test.txt")
     end
   end
 
@@ -339,7 +339,7 @@ describe ACP::Protocol do
       json_str = %({"type": "agent_message_chunk", "content": "Hello from agent"})
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::AgentMessageChunkUpdate)
-      update.as(ACP::Protocol::AgentMessageChunkUpdate).content.should eq("Hello from agent")
+      update.as(ACP::Protocol::AgentMessageChunkUpdate).text.should eq("Hello from agent")
     end
 
     it "deserializes agent_message_start" do
@@ -363,7 +363,7 @@ describe ACP::Protocol do
       update = ACP::Protocol::SessionUpdate.from_json(json_str)
       update.should be_a(ACP::Protocol::ThoughtUpdate)
       u = update.as(ACP::Protocol::ThoughtUpdate)
-      u.content.should eq("Let me think...")
+      u.text.should eq("Let me think...")
       u.title.should eq("Reasoning")
     end
 
@@ -463,14 +463,14 @@ describe ACP::Protocol do
       json_str = %({
         "protocolVersion": 1,
         "agentCapabilities": {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "file": false}},
-        "authMethods": ["oauth"],
+        "authMethods": [{"id": "oauth"}],
         "agentInfo": {"name": "agent", "version": "1.0"}
       })
       result = ACP::Protocol::InitializeResult.from_json(json_str)
       result.protocol_version.should eq(1)
       result.agent_capabilities.load_session.should eq(true)
       result.agent_capabilities.prompt_capabilities.not_nil!.image.should eq(true)
-      result.auth_methods.should eq(["oauth"])
+      result.auth_methods.not_nil![0]["id"].as_s.should eq("oauth")
       result.agent_info.not_nil!.name.should eq("agent")
     end
 
@@ -504,7 +504,7 @@ describe ACP::Protocol do
       params = ACP::Protocol::SessionNewParams.new("/tmp")
       json = JSON.parse(params.to_json)
       json["cwd"].as_s.should eq("/tmp")
-      json["mcpServers"]?.try(&.raw).should be_nil
+      json["mcpServers"].as_a.should be_empty
     end
   end
 
@@ -548,7 +548,7 @@ describe ACP::Protocol do
       json["sessionId"].as_s.should eq("sess-001")
       json["prompt"].as_a.size.should eq(1)
       json["prompt"][0]["type"].as_s.should eq("text")
-      json["prompt"][0]["content"].as_s.should eq("hello")
+      json["prompt"][0]["text"].as_s.should eq("hello")
     end
   end
 
@@ -1374,7 +1374,7 @@ describe ACP::Client do
       params["sessionId"].as_s.should_not be_empty
       params["prompt"].as_a.size.should eq(1)
       params["prompt"][0]["type"].as_s.should eq("text")
-      params["prompt"][0]["content"].as_s.should eq("Hello!")
+      params["prompt"][0]["text"].as_s.should eq("Hello!")
 
       transport.close
     end
@@ -1988,7 +1988,7 @@ describe ACP::PromptBuilder do
     blocks.size.should eq(3)
     blocks[0].should be_a(ACP::Protocol::TextContentBlock)
     blocks[1].should be_a(ACP::Protocol::ImageContentBlock)
-    blocks[2].should be_a(ACP::Protocol::FileContentBlock)
+    blocks[2].should be_a(ACP::Protocol::ResourceContentBlock)
   end
 
   it "supports method chaining" do
@@ -2145,7 +2145,7 @@ describe "Full ACP flow simulation" do
 
     # Find the chunks and concatenate them
     chunks = updates_received.select(&.is_a?(ACP::Protocol::AgentMessageChunkUpdate))
-    full_message = chunks.map { |c| c.as(ACP::Protocol::AgentMessageChunkUpdate).content }.join
+    full_message = chunks.map { |c| c.as(ACP::Protocol::AgentMessageChunkUpdate).text }.join
     full_message.should eq("Hello, world!")
 
     # Verify message start and end

@@ -9,6 +9,7 @@
 #   crystal run examples/content_blocks.cr -- <agent-command> [args...]
 
 require "../src/acp"
+require "colorize"
 
 if ARGV.empty?
   STDERR.puts "Usage: crystal run examples/content_blocks.cr -- <agent-command> [args...]"
@@ -25,11 +26,11 @@ client = ACP::Client.new(transport)
 client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
   case u = update.update
   when ACP::Protocol::AgentMessageChunkUpdate
-    print u.content
+    print u.text
   when ACP::Protocol::ThoughtUpdate
     puts "
 [Thought: #{u.title || "Reasoning"}]".colorize(:magenta)
-    puts u.content.colorize(:dark_gray)
+    puts u.text.colorize(:dark_gray)
   when ACP::Protocol::ToolCallStartUpdate
     puts "
 [Tool Call: #{u.title || u.tool_name}] Status: #{u.status}".colorize(:cyan)

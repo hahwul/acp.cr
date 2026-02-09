@@ -45,7 +45,7 @@ module ACP
     # ─── Abstract Update Base ──────────────────────────────────────────
 
     # Abstract base for all session update types. Deserialization is
-    # dispatched via the "type" JSON field.
+    # dispatched via the "type" or "sessionUpdate" JSON field.
     abstract struct SessionUpdate
       include JSON::Serializable
 
@@ -54,6 +54,7 @@ module ACP
         "agent_message_chunk" => AgentMessageChunkUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
         "thought"             => ThoughtUpdate,
+        "agent_thought_chunk" => ThoughtUpdate, # Gemini alias
         "tool_call_start"     => ToolCallStartUpdate,
         "tool_call_chunk"     => ToolCallChunkUpdate,
         "tool_call_end"       => ToolCallEndUpdate,
@@ -62,8 +63,10 @@ module ACP
         "error"               => ErrorUpdate,
       }
 
-      # The discriminator field present on every update.
-      getter type : String
+      # Standard ACP uses "type", Gemini uses "sessionUpdate".
+      # We'll use "type" as the primary Crystal property.
+      @[JSON::Field(key: "type")]
+      property type : String
     end
 
     # ─── Agent Message Updates ─────────────────────────────────────────
@@ -73,7 +76,7 @@ module ACP
     struct AgentMessageStartUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "agent_message_start"
+      property type : String = "agent_message_start"
 
       # Optional message ID for correlating start/chunk/end events.
       @[JSON::Field(key: "messageId")]
@@ -93,17 +96,31 @@ module ACP
     struct AgentMessageChunkUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "agent_message_chunk"
+      property type : String = "agent_message_chunk"
 
-      # The text content of this chunk. Append to the current message buffer.
-      property content : String
+      # The text content of this chunk.
+      # Gemini wraps this in a content object: {"content": {"type": "text", "text": "..."}}
+      # But standard ACP might have it at root.
+      # We'll handle both by making it a JSON::Any for now or specialized.
+      property content : JSON::Any
 
       # Optional message ID for correlating with start/end events.
       @[JSON::Field(key: "messageId")]
       property message_id : String?
 
-      def initialize(@content : String, @message_id : String? = nil)
+      def initialize(@content : JSON::Any, @message_id : String? = nil)
         @type = "agent_message_chunk"
+      end
+
+      # Helper to get the actual text content regardless of wrapping.
+      def text : String
+        if (h = @content.as_h?) && h["text"]?
+          h["text"].as_s
+        elsif s = @content.as_s?
+          s
+        else
+          @content.to_json
+        end
       end
     end
 
@@ -112,7 +129,7 @@ module ACP
     struct AgentMessageEndUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "agent_message_end"
+      property type : String = "agent_message_end"
 
       # Optional message ID for correlation.
       @[JSON::Field(key: "messageId")]
@@ -130,21 +147,29 @@ module ACP
     # ─── Thought Update ────────────────────────────────────────────────
 
     # Represents the agent's internal reasoning or chain-of-thought.
-    # Clients may display this in a collapsible "thinking" pane or
-    # log it for debugging purposes.
     struct ThoughtUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "thought"
+      property type : String = "thought"
 
-      # The thought text content.
-      property content : String
+      # The thought text content. Can be wrapped like chunk.
+      property content : JSON::Any
 
       # Optional title or label for the thought block.
       property title : String?
 
-      def initialize(@content : String, @title : String? = nil)
+      def initialize(@content : JSON::Any, @title : String? = nil)
         @type = "thought"
+      end
+
+      def text : String
+        if (h = @content.as_h?) && h["text"]?
+          h["text"].as_s
+        elsif s = @content.as_s?
+          s
+        else
+          @content.to_json
+        end
       end
     end
 
@@ -155,7 +180,7 @@ module ACP
     struct ToolCallStartUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "tool_call_start"
+      property type : String = "tool_call_start"
 
       # Unique identifier for this tool call, used to correlate
       # start/chunk/end events and permission requests.
@@ -188,7 +213,7 @@ module ACP
     struct ToolCallChunkUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "tool_call_chunk"
+      property type : String = "tool_call_chunk"
 
       # The tool call ID this chunk belongs to.
       @[JSON::Field(key: "toolCallId")]
@@ -215,7 +240,7 @@ module ACP
     struct ToolCallEndUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "tool_call_end"
+      property type : String = "tool_call_end"
 
       # The tool call ID this end event corresponds to.
       @[JSON::Field(key: "toolCallId")]
@@ -247,7 +272,7 @@ module ACP
     struct PlanUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "plan"
+      property type : String = "plan"
 
       # Human-readable title for the plan.
       property title : String?
@@ -291,7 +316,7 @@ module ACP
     struct StatusUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "status"
+      property type : String = "status"
 
       # The new status label (e.g., "thinking", "working", "idle").
       property status : String
@@ -311,7 +336,7 @@ module ACP
     struct ErrorUpdate < SessionUpdate
       include JSON::Serializable
 
-      getter type : String = "error"
+      property type : String = "error"
 
       # Error message text.
       property message : String

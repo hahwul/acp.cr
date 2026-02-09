@@ -268,8 +268,8 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
     STDERR.puts "" # Blank line before agent response
 
   when ACP::Protocol::AgentMessageChunkUpdate
-    Term.agent(u.content)
-    current_message.print(u.content)
+    Term.agent(u.text)
+    current_message.print(u.text)
   when ACP::Protocol::AgentMessageEndUpdate
     in_message = false
     if reason = u.stop_reason
@@ -281,7 +281,7 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
     STDERR.puts "" # Newline after message
 
   when ACP::Protocol::ThoughtUpdate
-    Term.thought(u.content)
+    Term.thought(u.text)
   when ACP::Protocol::ToolCallStartUpdate
     active_tools[u.tool_call_id] = u.title || u.tool_name || u.tool_call_id
     Term.tool(u.tool_call_id, u.title || u.tool_name, u.status)
@@ -421,9 +421,12 @@ if (ir = init_result) && (methods = ir.auth_methods)
     Term.info("Available methods: #{methods.join(", ")}")
 
     method_id = if methods.size == 1
-                  methods[0]
+                  methods[0].as_h["id"].as_s
                 else
-                  options = methods.map { |m| {id: m, label: m} }
+                  options = methods.map do |m|
+                    h = m.as_h
+                    {id: h["id"].as_s, label: h["name"]?.try(&.as_s) || h["id"].as_s}
+                  end
                   Term.pick("Select authentication method:", options)
                 end
 

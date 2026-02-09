@@ -24,10 +24,12 @@ module ACP
       include JSON::Serializable
 
       use_json_discriminator "type", {
-        "text"  => TextContentBlock,
-        "image" => ImageContentBlock,
-        "audio" => AudioContentBlock,
-        "file"  => FileContentBlock,
+        "text"          => TextContentBlock,
+        "image"         => ImageContentBlock,
+        "audio"         => AudioContentBlock,
+        "file"          => ResourceContentBlock,
+        "resource"      => ResourceContentBlock,
+        "resource_link" => ResourceContentBlock,
       }
 
       # The discriminator field present on every content block.
@@ -45,6 +47,7 @@ module ACP
       getter type : String = "text"
 
       # The text content of the block.
+      @[JSON::Field(key: "text")]
       property content : String
 
       def initialize(@content : String)
@@ -110,28 +113,41 @@ module ACP
       end
     end
 
-    # ─── File Content Block ───────────────────────────────────────────
+    # ─── Resource Content Block ───────────────────────────────────────
 
-    # A file-reference content block. Points to a file on the local
-    # file system by its absolute path. The agent may read the file
-    # contents if it has the appropriate capabilities.
-    struct FileContentBlock < ContentBlock
+    # A resource content block (or file reference). Points to a resource
+    # or file by its URI.
+    struct ResourceContentBlock < ContentBlock
       include JSON::Serializable
 
-      # Always "file" for this block type.
-      getter type : String = "file"
+      # Always "resource" for this block type in modern ACP/Gemini.
+      getter type : String = "resource"
 
-      # Absolute path to the file on the local file system.
-      property path : String
+      # The URI of the resource (e.g., file:///path/to/file).
+      @[JSON::Field(key: "uri")]
+      property uri : String
 
-      # Optional MIME type hint for the file content.
+      # Optional human-readable name for the resource.
+      property name : String?
+
+      # Optional MIME type hint for the content.
       @[JSON::Field(key: "mimeType")]
       property mime_type : String?
 
-      def initialize(@path : String, @mime_type : String? = nil)
-        @type = "file"
+      def initialize(uri : String, @name : String? = nil, @mime_type : String? = nil)
+        @uri = uri.starts_with?("/") ? "file://#{uri}" : uri
+        @name ||= File.basename(@uri)
+        @type = "resource"
+      end
+
+      # Alias for standard ACP compatibility
+      def path
+        @uri.sub("file://", "")
       end
     end
+
+    # Alias for backward compatibility
+    alias FileContentBlock = ResourceContentBlock
 
     # ─── Convenience Constructors ─────────────────────────────────────
 
@@ -162,9 +178,14 @@ module ACP
         AudioContentBlock.new(data: data, mime_type: mime_type)
       end
 
-      # Creates a file content block from an absolute path.
-      def self.file(path : String, mime_type : String? = nil) : FileContentBlock
-        FileContentBlock.new(path, mime_type)
+      # Creates a resource (file) content block from an absolute path or URI.
+      def self.file(path : String, mime_type : String? = nil) : ResourceContentBlock
+        ResourceContentBlock.new(uri: path, mime_type: mime_type)
+      end
+
+      # Creates a resource content block.
+      def self.resource(uri : String, name : String? = nil, mime_type : String? = nil) : ResourceContentBlock
+        ResourceContentBlock.new(uri: uri, name: name, mime_type: mime_type)
       end
     end
   end
