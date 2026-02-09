@@ -8,6 +8,12 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Ameba linter
+        uses: crystal-ameba/github-action@master
   tests:
     runs-on: ubuntu-latest
     strategy:
