@@ -283,7 +283,7 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
     Term.thought(u.text)
   when ACP::Protocol::ToolCallStartUpdate
     active_tools[u.tool_call_id] = u.title || u.tool_name || u.tool_call_id
-    Term.tool(u.tool_call_id, u.title || u.tool_name, u.status)
+    Term.tool(u.tool_call_id, u.title || u.tool_name, u.status || "pending")
   when ACP::Protocol::ToolCallChunkUpdate
     if content = u.content
       kind_label = u.kind ? " [#{u.kind}]" : ""
@@ -450,8 +450,8 @@ begin
   Term.success("Session created: #{session.not_nil!.id}")
 
   if modes = session.not_nil!.modes
-    if modes.size > 0
-      Term.info("Available modes: #{modes.map(&.id).join(", ")}")
+    if modes.available_modes.size > 0
+      Term.info("Available modes: #{modes.available_modes.map(&.id).join(", ")}")
     end
   end
 rescue ex : Exception
@@ -509,9 +509,9 @@ loop do
     next
   when "/modes"
     s = session
-    if s && (modes = s.modes) && modes.size > 0
+    if s && (modes = s.modes) && modes.available_modes.size > 0
       Term.info("Available modes:")
-      modes.each do |mode|
+      modes.available_modes.each do |mode|
         desc = mode.description ? " — #{mode.description}" : ""
         Term.info("  #{mode.id}: #{mode.label}#{desc}")
       end
@@ -525,7 +525,7 @@ loop do
       Term.info("Session ID: #{s.id}")
       Term.info("Client state: #{client.state}")
       if modes = s.modes
-        Term.info("Modes: #{modes.map(&.id).join(", ")}")
+        Term.info("Modes: #{modes.available_modes.map(&.id).join(", ")}")
       end
     else
       Term.warn("No active session")

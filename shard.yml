@@ -11,7 +11,3 @@ authors:
 crystal: ">= 1.19.1"
 
 license: MIT
-
-targets:
-  interactive_client:
-    main: examples/interactive_client.cr
