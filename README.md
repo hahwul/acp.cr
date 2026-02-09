@@ -75,10 +75,10 @@ client.close
 ┌─────────────────────────────────────────────────────────┐
 │                      Your Application                   │
 │                                                         │
-│  ┌───────────┐   ┌─────────────┐   ┌────────────────┐  │
-│  │  Session   │──▶│   Client    │──▶│   Transport    │──┼──▶ Agent Process
-│  │  (high)    │   │  (core)     │   │  (stdio/pipe)  │  │     (stdin/stdout)
-│  └───────────┘   └─────────────┘   └────────────────┘  │
+│  ┌───────────┐   ┌─────────────┐   ┌────────────────┐   │
+│  │  Session  │──▶│   Client    │──▶│   Transport    │───┼──▶ Agent Process
+│  │  (high)   │   │  (core)     │   │  (stdio/pipe)  │   │     (stdin/stdout)
+│  └───────────┘   └─────────────┘   └────────────────┘   │
 │       │               │                    │            │
 │       ▼               ▼                    ▼            │
 │  PromptBuilder   Dispatcher Fiber    Reader Fiber       │
