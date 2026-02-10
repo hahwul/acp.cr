@@ -75,6 +75,7 @@ Several examples are provided in the `examples/` directory to help you get start
 
 - `simple_client.cr` — A minimal example showing basic connection and prompting.
 - `content_blocks.cr` — Demonstrates rich prompts with multiple content types (text, resource links) and tool handling.
+- `claude_code_agent.cr` — Demonstrates how to use **Claude Code** as an ACP agent (via `npx`).
 - `gemini_agent.cr` — Demonstrates how to use the **Gemini CLI** as an ACP agent.
 - `codex_agent.cr` — Demonstrates how to use **Codex** via ACP adapter.
 - `interactive_client.cr` — A full-featured interactive CLI client with streaming, tool calls, and permission handling.
@@ -92,6 +93,10 @@ crystal run examples/gemini_agent.cr
 # Using Codex as an agent
 # Requires: npm installed
 crystal run examples/codex_agent.cr
+
+# Using Claude Code as an agent
+# Requires: Node.js and npm installed
+crystal run examples/claude_code_agent.cr
 
 # Rich prompt example
 crystal run examples/content_blocks.cr -- my-agent --stdio
