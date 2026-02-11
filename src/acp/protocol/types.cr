@@ -302,10 +302,12 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-config-options
 
     # A possible value for a session configuration option.
+    # Matches the Rust SDK's `SessionConfigSelectOption`.
     struct ConfigOptionValue
       include JSON::Serializable
 
       # Unique identifier for this option value (required).
+      # Maps to the Rust SDK's `SessionConfigValueId`.
       property value : String
 
       # Human-readable label for this option value (required).
@@ -327,12 +329,51 @@ module ACP
       end
     end
 
+    # Backward-compatible alias.
+    alias SessionConfigSelectOption = ConfigOptionValue
+
+    # A group of possible values for a session configuration option.
+    # Matches the Rust SDK's `SessionConfigSelectGroup`.
+    # Groups allow organizing option values into logical sections
+    # (e.g., grouping models by provider).
+    # See: https://agentclientprotocol.com/protocol/session-config-options
+    struct ConfigOptionGroup
+      include JSON::Serializable
+
+      # Unique identifier for this group (required).
+      # Maps to the Rust SDK's `SessionConfigGroupId`.
+      property id : String
+
+      # Human-readable label for this group (required).
+      property name : String
+
+      # The values in this group (required).
+      property options : Array(ConfigOptionValue)
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @id : String,
+        @name : String,
+        @options : Array(ConfigOptionValue) = [] of ConfigOptionValue,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Backward-compatible alias.
+    alias SessionConfigSelectGroup = ConfigOptionGroup
+
     # A single session configuration option and its current state.
+    # Matches the Rust SDK's `SessionConfigOption` + `SessionConfigSelect`.
     # See: https://agentclientprotocol.com/protocol/session-config-options#configoption
     struct ConfigOption
       include JSON::Serializable
 
       # Unique identifier for this config option (required).
+      # Maps to the Rust SDK's `SessionConfigId`.
       property id : String
 
       # Human-readable label (required).
@@ -344,18 +385,28 @@ module ACP
       # Optional semantic category to help Clients provide consistent UX.
       # Reserved categories: "mode", "model", "thought_level".
       # Names beginning with `_` are free for custom use.
+      # See: https://agentclientprotocol.com/protocol/session-config-options#option-categories
       property category : String?
 
       # The type of input control (required). Currently only "select" is supported.
+      # Maps to the Rust SDK's `SessionConfigKind`.
       @[JSON::Field(key: "type")]
       property config_type : String = "select"
 
       # The currently selected value (required).
+      # Maps to the Rust SDK's `SessionConfigSelect.current_value`.
       @[JSON::Field(key: "currentValue")]
       property current_value : String?
 
-      # The available values for this option (required for "select" type).
+      # Flat list of available values for this option.
+      # Used when options are not grouped. Maps to the Rust SDK's
+      # `SessionConfigSelectOptions::Flat`.
       property options : Array(ConfigOptionValue)?
+
+      # Grouped list of available values for this option.
+      # Used when options are organized into logical sections (e.g., by provider).
+      # Maps to the Rust SDK's `SessionConfigSelectOptions::Grouped`.
+      property groups : Array(ConfigOptionGroup)?
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -367,6 +418,7 @@ module ACP
         @config_type : String = "select",
         @current_value : String? = nil,
         @options : Array(ConfigOptionValue)? = nil,
+        @groups : Array(ConfigOptionGroup)? = nil,
         @description : String? = nil,
         @category : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
@@ -382,7 +434,28 @@ module ACP
       def value : String?
         @current_value
       end
+
+      # Returns true if this option uses grouped values.
+      def grouped? : Bool
+        !@groups.nil? && !@groups.try(&.empty?)
+      end
+
+      # Returns all option values across all groups (flattened).
+      # If the option has flat `options`, returns those.
+      # If the option has `groups`, returns all values from all groups.
+      def all_values : Array(ConfigOptionValue)
+        if opts = @options
+          opts
+        elsif grps = @groups
+          grps.flat_map(&.options)
+        else
+          [] of ConfigOptionValue
+        end
+      end
     end
+
+    # Backward-compatible alias.
+    alias SessionConfigOption = ConfigOption
 
     # ─── Session/New Result ───────────────────────────────────────────
 
@@ -837,6 +910,80 @@ module ACP
       end
     end
 
+    # ─── Extension Types ──────────────────────────────────────────────
+    # Extension methods provide a way to add custom functionality while
+    # maintaining protocol compatibility. Extension method names are
+    # prefixed with `_` on the wire.
+    # See: https://agentclientprotocol.com/protocol/extensibility
+
+    # Allows for sending an arbitrary request that is not part of the
+    # ACP spec. The `method` field is the custom method name WITHOUT
+    # the `_` prefix (the prefix is added automatically on the wire).
+    struct ExtRequest
+      include JSON::Serializable
+
+      # The custom method name (without the `_` prefix).
+      @[JSON::Field(ignore: true)]
+      property method : String = ""
+
+      # The request parameters as raw JSON.
+      property params : JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @method : String,
+        @params : JSON::Any = JSON::Any.new(nil),
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Response to an `ExtRequest`.
+    struct ExtResponse
+      include JSON::Serializable
+
+      # The response data as raw JSON.
+      property result : JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @result : JSON::Any = JSON::Any.new(nil),
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Allows for sending an arbitrary one-way notification that is not
+    # part of the ACP spec. The `method` field is the custom method name
+    # WITHOUT the `_` prefix.
+    struct ExtNotification
+      include JSON::Serializable
+
+      # The custom method name (without the `_` prefix).
+      @[JSON::Field(ignore: true)]
+      property method : String = ""
+
+      # The notification parameters as raw JSON.
+      property params : JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @method : String,
+        @params : JSON::Any = JSON::Any.new(nil),
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
     # ─── Utility: Build JSON-RPC Messages ─────────────────────────────
 
     # Builds a JSON-RPC 2.0 request object as a Hash for serialization.
@@ -875,6 +1022,15 @@ module ACP
       msg["jsonrpc"] = JSON::Any.new("2.0")
       msg["method"] = JSON::Any.new(method)
       msg["params"] = JSON.parse(params.to_json)
+      msg
+    end
+
+    # Builds a JSON-RPC 2.0 notification with raw JSON::Any params.
+    def self.build_notification_raw(method : String, params : JSON::Any) : Hash(String, JSON::Any)
+      msg = Hash(String, JSON::Any).new
+      msg["jsonrpc"] = JSON::Any.new("2.0")
+      msg["method"] = JSON::Any.new(method)
+      msg["params"] = params
       msg
     end
 

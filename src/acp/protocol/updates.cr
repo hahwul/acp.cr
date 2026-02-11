@@ -28,9 +28,38 @@
 # Reference: https://agentclientprotocol.com/protocol/schema
 
 require "json"
+require "./content_block"
 
 module ACP
   module Protocol
+    # ─── Content Chunk ─────────────────────────────────────────────────
+    # A streamed item of content, wrapping a ContentBlock. Used in
+    # message chunk session updates (user_message_chunk,
+    # agent_message_chunk, agent_thought_chunk).
+    #
+    # Matches the Rust SDK's `ContentChunk` struct.
+    # See: https://agentclientprotocol.com/protocol/prompt-turn
+    struct ContentChunk
+      include JSON::Serializable
+
+      # A single item of content (text, image, audio, resource, resource_link).
+      property content : ContentBlock
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil)
+      end
+
+      # Convenience: returns the text if the content is a TextContentBlock.
+      def text : String?
+        if c = @content.as?(TextContentBlock)
+          c.text
+        end
+      end
+    end
+
     # ─── Session Update Wrapper ────────────────────────────────────────
     #
     # The params of a `session/update` notification. Contains the session
@@ -109,7 +138,8 @@ module ACP
     struct UserMessageChunkUpdate < SessionUpdate
       include JSON::Serializable
 
-      # The content chunk. In the ACP spec this is a ContentBlock (ContentChunk).
+      # The content chunk. Kept as JSON::Any for backward compatibility
+      # with agents that may send varying formats.
       property content : JSON::Any
 
       # Extension metadata.
@@ -130,6 +160,21 @@ module ACP
           @content.to_json
         end
       end
+
+      # Attempts to parse the content as a typed ContentBlock.
+      # Returns nil if parsing fails.
+      def content_block : ContentBlock?
+        if h = @content.as_h?
+          ContentBlock.from_json(@content.to_json) rescue nil
+        end
+      end
+
+      # Returns a ContentChunk wrapping the parsed content block, if possible.
+      def to_content_chunk : ContentChunk?
+        if block = content_block
+          ContentChunk.new(block, @meta)
+        end
+      end
     end
 
     # ─── Agent Message Chunk ───────────────────────────────────────────
@@ -139,7 +184,8 @@ module ACP
     struct AgentMessageChunkUpdate < SessionUpdate
       include JSON::Serializable
 
-      # The content chunk. In the ACP spec this is a ContentBlock (ContentChunk).
+      # The content chunk. Kept as JSON::Any for backward compatibility
+      # with agents that may send varying formats.
       property content : JSON::Any
 
       # Extension metadata.
@@ -160,6 +206,21 @@ module ACP
           @content.to_json
         end
       end
+
+      # Attempts to parse the content as a typed ContentBlock.
+      # Returns nil if parsing fails.
+      def content_block : ContentBlock?
+        if h = @content.as_h?
+          ContentBlock.from_json(@content.to_json) rescue nil
+        end
+      end
+
+      # Returns a ContentChunk wrapping the parsed content block, if possible.
+      def to_content_chunk : ContentChunk?
+        if block = content_block
+          ContentChunk.new(block, @meta)
+        end
+      end
     end
 
     # ─── Agent Thought Chunk ───────────────────────────────────────────
@@ -169,7 +230,8 @@ module ACP
     struct AgentThoughtChunkUpdate < SessionUpdate
       include JSON::Serializable
 
-      # The thought content chunk.
+      # The content chunk. Kept as JSON::Any for backward compatibility
+      # with agents that may send varying formats.
       property content : JSON::Any
 
       # Extension metadata.
@@ -191,9 +253,24 @@ module ACP
         end
       end
 
-      # Helper alias — some agents use "title" to label the thought.
+      # Backward-compatible alias for `text`. Some agents send a `title` field.
       def title : String
         text
+      end
+
+      # Attempts to parse the content as a typed ContentBlock.
+      # Returns nil if parsing fails.
+      def content_block : ContentBlock?
+        if h = @content.as_h?
+          ContentBlock.from_json(@content.to_json) rescue nil
+        end
+      end
+
+      # Returns a ContentChunk wrapping the parsed content block, if possible.
+      def to_content_chunk : ContentChunk?
+        if block = content_block
+          ContentChunk.new(block, @meta)
+        end
       end
     end
 

@@ -181,6 +181,42 @@ module ACP
       result
     end
 
+    # ─── Extension Methods ────────────────────────────────────────────
+    # Extension methods provide a way to add custom functionality while
+    # maintaining protocol compatibility. Method names are prefixed with
+    # `_` on the wire automatically.
+    # See: https://agentclientprotocol.com/protocol/extensibility
+
+    # Sends a custom extension request to the agent and waits for a response.
+    #
+    # - `method` — the custom method name (WITHOUT the `_` prefix).
+    # - `params` — the request parameters as raw JSON.
+    #
+    # Returns the raw JSON response from the agent.
+    #
+    # Example:
+    #   ```
+    # result = session.ext_method("my_custom_method", JSON.parse(%({"key": "value"})))
+    #   ```
+    def ext_method(method : String, params : JSON::Any = JSON::Any.new(nil)) : JSON::Any
+      ensure_open!
+      @client.ext_method(method, params)
+    end
+
+    # Sends a custom extension notification to the agent (fire-and-forget).
+    #
+    # - `method` — the custom method name (WITHOUT the `_` prefix).
+    # - `params` — the notification parameters as raw JSON.
+    #
+    # Example:
+    #   ```
+    # session.ext_notification("my_custom_event", JSON.parse(%({"status": "ok"})))
+    #   ```
+    def ext_notification(method : String, params : JSON::Any = JSON::Any.new(nil)) : Nil
+      ensure_open!
+      @client.ext_notification(method, params)
+    end
+
     # ─── State ────────────────────────────────────────────────────────
 
     # Marks this session as closed. Further prompt/cancel calls will

@@ -417,6 +417,79 @@ module ACP
       end
     end
 
+    # ─── Agent Method Names ───────────────────────────────────────────
+    # Constants for all agent method names (client → agent requests),
+    # matching the Rust SDK's `AGENT_METHOD_NAMES`.
+    # See: https://agentclientprotocol.com/protocol/overview
+
+    module AgentMethod
+      # Connection lifecycle.
+      INITIALIZE   = "initialize"
+      AUTHENTICATE = "authenticate"
+
+      # Session management.
+      SESSION_NEW               = "session/new"
+      SESSION_LOAD              = "session/load"
+      SESSION_PROMPT            = "session/prompt"
+      SESSION_CANCEL            = "session/cancel"
+      SESSION_SET_MODE          = "session/set_mode"
+      SESSION_SET_CONFIG_OPTION = "session/set_config_option"
+
+      # Session update notification (agent → client).
+      SESSION_UPDATE = "session/update"
+
+      # Returns true if the given method name is a known agent method.
+      def self.known?(method : String) : Bool
+        case method
+        when INITIALIZE, AUTHENTICATE,
+             SESSION_NEW, SESSION_LOAD, SESSION_PROMPT, SESSION_CANCEL,
+             SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE
+          true
+        else
+          false
+        end
+      end
+
+      # Returns true if the given method name is a session method.
+      def self.session_method?(method : String) : Bool
+        case method
+        when SESSION_NEW, SESSION_LOAD, SESSION_PROMPT, SESSION_CANCEL,
+             SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE
+          true
+        else
+          false
+        end
+      end
+    end
+
+    # ─── Extension Method Helpers ─────────────────────────────────────
+    # Extension methods in ACP are prefixed with `_`. These helpers
+    # detect and strip the prefix for dispatch.
+    # See: https://agentclientprotocol.com/protocol/extensibility
+
+    module ExtensionMethod
+      # Extension method prefix as defined by the ACP spec.
+      PREFIX = "_"
+
+      # Returns true if the given method name is an extension method.
+      def self.extension?(method : String) : Bool
+        method.starts_with?(PREFIX)
+      end
+
+      # Strips the extension prefix from a method name.
+      # Returns nil if the method is not an extension method.
+      def self.strip_prefix(method : String) : String?
+        if extension?(method)
+          method[PREFIX.size..]
+        end
+      end
+
+      # Adds the extension prefix to a method name.
+      def self.add_prefix(method : String) : String
+        "#{PREFIX}#{method}"
+      end
+    end
+
     # ─── Client Method Names ──────────────────────────────────────────
     # Constants for all client method names, for use in dispatching
     # and handler registration.
