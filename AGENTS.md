@@ -22,12 +22,12 @@ src/
     ├── session.cr                  # High-level ACP::Session wrapper + PromptBuilder DSL
     └── protocol/
         ├── capabilities.cr         # ClientCapabilities, AgentCapabilities, MCP server types
-        ├── client_methods.cr       # fs/read_text_file, fs/write_text_file, terminal/* request/response types
+        ├── client_methods.cr       # fs/*, terminal/* types + AgentMethod/ClientMethod/ExtensionMethod constants
         ├── content_block.cr        # ContentBlock discriminated union (text, image, audio, resource, resource_link)
         ├── enums.cr                # StopReason, ToolKind, ToolCallStatus, Role, etc.
         ├── tool_call_content.cr    # ToolCallContent, ToolCallDiff, ToolCallTerminal, ToolCallLocation
-        ├── types.cr                # All JSON-RPC method params/results, message builders
-        └── updates.cr              # SessionUpdate discriminated union (20+ update types)
+        ├── types.cr                # All JSON-RPC method params/results, ExtRequest/ExtResponse/ExtNotification, message builders
+        └── updates.cr              # SessionUpdate discriminated union (20+ update types), ContentChunk
 examples/
 ├── simple_client.cr                # Minimal usage example
 ├── content_blocks.cr               # Rich prompts with multiple content types
@@ -82,6 +82,7 @@ bin/acp-client <agent-command> [args...]
 - Response correlation uses `Hash(Int64, Channel)` keyed by request ID.
 - Agent-initiated requests (e.g., `session/request_permission`) are handled via the `on_agent_request` callback.
 - Notifications (no `id` field) are routed to `on_notification` or `on_update` handlers.
+- Extension methods (prefixed with `_` on the wire) are supported via `ext_method` / `ext_notification` on both `Client` and `Session`.
 
 ### Typed Handler System
 
@@ -109,6 +110,21 @@ ACP::Error
 └── RequestCancelledError
 ```
 
+### ContentChunk
+
+The `Protocol::ContentChunk` struct wraps a typed `ContentBlock` for message chunk session updates. This matches the Rust SDK's `ContentChunk` type. The chunk update types (`AgentMessageChunkUpdate`, `UserMessageChunkUpdate`, `AgentThoughtChunkUpdate`) keep `content` as `JSON::Any` for backward compatibility but provide:
+- `content_block` — attempts to parse the content as a typed `ContentBlock`.
+- `to_content_chunk` — returns a `ContentChunk` wrapping the parsed content block.
+
+### Session Config Options (Grouped)
+
+`ConfigOption` supports both flat and grouped option values, matching the Rust SDK's `SessionConfigSelect` / `SessionConfigSelectGroup`:
+- `options : Array(ConfigOptionValue)?` — flat list of values (`SessionConfigSelectOptions::Flat`).
+- `groups : Array(ConfigOptionGroup)?` — grouped values (`SessionConfigSelectOptions::Grouped`).
+- `grouped?` — returns true if the option uses groups.
+- `all_values` — returns all values flattened across groups or flat options.
+- Type aliases: `SessionConfigSelectOption`, `SessionConfigSelectGroup`, `SessionConfigOption` for Rust SDK naming parity.
+
 ### Client State Machine
 
 `ClientState` enum: `Created → Initialized → SessionActive → Closed`
@@ -119,10 +135,10 @@ Methods enforce valid state transitions via `ensure_state`.
 
 - **Crystal style**: Use `crystal tool format` before committing.
 - **Documentation**: All public methods and types have doc comments (`#` comments above the definition).
-- **Properties**: Use `property` for mutable fields, `getter` for read-only.
+- **Properties**: Use `property` for mutable fields, `getter` for read-only. Use `@[JSON::Field(ignore: true)]` for fields that should not appear in JSON serialization (e.g., `ExtRequest.method`).
 - **JSON mapping**: Use `JSON::Serializable` with `@[JSON::Field(key: "camelCase")]` annotations where the protocol uses camelCase.
 - **Nil safety**: Crystal's strict nil checking is enforced. Use `String?` for optional protocol fields. When passing nullable values to methods expecting non-nil, provide sensible defaults (e.g., `u.status || "pending"`).
-- **Aliases**: Backward-compatible aliases (e.g., `ToolCallStartUpdate = ToolCallUpdate`, `ThoughtUpdate = AgentThoughtChunkUpdate`) preserve API compatibility.
+- **Aliases**: Backward-compatible aliases (e.g., `ToolCallStartUpdate = ToolCallUpdate`, `ThoughtUpdate = AgentThoughtChunkUpdate`, `SessionConfigOption = ConfigOption`) preserve API compatibility and provide naming parity with the Rust SDK.
 - **Logging**: Use `ACP::Log` (scoped to `"acp.transport"`) for transport-level diagnostics. Examples use `STDERR` for UI output.
 - **Fiber safety**: Crystal fibers are cooperatively scheduled on a single thread — use `Channel` for inter-fiber communication, no mutexes needed.
 
@@ -135,9 +151,11 @@ Tests use Crystal's built-in `spec` framework. The test suite in `spec/acp_spec.
 
 When adding new features:
 1. Add protocol types to the appropriate file in `src/acp/protocol/`.
-2. Add client methods to `src/acp/client.cr`.
-3. Add convenience wrappers to `src/acp/session.cr` if appropriate.
-4. Add tests to `spec/acp_spec.cr` using `TestTransport`.
+2. Add method name constants to `AgentMethod` or `ClientMethod` modules in `client_methods.cr`.
+3. Add client methods to `src/acp/client.cr` (including `send_request_raw`/`send_notification_raw` variants for raw JSON params).
+4. Add convenience wrappers to `src/acp/session.cr` if appropriate.
+5. Add tests to `spec/acp_spec.cr` using `TestTransport`.
+6. Run `crystal tool format` before committing.
 
 ## Environment Variables (Interactive Client)
 
@@ -148,6 +166,7 @@ When adding new features:
 ## Common Pitfalls
 
 - **Nullable protocol fields**: Many ACP protocol fields are optional (`String?`, `Array?`). Always handle nil when passing these to methods with non-nil parameters.
+- **Extension method prefix**: Extension methods use `_` prefix on the wire. Use `Protocol::ExtensionMethod.add_prefix` / `strip_prefix` rather than manual string manipulation. The `ext_method` / `ext_notification` APIs handle prefixing automatically.
 - **SessionUpdate dispatch**: The `SessionUpdate` struct uses `session_update` as a discriminator. When adding new update types, register them in the `from_json_object_key` mapping in `updates.cr`.
 - **Channel lifecycle**: Always handle `Channel::ClosedError` when sending/receiving on channels, as transports may close at any time.
 - **Process cleanup**: `ProcessTransport#close` sends a graceful termination signal and waits 2 seconds before force-killing. Ensure `client.close` is called in all exit paths.

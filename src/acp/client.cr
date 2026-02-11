@@ -444,6 +444,43 @@ module ACP
       result
     end
 
+    # ─── Extension Methods ────────────────────────────────────────────
+    # Extension methods provide a way to add custom functionality while
+    # maintaining protocol compatibility. Method names are prefixed with
+    # `_` on the wire automatically.
+    # See: https://agentclientprotocol.com/protocol/extensibility
+
+    # Sends a custom extension request to the agent and waits for a response.
+    #
+    # - `method` — the custom method name (WITHOUT the `_` prefix).
+    # - `params` — the request parameters as raw JSON.
+    # - `timeout` — optional timeout override (nil = use default).
+    #
+    # Returns the raw JSON response from the agent.
+    #
+    # Example:
+    #   ```
+    # result = client.ext_method("my_custom_method", JSON.parse(%({"key": "value"})))
+    #   ```
+    def ext_method(method : String, params : JSON::Any = JSON::Any.new(nil), timeout : Float64? = @request_timeout) : JSON::Any
+      wire_method = Protocol::ExtensionMethod.add_prefix(method)
+      send_request_raw(wire_method, params, timeout: timeout)
+    end
+
+    # Sends a custom extension notification to the agent (fire-and-forget).
+    #
+    # - `method` — the custom method name (WITHOUT the `_` prefix).
+    # - `params` — the notification parameters as raw JSON.
+    #
+    # Example:
+    #   ```
+    # client.ext_notification("my_custom_event", JSON.parse(%({"status": "ok"})))
+    #   ```
+    def ext_notification(method : String, params : JSON::Any = JSON::Any.new(nil)) : Nil
+      wire_method = Protocol::ExtensionMethod.add_prefix(method)
+      send_notification_raw(wire_method, params)
+    end
+
     # Closes the client, stopping the dispatcher and closing the transport.
     def close : Nil
       return if @state == ClientState::Closed
@@ -567,6 +604,78 @@ module ACP
       @transport.send(message)
 
       ClientLog.debug { "Sent notification method=#{method}" }
+    end
+
+    # Sends a JSON-RPC request with raw JSON::Any params and waits for the response.
+    #
+    # - `method` — the RPC method name.
+    # - `params` — the request parameters as raw JSON::Any.
+    # - `timeout` — optional timeout in seconds (nil = no timeout).
+    #
+    # Returns the `result` field from the response as JSON::Any.
+    # Raises `JsonRpcError` if the response contains an error.
+    # Raises `RequestTimeoutError` if the request times out.
+    # Raises `ConnectionClosedError` if the transport is closed.
+    def send_request_raw(
+      method : String,
+      params : JSON::Any,
+      timeout : Float64? = @request_timeout,
+    ) : JSON::Any
+      raise ConnectionClosedError.new if closed?
+
+      id = next_id
+      id_str = id.to_s
+
+      response_channel = Channel(JSON::Any).new(1)
+
+      @pending_mutex.synchronize do
+        @pending[id_str] = response_channel
+      end
+
+      message = Protocol.build_request_raw(id, method, params)
+      @transport.send(message)
+
+      ClientLog.debug { "Sent raw request id=#{id} method=#{method}" }
+
+      raw_response = if timeout
+                       receive_with_timeout(response_channel, timeout, id)
+                     else
+                       begin
+                         response_channel.receive
+                       rescue Channel::ClosedError
+                         raise ConnectionClosedError.new("Channel closed while waiting for response to #{method}")
+                       end
+                     end
+
+      @pending_mutex.synchronize do
+        @pending.delete(id_str)
+      end
+
+      if error = raw_response["error"]?
+        if error.raw.is_a?(Hash)
+          raise JsonRpcError.from_json_any(error)
+        else
+          raise JsonRpcError.new(
+            JsonRpcError::INTERNAL_ERROR,
+            error.as_s? || "Unknown error"
+          )
+        end
+      end
+
+      raw_response["result"]? || JSON::Any.new(nil)
+    end
+
+    # Sends a JSON-RPC notification with raw JSON::Any params (no response expected).
+    #
+    # - `method` — the notification method name.
+    # - `params` — the notification parameters as raw JSON::Any.
+    def send_notification_raw(method : String, params : JSON::Any) : Nil
+      raise ConnectionClosedError.new if closed?
+
+      message = Protocol.build_notification_raw(method, params)
+      @transport.send(message)
+
+      ClientLog.debug { "Sent raw notification method=#{method}" }
     end
 
     # Responds to an agent-initiated request.
@@ -785,6 +894,10 @@ module ACP
       method_name : String,
       params : JSON::Any?,
     ) : Nil
+      # Check if this is an extension method (prefixed with `_`).
+      # Extension methods are dispatched to `on_agent_request` with the
+      # full wire name (including the `_` prefix), allowing handlers to
+      # distinguish extension methods from standard ones.
       if handler = @on_agent_request
         begin
           result = handler.call(method_name, params || JSON::Any.new(nil))
@@ -794,12 +907,17 @@ module ACP
           respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
         end
       else
-        # No handler registered — respond with method not found.
-        respond_to_agent_error(
-          id,
-          JsonRpcError::METHOD_NOT_FOUND,
-          "Client does not handle method: #{method_name}"
-        )
+        if Protocol::ExtensionMethod.extension?(method_name)
+          # Extension methods without a handler get a null response.
+          respond_to_agent(id, JSON::Any.new(nil))
+        else
+          # No handler registered — respond with method not found.
+          respond_to_agent_error(
+            id,
+            JsonRpcError::METHOD_NOT_FOUND,
+            "Client does not handle method: #{method_name}"
+          )
+        end
       end
     end
 
@@ -876,6 +994,7 @@ module ACP
         handle_session_update(params)
       else
         # Delegate to the generic notification handler.
+        # Extension notifications (prefixed with `_`) are also routed here.
         if handler = @on_notification
           begin
             handler.call(method_name, params)
@@ -883,7 +1002,11 @@ module ACP
             ClientLog.error { "Error in notification handler: #{ex.message}" }
           end
         else
-          ClientLog.debug { "Unhandled notification: #{method_name}" }
+          if Protocol::ExtensionMethod.extension?(method_name)
+            ClientLog.debug { "Unhandled extension notification: #{method_name}" }
+          else
+            ClientLog.debug { "Unhandled notification: #{method_name}" }
+          end
         end
       end
     end

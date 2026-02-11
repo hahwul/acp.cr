@@ -3337,3 +3337,636 @@ describe "Client typed handler dispatch" do
     client.close
   end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Extension Method Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Extension Methods" do
+  # ─── ExtensionMethod Helpers ──────────────────────────────────────
+
+  describe ACP::Protocol::ExtensionMethod do
+    it "detects extension methods by prefix" do
+      ACP::Protocol::ExtensionMethod.extension?("_my_method").should be_true
+      ACP::Protocol::ExtensionMethod.extension?("_custom").should be_true
+      ACP::Protocol::ExtensionMethod.extension?("session/prompt").should be_false
+      ACP::Protocol::ExtensionMethod.extension?("initialize").should be_false
+    end
+
+    it "strips the extension prefix" do
+      ACP::Protocol::ExtensionMethod.strip_prefix("_my_method").should eq("my_method")
+      ACP::Protocol::ExtensionMethod.strip_prefix("_custom").should eq("custom")
+      ACP::Protocol::ExtensionMethod.strip_prefix("session/prompt").should be_nil
+    end
+
+    it "adds the extension prefix" do
+      ACP::Protocol::ExtensionMethod.add_prefix("my_method").should eq("_my_method")
+      ACP::Protocol::ExtensionMethod.add_prefix("custom").should eq("_custom")
+    end
+  end
+
+  # ─── ExtRequest / ExtResponse / ExtNotification Types ─────────────
+
+  describe ACP::Protocol::ExtRequest do
+    it "creates with method and params" do
+      req = ACP::Protocol::ExtRequest.new(
+        method: "my_custom",
+        params: JSON.parse(%({"key": "value"}))
+      )
+      req.method.should eq("my_custom")
+      req.params["key"].as_s.should eq("value")
+    end
+
+    it "defaults params to nil" do
+      req = ACP::Protocol::ExtRequest.new(method: "test")
+      req.method.should eq("test")
+      req.params.raw.should be_nil
+    end
+
+    it "serializes params (method is ignored in JSON)" do
+      req = ACP::Protocol::ExtRequest.new(
+        method: "test",
+        params: JSON.parse(%({"foo": "bar"}))
+      )
+      json = JSON.parse(req.to_json)
+      json["params"]["foo"].as_s.should eq("bar")
+      # method is marked JSON::Field(ignore: true)
+      json["method"]?.should be_nil
+    end
+  end
+
+  describe ACP::Protocol::ExtResponse do
+    it "creates with result" do
+      resp = ACP::Protocol::ExtResponse.new(
+        result: JSON.parse(%({"status": "ok"}))
+      )
+      resp.result["status"].as_s.should eq("ok")
+    end
+
+    it "serializes to JSON" do
+      resp = ACP::Protocol::ExtResponse.new(
+        result: JSON.parse(%({"data": 42}))
+      )
+      json = JSON.parse(resp.to_json)
+      json["result"]["data"].as_i.should eq(42)
+    end
+  end
+
+  describe ACP::Protocol::ExtNotification do
+    it "creates with method and params" do
+      notif = ACP::Protocol::ExtNotification.new(
+        method: "my_event",
+        params: JSON.parse(%({"event": "click"}))
+      )
+      notif.method.should eq("my_event")
+      notif.params["event"].as_s.should eq("click")
+    end
+  end
+
+  # ─── Client ext_method ────────────────────────────────────────────
+
+  describe "Client#ext_method" do
+    it "sends extension request with _ prefix on wire" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      # Initialize
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      # Set up response for the extension request
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        sent["method"].as_s.should eq("_my_custom_method")
+        transport.inject_raw(%({"jsonrpc": "2.0", "id": #{sent["id"].as_i64}, "result": {"answer": 42}}))
+      end
+
+      result = client.ext_method("my_custom_method", JSON.parse(%({"question": "meaning"})))
+      result["answer"].as_i.should eq(42)
+
+      client.close
+    end
+  end
+
+  # ─── Client ext_notification ──────────────────────────────────────
+
+  describe "Client#ext_notification" do
+    it "sends extension notification with _ prefix on wire" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      # Initialize
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      client.ext_notification("my_event", JSON.parse(%({"status": "ok"})))
+
+      sleep 20.milliseconds
+
+      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif.should_not be_nil
+      notif = notif.as(JSON::Any)
+      notif["method"].as_s.should eq("_my_event")
+      notif["params"]["status"].as_s.should eq("ok")
+      # Notifications have no "id" field
+      notif["id"]?.should be_nil
+
+      client.close
+    end
+  end
+
+  # ─── Extension method dispatching (agent → client) ────────────────
+
+  describe "Extension method dispatching" do
+    it "routes extension requests to on_agent_request handler" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      received_method = ""
+      received_params = JSON::Any.new(nil)
+      client.on_agent_request = ->(method : String, params : JSON::Any) : JSON::Any {
+        received_method = method
+        received_params = params
+        JSON.parse(%({"handled": true}))
+      }
+
+      # Simulate agent sending an extension request
+      transport.inject_raw(%({"jsonrpc": "2.0", "id": "ext-1", "method": "_custom_tool", "params": {"data": "test"}}))
+      sleep 50.milliseconds
+
+      received_method.should eq("_custom_tool")
+      received_params["data"].as_s.should eq("test")
+
+      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-1" }
+      response.should_not be_nil
+      response.as(JSON::Any)["result"]["handled"].as_bool.should be_true
+
+      client.close
+    end
+
+    it "returns null response for extension requests without handler" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      # No on_agent_request handler set — extension methods get null response
+      transport.inject_raw(%({"jsonrpc": "2.0", "id": "ext-2", "method": "_unknown_ext", "params": {}}))
+      sleep 50.milliseconds
+
+      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-2" }
+      response.should_not be_nil
+      # Extension methods without handler get a null result, not method_not_found error
+      response.as(JSON::Any)["result"]?.should_not be_nil
+      response.as(JSON::Any)["error"]?.should be_nil
+
+      client.close
+    end
+
+    it "routes extension notifications to on_notification handler" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      received_method = ""
+      received_params : JSON::Any? = nil
+      client.on_notification = ->(method : String, params : JSON::Any?) : Nil {
+        received_method = method
+        received_params = params
+      }
+
+      transport.inject_raw(%({"jsonrpc": "2.0", "method": "_custom_event", "params": {"info": "test"}}))
+      sleep 50.milliseconds
+
+      received_method.should eq("_custom_event")
+      received_params.try(&.["info"]?.try(&.as_s?)).should eq("test")
+
+      client.close
+    end
+  end
+
+  # ─── Session extension methods ────────────────────────────────────
+
+  describe "Session extension methods" do
+    it "delegates ext_method to client" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+          transport.inject_raw(build_session_new_response(msg["id"].as_i64))
+        end
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(%({"jsonrpc": "2.0", "id": #{sent["id"].as_i64}, "result": {"custom": true}}))
+      end
+
+      result = session.ext_method("my_tool", JSON.parse(%({"input": "data"})))
+      result["custom"].as_bool.should be_true
+
+      client.close
+    end
+
+    it "delegates ext_notification to client" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+          transport.inject_raw(build_session_new_response(msg["id"].as_i64))
+        end
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+      session.ext_notification("my_event", JSON.parse(%({"key": "val"})))
+
+      sleep 20.milliseconds
+
+      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif.should_not be_nil
+
+      client.close
+    end
+
+    it "raises on closed session" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+          transport.inject_raw(build_session_new_response(msg["id"].as_i64))
+        end
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+      session.close
+
+      expect_raises(ACP::InvalidStateError) do
+        session.ext_method("test")
+      end
+
+      expect_raises(ACP::InvalidStateError) do
+        session.ext_notification("test")
+      end
+
+      client.close
+    end
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Agent Method Constants Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::AgentMethod do
+  it "has correct method name constants" do
+    ACP::Protocol::AgentMethod::INITIALIZE.should eq("initialize")
+    ACP::Protocol::AgentMethod::AUTHENTICATE.should eq("authenticate")
+    ACP::Protocol::AgentMethod::SESSION_NEW.should eq("session/new")
+    ACP::Protocol::AgentMethod::SESSION_LOAD.should eq("session/load")
+    ACP::Protocol::AgentMethod::SESSION_PROMPT.should eq("session/prompt")
+    ACP::Protocol::AgentMethod::SESSION_CANCEL.should eq("session/cancel")
+    ACP::Protocol::AgentMethod::SESSION_SET_MODE.should eq("session/set_mode")
+    ACP::Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION.should eq("session/set_config_option")
+    ACP::Protocol::AgentMethod::SESSION_UPDATE.should eq("session/update")
+  end
+
+  it "detects known methods" do
+    ACP::Protocol::AgentMethod.known?("initialize").should be_true
+    ACP::Protocol::AgentMethod.known?("session/prompt").should be_true
+    ACP::Protocol::AgentMethod.known?("session/cancel").should be_true
+    ACP::Protocol::AgentMethod.known?("unknown_method").should be_false
+    ACP::Protocol::AgentMethod.known?("_extension").should be_false
+  end
+
+  it "detects session methods" do
+    ACP::Protocol::AgentMethod.session_method?("session/new").should be_true
+    ACP::Protocol::AgentMethod.session_method?("session/prompt").should be_true
+    ACP::Protocol::AgentMethod.session_method?("session/set_config_option").should be_true
+    ACP::Protocol::AgentMethod.session_method?("initialize").should be_false
+    ACP::Protocol::AgentMethod.session_method?("authenticate").should be_false
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# ContentChunk Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::ContentChunk do
+  it "wraps a text content block" do
+    block = ACP::Protocol::TextContentBlock.new("Hello!")
+    chunk = ACP::Protocol::ContentChunk.new(block)
+    chunk.text.should eq("Hello!")
+  end
+
+  it "wraps an image content block" do
+    block = ACP::Protocol::ImageContentBlock.new(data: "base64data", mime_type: "image/png")
+    chunk = ACP::Protocol::ContentChunk.new(block)
+    chunk.content.should be_a(ACP::Protocol::ImageContentBlock)
+    chunk.text.should be_nil
+  end
+
+  it "serializes to JSON" do
+    block = ACP::Protocol::TextContentBlock.new("test content")
+    chunk = ACP::Protocol::ContentChunk.new(block)
+    json = JSON.parse(chunk.to_json)
+    json["content"]["type"].as_s.should eq("text")
+    json["content"]["text"].as_s.should eq("test content")
+  end
+
+  it "deserializes from JSON" do
+    json_str = %({"content": {"type": "text", "text": "hello world"}})
+    chunk = ACP::Protocol::ContentChunk.from_json(json_str)
+    chunk.text.should eq("hello world")
+  end
+
+  it "supports meta field" do
+    block = ACP::Protocol::TextContentBlock.new("test")
+    meta = {"source" => JSON::Any.new("test")}
+    chunk = ACP::Protocol::ContentChunk.new(block, meta)
+    chunk.meta.should_not be_nil
+    chunk.meta.try(&.["source"]?.try(&.as_s?)).should eq("test")
+  end
+end
+
+describe "ChunkUpdate#to_content_chunk" do
+  it "converts AgentMessageChunkUpdate to ContentChunk" do
+    json_str = %({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hello agent!"}})
+    update = ACP::Protocol::AgentMessageChunkUpdate.from_json(json_str)
+    chunk = update.to_content_chunk
+    chunk.should_not be_nil
+    chunk.try(&.text).should eq("Hello agent!")
+  end
+
+  it "converts UserMessageChunkUpdate to ContentChunk" do
+    json_str = %({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Hello user!"}})
+    update = ACP::Protocol::UserMessageChunkUpdate.from_json(json_str)
+    chunk = update.to_content_chunk
+    chunk.should_not be_nil
+    chunk.try(&.text).should eq("Hello user!")
+  end
+
+  it "converts AgentThoughtChunkUpdate to ContentChunk" do
+    json_str = %({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Thinking..."}})
+    update = ACP::Protocol::AgentThoughtChunkUpdate.from_json(json_str)
+    chunk = update.to_content_chunk
+    chunk.should_not be_nil
+    chunk.try(&.text).should eq("Thinking...")
+  end
+
+  it "returns nil for non-ContentBlock content" do
+    json_str = %({"sessionUpdate": "agent_message_chunk", "content": "raw text"})
+    update = ACP::Protocol::AgentMessageChunkUpdate.from_json(json_str)
+    update.to_content_chunk.should be_nil
+    # but text helper still works
+    update.text.should eq("raw text")
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# ConfigOptionGroup Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe ACP::Protocol::ConfigOptionGroup do
+  it "creates a group with values" do
+    group = ACP::Protocol::ConfigOptionGroup.new(
+      id: "openai",
+      name: "OpenAI Models",
+      options: [
+        ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
+        ACP::Protocol::ConfigOptionValue.new(value: "gpt-3.5", name: "GPT-3.5"),
+      ]
+    )
+    group.id.should eq("openai")
+    group.name.should eq("OpenAI Models")
+    group.options.size.should eq(2)
+  end
+
+  it "serializes to JSON" do
+    group = ACP::Protocol::ConfigOptionGroup.new(
+      id: "anthropic",
+      name: "Anthropic",
+      options: [
+        ACP::Protocol::ConfigOptionValue.new(value: "claude-4", name: "Claude 4"),
+      ]
+    )
+    json = JSON.parse(group.to_json)
+    json["id"].as_s.should eq("anthropic")
+    json["name"].as_s.should eq("Anthropic")
+    json["options"].as_a.size.should eq(1)
+    json["options"][0]["value"].as_s.should eq("claude-4")
+  end
+
+  it "deserializes from JSON" do
+    json_str = %({"id": "g1", "name": "Group 1", "options": [{"value": "v1", "name": "Value 1"}]})
+    group = ACP::Protocol::ConfigOptionGroup.from_json(json_str)
+    group.id.should eq("g1")
+    group.options.first.value.should eq("v1")
+  end
+end
+
+describe "ConfigOption with groups" do
+  it "supports flat options (backward compatible)" do
+    opt = ACP::Protocol::ConfigOption.new(
+      id: "model",
+      name: "Model",
+      options: [
+        ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
+      ]
+    )
+    opt.grouped?.should be_false
+    opt.all_values.size.should eq(1)
+    opt.all_values.first.value.should eq("gpt-4")
+  end
+
+  it "supports grouped options" do
+    opt = ACP::Protocol::ConfigOption.new(
+      id: "model",
+      name: "Model",
+      category: "model",
+      groups: [
+        ACP::Protocol::ConfigOptionGroup.new(
+          id: "openai",
+          name: "OpenAI",
+          options: [
+            ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
+            ACP::Protocol::ConfigOptionValue.new(value: "gpt-3.5", name: "GPT-3.5"),
+          ]
+        ),
+        ACP::Protocol::ConfigOptionGroup.new(
+          id: "anthropic",
+          name: "Anthropic",
+          options: [
+            ACP::Protocol::ConfigOptionValue.new(value: "claude-4", name: "Claude 4"),
+          ]
+        ),
+      ]
+    )
+    opt.grouped?.should be_true
+    opt.all_values.size.should eq(3)
+    opt.all_values.map(&.value).should contain("gpt-4")
+    opt.all_values.map(&.value).should contain("claude-4")
+  end
+
+  it "serializes grouped options to JSON" do
+    opt = ACP::Protocol::ConfigOption.new(
+      id: "model",
+      name: "Model",
+      current_value: "gpt-4",
+      groups: [
+        ACP::Protocol::ConfigOptionGroup.new(
+          id: "openai",
+          name: "OpenAI",
+          options: [
+            ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
+          ]
+        ),
+      ]
+    )
+    json = JSON.parse(opt.to_json)
+    json["groups"].as_a.size.should eq(1)
+    json["groups"][0]["id"].as_s.should eq("openai")
+    json["groups"][0]["options"][0]["value"].as_s.should eq("gpt-4")
+    json["currentValue"].as_s.should eq("gpt-4")
+  end
+
+  it "deserializes grouped options from JSON" do
+    json_str = <<-JSON
+      {
+        "id": "model",
+        "name": "Model Selector",
+        "type": "select",
+        "category": "model",
+        "currentValue": "claude-4",
+        "groups": [
+          {
+            "id": "anthropic",
+            "name": "Anthropic",
+            "options": [
+              {"value": "claude-4", "name": "Claude 4"},
+              {"value": "claude-3.5", "name": "Claude 3.5"}
+            ]
+          },
+          {
+            "id": "openai",
+            "name": "OpenAI",
+            "options": [
+              {"value": "gpt-4", "name": "GPT-4"}
+            ]
+          }
+        ]
+      }
+      JSON
+    opt = ACP::Protocol::ConfigOption.from_json(json_str)
+    opt.grouped?.should be_true
+    opt.category.should eq("model")
+    opt.current_value.should eq("claude-4")
+    opt.all_values.size.should eq(3)
+  end
+
+  it "returns empty array when no options or groups" do
+    opt = ACP::Protocol::ConfigOption.new(id: "empty", name: "Empty")
+    opt.grouped?.should be_false
+    opt.all_values.should be_empty
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Type Aliases Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Type aliases" do
+  it "SessionConfigSelectOption is alias for ConfigOptionValue" do
+    val = ACP::Protocol::SessionConfigSelectOption.new(value: "v1", name: "V1")
+    val.should be_a(ACP::Protocol::ConfigOptionValue)
+  end
+
+  it "SessionConfigSelectGroup is alias for ConfigOptionGroup" do
+    group = ACP::Protocol::SessionConfigSelectGroup.new(id: "g1", name: "G1")
+    group.should be_a(ACP::Protocol::ConfigOptionGroup)
+  end
+
+  it "SessionConfigOption is alias for ConfigOption" do
+    opt = ACP::Protocol::SessionConfigOption.new(id: "o1", name: "O1")
+    opt.should be_a(ACP::Protocol::ConfigOption)
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# build_notification_raw Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Protocol.build_notification_raw" do
+  it "builds a notification with raw JSON params" do
+    params = JSON.parse(%({"key": "value"}))
+    msg = ACP::Protocol.build_notification_raw("_my_event", params)
+    msg["jsonrpc"].as(JSON::Any).as_s.should eq("2.0")
+    msg["method"].as(JSON::Any).as_s.should eq("_my_event")
+    msg["params"].as(JSON::Any)["key"].as_s.should eq("value")
+    msg["id"]?.should be_nil
+  end
+end
