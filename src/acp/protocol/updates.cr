@@ -164,7 +164,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end
@@ -210,7 +210,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end
@@ -261,7 +261,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end

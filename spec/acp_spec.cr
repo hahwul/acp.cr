@@ -3465,7 +3465,7 @@ describe "Extension Methods" do
 
       sleep 20.milliseconds
 
-      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "_my_event" }
       notif.should_not be_nil
       notif = notif.as(JSON::Any)
       notif["method"].as_s.should eq("_my_event")
@@ -3507,7 +3507,7 @@ describe "Extension Methods" do
       received_method.should eq("_custom_tool")
       received_params["data"].as_s.should eq("test")
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-1" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "ext-1" }
       response.should_not be_nil
       response.as(JSON::Any)["result"]["handled"].as_bool.should be_true
 
@@ -3530,7 +3530,7 @@ describe "Extension Methods" do
       transport.inject_raw(%({"jsonrpc": "2.0", "id": "ext-2", "method": "_unknown_ext", "params": {}}))
       sleep 50.milliseconds
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-2" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "ext-2" }
       response.should_not be_nil
       # Extension methods without handler get a null result, not method_not_found error
       response.as(JSON::Any)["result"]?.should_not be_nil
@@ -3585,7 +3585,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end
@@ -3618,7 +3618,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end
@@ -3628,7 +3628,7 @@ describe "Extension Methods" do
 
       sleep 20.milliseconds
 
-      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "_my_event" }
       notif.should_not be_nil
 
       client.close
@@ -3648,7 +3648,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end
