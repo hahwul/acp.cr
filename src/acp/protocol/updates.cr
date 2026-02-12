@@ -417,11 +417,6 @@ module ACP
       )
         @session_update = "plan"
       end
-
-      # @deprecated Use `entries` instead. Backward-compatible alias.
-      def steps : Array(PlanEntry)
-        @entries
-      end
     end
 
     # A single entry in an execution plan.
@@ -448,11 +443,6 @@ module ACP
         @status : String = "pending",
         @meta : Hash(String, JSON::Any)? = nil,
       )
-      end
-
-      # @deprecated Use `content` instead. Backward-compatible alias.
-      def title : String
-        @content
       end
     end
 

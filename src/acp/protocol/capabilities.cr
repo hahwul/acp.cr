@@ -92,11 +92,6 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end
-
-      # @deprecated Use `embedded_context` instead. Alias kept for backward compatibility.
-      def file : Bool
-        @embedded_context
-      end
     end
 
     # MCP transport capabilities supported by the agent.

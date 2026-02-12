@@ -569,7 +569,7 @@ loop do
     s = session
     if s && !mode_id.empty?
       begin
-        s.set_mode(mode_id)
+        s.mode = mode_id
         Term.success("Mode set to: #{mode_id}")
       rescue ex
         Term.error("Failed to set mode: #{ex.message}")

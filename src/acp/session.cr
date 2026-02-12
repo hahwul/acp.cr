@@ -124,7 +124,7 @@ module ACP
     #   ```
     # session.prompt do |b|
     #   b.text "Explain this file:"
-    #   b.file "/path/to/file.cr"
+    #   b.resource_link "/path/to/file.cr"
     # end
     #   ```
     def prompt(& : PromptBuilder ->) : Protocol::SessionPromptResult
@@ -150,13 +150,6 @@ module ACP
     def mode=(mode_id : String) : Nil
       ensure_open!
       @client.session_set_mode(mode_id, @id)
-    end
-
-    # :ditto:
-    # @deprecated Use `#mode=` instead.
-    # ameba:disable Naming/AccessorMethodName
-    def set_mode(mode_id : String) : Nil
-      self.mode = mode_id
     end
 
     # Returns the list of available mode IDs, or an empty array if
@@ -268,25 +261,9 @@ module ACP
       self
     end
 
-    # Adds an image content block from base64 data (alias).
-    def image_data(data : String, mime_type : String = "image/png") : self
-      image(data, mime_type)
-    end
-
     # Adds an audio content block from base64 data.
     def audio(data : String, mime_type : String = "audio/wav") : self
       @blocks << Protocol::AudioContentBlock.new(data: data, mime_type: mime_type)
-      self
-    end
-
-    # Adds an audio content block from base64 data (alias).
-    def audio_data(data : String, mime_type : String = "audio/wav") : self
-      audio(data, mime_type)
-    end
-
-    # Adds a resource link content block from a file path.
-    def file(path : String, mime_type : String? = nil) : self
-      @blocks << Protocol::ResourceLinkContentBlock.from_path(path, mime_type)
       self
     end
 
@@ -296,7 +273,13 @@ module ACP
       self
     end
 
-    # Adds a resource link content block.
+    # Adds a resource link content block from a file path.
+    def resource_link(path : String, mime_type : String? = nil) : self
+      @blocks << Protocol::ResourceLinkContentBlock.from_path(path, mime_type)
+      self
+    end
+
+    # Adds a resource link content block with explicit URI and name.
     def resource_link(uri : String, name : String, mime_type : String? = nil) : self
       @blocks << Protocol::ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type)
       self

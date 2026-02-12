@@ -146,11 +146,6 @@ module ACP
       )
         @type = "image"
       end
-
-      # @deprecated Use `uri` instead. Kept for backward compatibility.
-      def url : String?
-        @uri
-      end
     end
 
     # ─── Audio Content Block ──────────────────────────────────────────
@@ -314,13 +309,6 @@ module ACP
       def resource_mime_type : String?
         @resource.as_h?.try { |hash| hash["mimeType"]?.try(&.as_s?) }
       end
-
-      # @deprecated Use ResourceContentBlock.text or .blob factory methods instead.
-      # Backward-compatible constructor from a file path.
-      def self.from_path(path : String, mime_type : String? = nil) : ResourceContentBlock
-        uri = path.starts_with?("/") ? "file://#{path}" : path
-        text(uri: uri, text: "", mime_type: mime_type)
-      end
     end
 
     # ─── Resource Link Content Block ──────────────────────────────────
@@ -389,9 +377,6 @@ module ACP
       end
     end
 
-    # Backward-compatible alias: FileContentBlock → ResourceLinkContentBlock
-    alias FileContentBlock = ResourceLinkContentBlock
-
     # ─── Convenience Constructors ─────────────────────────────────────
 
     # Helper module for building content blocks ergonomically.
@@ -411,28 +396,8 @@ module ACP
         ImageContentBlock.new(data: data, mime_type: mime_type, uri: uri)
       end
 
-      # @deprecated Use `image(data, mime_type)` instead.
-      def self.image_url(url : String, mime_type : String? = nil) : ImageContentBlock
-        ImageContentBlock.new(data: "", mime_type: mime_type || "image/png", uri: url)
-      end
-
-      # @deprecated Use `image(data, mime_type)` instead.
-      def self.image_data(data : String, mime_type : String = "image/png") : ImageContentBlock
-        ImageContentBlock.new(data: data, mime_type: mime_type)
-      end
-
       # Creates an audio content block from base64 data.
       def self.audio(data : String, mime_type : String = "audio/wav") : AudioContentBlock
-        AudioContentBlock.new(data: data, mime_type: mime_type)
-      end
-
-      # @deprecated Use `audio(data, mime_type)` instead.
-      def self.audio_url(url : String, mime_type : String? = nil) : AudioContentBlock
-        AudioContentBlock.new(data: "", mime_type: mime_type || "audio/wav")
-      end
-
-      # @deprecated Use `audio(data, mime_type)` instead.
-      def self.audio_data(data : String, mime_type : String = "audio/wav") : AudioContentBlock
         AudioContentBlock.new(data: data, mime_type: mime_type)
       end
 
@@ -444,12 +409,6 @@ module ACP
       # Creates a resource link content block.
       def self.resource_link(uri : String, name : String, mime_type : String? = nil) : ResourceLinkContentBlock
         ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type)
-      end
-
-      # Creates a resource link from a file path.
-      # @deprecated Use `resource_link` instead.
-      def self.file(path : String, mime_type : String? = nil) : ResourceLinkContentBlock
-        ResourceLinkContentBlock.from_path(path, mime_type)
       end
     end
   end
