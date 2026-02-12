@@ -29,6 +29,7 @@
 
 require "json"
 require "./content_block"
+require "./chunk_content_helper"
 
 module ACP
   module Protocol
@@ -150,31 +151,7 @@ module ACP
         @session_update = "user_message_chunk"
       end
 
-      # Helper to get the actual text content regardless of wrapping.
-      def text : String
-        if (h = @content.as_h?) && h["text"]?
-          h["text"].as_s
-        elsif s = @content.as_s?
-          s
-        else
-          @content.to_json
-        end
-      end
-
-      # Attempts to parse the content as a typed ContentBlock.
-      # Returns nil if parsing fails.
-      def content_block : ContentBlock?
-        if @content.as_h?
-          ContentBlock.from_json(@content.to_json) rescue nil
-        end
-      end
-
-      # Returns a ContentChunk wrapping the parsed content block, if possible.
-      def to_content_chunk : ContentChunk?
-        if block = content_block
-          ContentChunk.new(block, @meta)
-        end
-      end
+      include ChunkContentHelper
     end
 
     # ─── Agent Message Chunk ───────────────────────────────────────────
@@ -196,31 +173,7 @@ module ACP
         @session_update = "agent_message_chunk"
       end
 
-      # Helper to get the actual text content regardless of wrapping.
-      def text : String
-        if (h = @content.as_h?) && h["text"]?
-          h["text"].as_s
-        elsif s = @content.as_s?
-          s
-        else
-          @content.to_json
-        end
-      end
-
-      # Attempts to parse the content as a typed ContentBlock.
-      # Returns nil if parsing fails.
-      def content_block : ContentBlock?
-        if @content.as_h?
-          ContentBlock.from_json(@content.to_json) rescue nil
-        end
-      end
-
-      # Returns a ContentChunk wrapping the parsed content block, if possible.
-      def to_content_chunk : ContentChunk?
-        if block = content_block
-          ContentChunk.new(block, @meta)
-        end
-      end
+      include ChunkContentHelper
     end
 
     # ─── Agent Thought Chunk ───────────────────────────────────────────
@@ -242,35 +195,11 @@ module ACP
         @session_update = "agent_thought_chunk"
       end
 
-      # Helper to get the actual text content regardless of wrapping.
-      def text : String
-        if (h = @content.as_h?) && h["text"]?
-          h["text"].as_s
-        elsif s = @content.as_s?
-          s
-        else
-          @content.to_json
-        end
-      end
+      include ChunkContentHelper
 
       # Backward-compatible alias for `text`. Some agents send a `title` field.
       def title : String
         text
-      end
-
-      # Attempts to parse the content as a typed ContentBlock.
-      # Returns nil if parsing fails.
-      def content_block : ContentBlock?
-        if @content.as_h?
-          ContentBlock.from_json(@content.to_json) rescue nil
-        end
-      end
-
-      # Returns a ContentChunk wrapping the parsed content block, if possible.
-      def to_content_chunk : ContentChunk?
-        if block = content_block
-          ContentChunk.new(block, @meta)
-        end
       end
     end
 
