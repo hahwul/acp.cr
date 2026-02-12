@@ -164,7 +164,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end
@@ -210,7 +210,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end
@@ -261,7 +261,7 @@ module ACP
       # Attempts to parse the content as a typed ContentBlock.
       # Returns nil if parsing fails.
       def content_block : ContentBlock?
-        if h = @content.as_h?
+        if @content.as_h?
           ContentBlock.from_json(@content.to_json) rescue nil
         end
       end
@@ -417,11 +417,6 @@ module ACP
       )
         @session_update = "plan"
       end
-
-      # @deprecated Use `entries` instead. Backward-compatible alias.
-      def steps : Array(PlanEntry)
-        @entries
-      end
     end
 
     # A single entry in an execution plan.
@@ -448,11 +443,6 @@ module ACP
         @status : String = "pending",
         @meta : Hash(String, JSON::Any)? = nil,
       )
-      end
-
-      # @deprecated Use `content` instead. Backward-compatible alias.
-      def title : String
-        @content
       end
     end
 

@@ -321,13 +321,13 @@ result = session.prompt([
 # Use the PromptBuilder DSL
 result = session.prompt do |b|
   b.text("Explain this code:")
-  b.file("/path/to/relevant_code.cr")
+  b.resource_link("/path/to/relevant_code.cr")
   b.resource("file:///path/to/file.py", "def hello(): pass", "text/x-python")
 end
 
 # Cancel, change mode, change config, inspect
 session.cancel
-session.set_mode("chat")
+session.mode = "chat"
 session.set_config_option("model", "model-2")
 session.id                    # => "session-uuid"
 session.available_mode_ids    # => ["code", "chat"]
@@ -343,9 +343,8 @@ Ergonomic DSL for constructing content block arrays.
 builder = ACP::PromptBuilder.new
 builder
   .text("Look at this code and image:")
-  .file("/src/main.cr")                                   # Creates a resource_link
+  .resource_link("/src/main.cr")                          # Creates a resource_link from path
   .image("base64_encoded_data", "image/png")               # Base64 image data
-  .image_data(base64_string, "image/jpeg")                 # Alias for image()
   .audio("base64_encoded_audio", "audio/wav")              # Base64 audio data
   .resource("file:///path/to/file.py", "code", "text/x-python")  # Embedded resource
   .resource_link("file:///doc.pdf", "doc.pdf", "application/pdf") # Resource link

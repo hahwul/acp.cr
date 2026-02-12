@@ -230,11 +230,6 @@ describe ACP::Protocol do
       restored.audio?.should be_true
       restored.embedded_context?.should be_false
     end
-
-    it "provides backward-compatible file alias" do
-      caps = ACP::Protocol::PromptCapabilities.new(embedded_context: true)
-      caps.file.should be_true
-    end
   end
 
   describe ACP::Protocol::ClientInfo do
@@ -433,7 +428,7 @@ describe ACP::Protocol do
     end
 
     it "creates resource link blocks from file path" do
-      block = ACP::Protocol::ContentBlocks.file("/path/to/file.txt")
+      block = ACP::Protocol::ResourceLinkContentBlock.from_path("/path/to/file.txt")
       block.should be_a(ACP::Protocol::ResourceLinkContentBlock)
       block.path.should eq("/path/to/file.txt")
     end
@@ -498,9 +493,6 @@ describe ACP::Protocol do
       entries[0].status.should eq("completed")
       entries[1].content.should eq("Step 2")
       entries[1].status.should eq("pending")
-      # backward-compat alias
-      u.steps.size.should eq(2)
-      entries[0].title.should eq("Step 1")
     end
 
     it "deserializes available_commands_update" do
@@ -906,7 +898,6 @@ describe ACP::Protocol do
       json_str = entry.to_json
       restored = ACP::Protocol::PlanEntry.from_json(json_str)
       restored.content.should eq("Implement feature")
-      restored.title.should eq("Implement feature")
       restored.priority.should eq("high")
       restored.status.should eq("in_progress")
     end
@@ -2223,7 +2214,7 @@ describe ACP::Session do
     end
   end
 
-  describe "#set_mode" do
+  describe "#mode=" do
     it "sends session/set_mode request" do
       transport, client = setup_client_with_session
 
@@ -2248,7 +2239,7 @@ describe ACP::Session do
         )
       end
 
-      session.set_mode("chat")
+      session.mode = "chat"
 
       sent = transport.sent_messages.last
       sent["method"].as_s.should eq("session/set_mode")
@@ -2287,7 +2278,7 @@ describe ACP::PromptBuilder do
     builder
       .text("Look at this image:")
       .image("base64data==", "image/png")
-      .file("/path/to/code.cr")
+      .resource_link("/path/to/code.cr")
 
     blocks = builder.build
     blocks.size.should eq(3)
@@ -2303,9 +2294,9 @@ describe ACP::PromptBuilder do
     builder.size.should eq(3)
   end
 
-  it "builds image_data blocks" do
+  it "builds image blocks via DSL alias replacement" do
     builder = ACP::PromptBuilder.new
-    builder.image_data("base64==", "image/jpeg")
+    builder.image("base64==", "image/jpeg")
     blocks = builder.build
     blocks.size.should eq(1)
     img = blocks[0].as(ACP::Protocol::ImageContentBlock)
@@ -2316,7 +2307,7 @@ describe ACP::PromptBuilder do
   it "builds audio blocks" do
     builder = ACP::PromptBuilder.new
     builder.audio("base64audio==", "audio/mp3")
-    builder.audio_data("base64audio2==", "audio/wav")
+    builder.audio("base64audio2==", "audio/wav")
     blocks = builder.build
     blocks.size.should eq(2)
     blocks[0].should be_a(ACP::Protocol::AudioContentBlock)
@@ -3474,7 +3465,7 @@ describe "Extension Methods" do
 
       sleep 20.milliseconds
 
-      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "_my_event" }
       notif.should_not be_nil
       notif = notif.as(JSON::Any)
       notif["method"].as_s.should eq("_my_event")
@@ -3516,7 +3507,7 @@ describe "Extension Methods" do
       received_method.should eq("_custom_tool")
       received_params["data"].as_s.should eq("test")
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-1" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "ext-1" }
       response.should_not be_nil
       response.as(JSON::Any)["result"]["handled"].as_bool.should be_true
 
@@ -3539,7 +3530,7 @@ describe "Extension Methods" do
       transport.inject_raw(%({"jsonrpc": "2.0", "id": "ext-2", "method": "_unknown_ext", "params": {}}))
       sleep 50.milliseconds
 
-      response = transport.sent_messages.find { |m| m["id"]?.try(&.as_s?) == "ext-2" }
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "ext-2" }
       response.should_not be_nil
       # Extension methods without handler get a null result, not method_not_found error
       response.as(JSON::Any)["result"]?.should_not be_nil
@@ -3594,7 +3585,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end
@@ -3627,7 +3618,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end
@@ -3637,7 +3628,7 @@ describe "Extension Methods" do
 
       sleep 20.milliseconds
 
-      notif = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "_my_event" }
+      notif = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "_my_event" }
       notif.should_not be_nil
 
       client.close
@@ -3657,7 +3648,7 @@ describe "Extension Methods" do
 
       spawn do
         sleep 10.milliseconds
-        if msg = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/new" }
+        if msg = transport.sent_messages.find { |m_item| m_item["method"]?.try(&.as_s?) == "session/new" }
           transport.inject_raw(build_session_new_response(msg["id"].as_i64))
         end
       end

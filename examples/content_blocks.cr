@@ -65,7 +65,7 @@ begin
   # Use PromptBuilder to create a rich prompt
   prompt = ACP::PromptBuilder.new
     .text("I am sending you this source file for analysis.")
-    .file("src/acp.cr")
+    .resource_link("src/acp.cr")
     .text("Can you summarize what the main module does?")
     .build
 
