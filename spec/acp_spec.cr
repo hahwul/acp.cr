@@ -1204,6 +1204,66 @@ describe ACP::StdioTransport do
     transport.close
   end
 
+  it "returns nil when receive times out" do
+    reader_r, reader_w = IO.pipe
+    writer_io = IO::Memory.new
+
+    transport = ACP::StdioTransport.new(reader_r, writer_io)
+
+    # Don't write anything to reader_w
+
+    # Should return nil after timeout
+    msg = transport.receive(10.milliseconds)
+    msg.should be_nil
+
+    reader_w.close
+    transport.close
+  end
+
+  it "receives message within timeout" do
+    reader_r, reader_w = IO.pipe
+    writer_io = IO::Memory.new
+
+    transport = ACP::StdioTransport.new(reader_r, writer_io)
+
+    spawn do
+      sleep 5.milliseconds
+      reader_w.puts %({"jsonrpc": "2.0", "method": "test"})
+      reader_w.flush
+    end
+
+    msg = transport.receive(50.milliseconds)
+    msg.should_not be_nil
+    msg.as(JSON::Any)["method"].as_s.should eq("test")
+
+    reader_w.close
+    transport.close
+  end
+
+  it "returns nil if message arrives after timeout" do
+    reader_r, reader_w = IO.pipe
+    writer_io = IO::Memory.new
+
+    transport = ACP::StdioTransport.new(reader_r, writer_io)
+
+    spawn do
+      sleep 50.milliseconds
+      reader_w.puts %({"jsonrpc": "2.0", "method": "late"})
+      reader_w.flush
+    end
+
+    # Timeout is 10ms, message comes at 50ms
+    msg = transport.receive(10.milliseconds)
+    msg.should be_nil
+
+    # Clean up - make sure we can still read it later if we wait
+    msg_late = transport.receive
+    msg_late.should_not be_nil
+
+    reader_w.close
+    transport.close
+  end
+
   it "returns nil on EOF" do
     reader_r, reader_w = IO.pipe
     writer_io = IO::Memory.new
