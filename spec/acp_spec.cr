@@ -2006,6 +2006,32 @@ describe ACP::Session do
 
       transport.close
     end
+
+    it "passes mcp_servers to client.session_new" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-mcp-test"))
+      end
+
+      server = ACP::Protocol::McpServerStdio.new(name: "test-mcp", command: "/bin/mcp")
+      servers = [JSON.parse(server.to_json)]
+
+      session = ACP::Session.create(client, cwd: "/my/project", mcp_servers: servers)
+      session.id.should eq("sess-mcp-test")
+
+      session_req = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "session/new" }
+      session_req.should_not be_nil
+      params = session_req.as(JSON::Any)["params"]
+
+      json_servers = params["mcpServers"].as_a
+      json_servers.size.should eq(1)
+      json_servers[0]["name"].as_s.should eq("test-mcp")
+
+      transport.close
+    end
   end
 
   describe ".load" do
