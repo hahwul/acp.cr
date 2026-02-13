@@ -1890,6 +1890,37 @@ describe ACP::Client do
       transport.close
     end
 
+    it "responds with cancellation when handler raises error" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) {
+        raise "Permission check failed"
+      }
+
+      transport.inject_raw(<<-JSON
+        {
+        "jsonrpc": "2.0",
+        "id": "perm-error",
+        "method": "session/request_permission",
+        "params": {
+          "sessionId": "sess-perm-error",
+          "toolCall": {"toolCallId": "tc-error", "title": "Error Test"},
+          "options": [{"optionId": "allow_once", "name": "Allow", "kind": "allow_once"}]
+        }
+        }
+        JSON
+      )
+
+      sleep 50.milliseconds
+
+      response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-error" }
+      response.should_not be_nil
+      response.as(JSON::Any)["result"]["outcome"].as_s.should eq("cancelled")
+
+      transport.close
+    end
+
     it "returns method-not-found for unknown agent methods without handler" do
       transport = TestTransport.new
       _client = ACP::Client.new(transport)
