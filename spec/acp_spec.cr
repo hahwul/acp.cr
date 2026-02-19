@@ -4078,3 +4078,259 @@ describe "Protocol.build_notification_raw" do
     msg["id"]?.should be_nil
   end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Typed Accessor Specs — ToolCallUpdate
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "ToolCallUpdate typed accessors" do
+  describe "#typed_content" do
+    it "parses content items into ToolCallContent values" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "tc-typed-1",
+          "title": "Edit file",
+          "content": [
+            {
+              "type": "content",
+              "content": { "type": "text", "text": "Analysis done." }
+            },
+            {
+              "type": "diff",
+              "path": "/tmp/file.txt",
+              "oldText": "old",
+              "newText": "new"
+            }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str)
+      u = update.as(ACP::Protocol::ToolCallUpdate)
+
+      typed = u.typed_content
+      typed.size.should eq(2)
+      typed[0].should be_a(ACP::Protocol::ToolCallContentBlock)
+      typed[0].as(ACP::Protocol::ToolCallContentBlock).text.should eq("Analysis done.")
+      typed[1].should be_a(ACP::Protocol::ToolCallDiff)
+      typed[1].as(ACP::Protocol::ToolCallDiff).path.should eq("/tmp/file.txt")
+    end
+
+    it "returns empty array when content is nil" do
+      json_str = %({"sessionUpdate": "tool_call", "toolCallId": "tc-nil", "title": "No content"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallUpdate)
+      update.typed_content.should be_empty
+    end
+
+    it "skips entries that fail to deserialize" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "tc-skip",
+          "title": "Partial",
+          "content": [
+            { "type": "content", "content": { "type": "text", "text": "ok" } },
+            { "type": "unknown_type", "foo": "bar" }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallUpdate)
+      typed = update.typed_content
+      typed.size.should eq(1)
+      typed[0].should be_a(ACP::Protocol::ToolCallContentBlock)
+    end
+  end
+
+  describe "#typed_locations" do
+    it "parses locations into ToolCallLocation values" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "tc-loc",
+          "title": "Edit",
+          "locations": [
+            { "path": "/home/user/main.py", "line": 42 },
+            { "path": "/home/user/utils.py" }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallUpdate)
+      locs = update.typed_locations
+      locs.size.should eq(2)
+      locs[0].path.should eq("/home/user/main.py")
+      locs[0].line.should eq(42)
+      locs[1].path.should eq("/home/user/utils.py")
+      locs[1].line.should be_nil
+    end
+
+    it "returns empty array when locations is nil" do
+      json_str = %({"sessionUpdate": "tool_call", "toolCallId": "tc-noloc", "title": "No locs"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallUpdate)
+      update.typed_locations.should be_empty
+    end
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Typed Accessor Specs — ToolCallStatusUpdate
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "ToolCallStatusUpdate typed accessors" do
+  describe "#typed_content" do
+    it "parses content items into ToolCallContent values" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "tc-su-1",
+          "content": [
+            {
+              "type": "terminal",
+              "terminalId": "term-001"
+            }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallStatusUpdate)
+      typed = update.typed_content
+      typed.size.should eq(1)
+      typed[0].should be_a(ACP::Protocol::ToolCallTerminal)
+      typed[0].as(ACP::Protocol::ToolCallTerminal).terminal_id.should eq("term-001")
+    end
+
+    it "returns empty array when content is nil" do
+      json_str = %({"sessionUpdate": "tool_call_update", "toolCallId": "tc-su-nil"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallStatusUpdate)
+      update.typed_content.should be_empty
+    end
+  end
+
+  describe "#typed_locations" do
+    it "parses locations into ToolCallLocation values" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "tool_call_update",
+          "toolCallId": "tc-su-loc",
+          "locations": [
+            { "path": "/src/app.cr", "line": 10 }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallStatusUpdate)
+      locs = update.typed_locations
+      locs.size.should eq(1)
+      locs[0].path.should eq("/src/app.cr")
+      locs[0].line.should eq(10)
+    end
+
+    it "returns empty array when locations is nil" do
+      json_str = %({"sessionUpdate": "tool_call_update", "toolCallId": "tc-su-noloc"})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ToolCallStatusUpdate)
+      update.typed_locations.should be_empty
+    end
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Typed Accessor Specs — ConfigOptionUpdate
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "ConfigOptionUpdate typed accessors" do
+  describe "#typed_config_options" do
+    it "parses config_options into ConfigOption values" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "config_option_update",
+          "configOptions": [
+            {
+              "id": "model",
+              "name": "Model",
+              "configType": "select",
+              "currentValue": "gpt-4",
+              "options": [
+                { "value": "gpt-4", "name": "GPT-4" },
+                { "value": "gpt-3.5", "name": "GPT-3.5" }
+              ]
+            },
+            {
+              "id": "mode",
+              "name": "Mode",
+              "configType": "select",
+              "currentValue": "code"
+            }
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ConfigOptionUpdate)
+      typed = update.typed_config_options
+      typed.size.should eq(2)
+      typed[0].id.should eq("model")
+      typed[0].current_value.should eq("gpt-4")
+      typed[0].options.try(&.size).should eq(2)
+      typed[1].id.should eq("mode")
+      typed[1].current_value.should eq("code")
+    end
+
+    it "returns empty array when config_options is empty" do
+      json_str = %({"sessionUpdate": "config_option_update", "configOptions": []})
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ConfigOptionUpdate)
+      update.typed_config_options.should be_empty
+    end
+
+    it "skips entries that fail to deserialize" do
+      json_str = <<-JSON
+        {
+          "sessionUpdate": "config_option_update",
+          "configOptions": [
+            { "id": "valid", "name": "Valid Option", "configType": "select" },
+            "not_an_object"
+          ]
+        }
+        JSON
+      update = ACP::Protocol::SessionUpdate.from_json(json_str).as(ACP::Protocol::ConfigOptionUpdate)
+      typed = update.typed_config_options
+      typed.size.should eq(1)
+      typed[0].id.should eq("valid")
+    end
+  end
+end
+
+# ═══════════════════════════════════════════════════════════════════════
+# ErrorCode references JsonRpcError constants
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Protocol::ErrorCode references JsonRpcError" do
+  it "PARSE_ERROR matches JsonRpcError::PARSE_ERROR" do
+    ACP::Protocol::ErrorCode::PARSE_ERROR.should eq(ACP::JsonRpcError::PARSE_ERROR)
+    ACP::Protocol::ErrorCode::PARSE_ERROR.should eq(-32700)
+  end
+
+  it "INVALID_REQUEST matches JsonRpcError::INVALID_REQUEST" do
+    ACP::Protocol::ErrorCode::INVALID_REQUEST.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+    ACP::Protocol::ErrorCode::INVALID_REQUEST.should eq(-32600)
+  end
+
+  it "METHOD_NOT_FOUND matches JsonRpcError::METHOD_NOT_FOUND" do
+    ACP::Protocol::ErrorCode::METHOD_NOT_FOUND.should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+    ACP::Protocol::ErrorCode::METHOD_NOT_FOUND.should eq(-32601)
+  end
+
+  it "INVALID_PARAMS matches JsonRpcError::INVALID_PARAMS" do
+    ACP::Protocol::ErrorCode::INVALID_PARAMS.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    ACP::Protocol::ErrorCode::INVALID_PARAMS.should eq(-32602)
+  end
+
+  it "INTERNAL_ERROR matches JsonRpcError::INTERNAL_ERROR" do
+    ACP::Protocol::ErrorCode::INTERNAL_ERROR.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    ACP::Protocol::ErrorCode::INTERNAL_ERROR.should eq(-32603)
+  end
+
+  it "AUTH_REQUIRED matches JsonRpcError::AUTH_REQUIRED" do
+    ACP::Protocol::ErrorCode::AUTH_REQUIRED.should eq(ACP::JsonRpcError::AUTH_REQUIRED)
+    ACP::Protocol::ErrorCode::AUTH_REQUIRED.should eq(-32000)
+  end
+
+  it "RESOURCE_NOT_FOUND matches JsonRpcError::RESOURCE_NOT_FOUND" do
+    ACP::Protocol::ErrorCode::RESOURCE_NOT_FOUND.should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    ACP::Protocol::ErrorCode::RESOURCE_NOT_FOUND.should eq(-32002)
+  end
+end

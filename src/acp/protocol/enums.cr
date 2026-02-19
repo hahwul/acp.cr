@@ -471,19 +471,21 @@ module ACP
 
     module ErrorCode
       # Standard JSON-RPC 2.0 error codes.
-      PARSE_ERROR      = -32700
-      INVALID_REQUEST  = -32600
-      METHOD_NOT_FOUND = -32601
-      INVALID_PARAMS   = -32602
-      INTERNAL_ERROR   = -32603
+      # Canonical values are defined in `ACP::JsonRpcError`; referenced
+      # here to avoid duplicating magic numbers.
+      PARSE_ERROR      = ACP::JsonRpcError::PARSE_ERROR
+      INVALID_REQUEST  = ACP::JsonRpcError::INVALID_REQUEST
+      METHOD_NOT_FOUND = ACP::JsonRpcError::METHOD_NOT_FOUND
+      INVALID_PARAMS   = ACP::JsonRpcError::INVALID_PARAMS
+      INTERNAL_ERROR   = ACP::JsonRpcError::INTERNAL_ERROR
 
       # ACP-specific error codes (reserved range -32000 to -32099).
 
       # Authentication is required before this operation can be performed.
-      AUTH_REQUIRED = -32000
+      AUTH_REQUIRED = ACP::JsonRpcError::AUTH_REQUIRED
 
       # A given resource, such as a file, was not found.
-      RESOURCE_NOT_FOUND = -32002
+      RESOURCE_NOT_FOUND = ACP::JsonRpcError::RESOURCE_NOT_FOUND
     end
   end
 end

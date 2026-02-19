@@ -1,5 +1,13 @@
 # ACP Protocol — Session Update Types
 #
+# Typed accessor support:
+#   `ToolCallUpdate` and `ToolCallStatusUpdate` store `content` and
+#   `locations` as `Array(JSON::Any)?` for wire compatibility. The
+#   helper methods `typed_content` and `typed_locations` attempt to
+#   parse these into `Array(ToolCallContent)` and
+#   `Array(ToolCallLocation)` respectively, silently skipping entries
+#   that fail to deserialize.
+#
 # Defines all the session update notification types that an agent can
 # send to the client during a prompt turn. These are delivered as
 # `session/update` notifications (JSON-RPC 2.0 notifications with
@@ -29,6 +37,7 @@
 
 require "json"
 require "./content_block"
+require "./tool_call_content"
 require "./chunk_content_helper"
 
 module ACP
@@ -264,6 +273,24 @@ module ACP
       )
         @session_update = "tool_call"
       end
+
+      # Attempts to parse `content` items as typed `ToolCallContent` values.
+      # Entries that fail to deserialize are silently skipped.
+      def typed_content : Array(ToolCallContent)
+        return [] of ToolCallContent unless items = @content
+        items.compact_map do |item|
+          ToolCallContent.from_json(item.to_json) rescue nil
+        end
+      end
+
+      # Attempts to parse `locations` items as typed `ToolCallLocation` values.
+      # Entries that fail to deserialize are silently skipped.
+      def typed_locations : Array(ToolCallLocation)
+        return [] of ToolCallLocation unless items = @locations
+        items.compact_map do |item|
+          ToolCallLocation.from_json(item.to_json) rescue nil
+        end
+      end
     end
 
     # Backward-compatible alias.
@@ -321,6 +348,24 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "tool_call_update"
+      end
+
+      # Attempts to parse `content` items as typed `ToolCallContent` values.
+      # Entries that fail to deserialize are silently skipped.
+      def typed_content : Array(ToolCallContent)
+        return [] of ToolCallContent unless items = @content
+        items.compact_map do |item|
+          ToolCallContent.from_json(item.to_json) rescue nil
+        end
+      end
+
+      # Attempts to parse `locations` items as typed `ToolCallLocation` values.
+      # Entries that fail to deserialize are silently skipped.
+      def typed_locations : Array(ToolCallLocation)
+        return [] of ToolCallLocation unless items = @locations
+        items.compact_map do |item|
+          ToolCallLocation.from_json(item.to_json) rescue nil
+        end
       end
     end
 
@@ -476,6 +521,8 @@ module ACP
       include JSON::Serializable
 
       # The full set of configuration options and their current values.
+      # Stored as `Array(JSON::Any)` for wire compatibility; use
+      # `typed_config_options` for parsed `ConfigOption` structs.
       @[JSON::Field(key: "configOptions")]
       property config_options : Array(JSON::Any)
 
@@ -488,6 +535,14 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "config_option_update"
+      end
+
+      # Attempts to parse `config_options` items as typed `ConfigOption` values.
+      # Entries that fail to deserialize are silently skipped.
+      def typed_config_options : Array(ConfigOption)
+        @config_options.compact_map do |item|
+          ConfigOption.from_json(item.to_json) rescue nil
+        end
       end
     end
 

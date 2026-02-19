@@ -542,55 +542,8 @@ module ACP
       params : JSON::Serializable,
       timeout : Float64? = @request_timeout,
     ) : JSON::Any
-      raise ConnectionClosedError.new if closed?
-
-      # Generate a unique ID for this request.
-      id = next_id
-      id_str = id.to_s
-
-      # Create a channel to receive the response.
-      response_channel = Channel(JSON::Any).new(1)
-
-      @pending_mutex.synchronize do
-        @pending[id_str] = response_channel
-      end
-
-      # Build and send the request.
-      message = Protocol.build_request(id, method, params)
-      @transport.send(message)
-
-      ClientLog.debug { "Sent request id=#{id} method=#{method}" }
-
-      # Wait for the response with optional timeout.
-      raw_response = if timeout
-                       receive_with_timeout(response_channel, timeout, id)
-                     else
-                       begin
-                         response_channel.receive
-                       rescue Channel::ClosedError
-                         raise ConnectionClosedError.new("Channel closed while waiting for response to #{method}")
-                       end
-                     end
-
-      # Clean up the pending entry.
-      @pending_mutex.synchronize do
-        @pending.delete(id_str)
-      end
-
-      # Check for errors in the response.
-      if error = raw_response["error"]?
-        if error.raw.is_a?(Hash)
-          raise JsonRpcError.from_json_any(error)
-        else
-          raise JsonRpcError.new(
-            JsonRpcError::INTERNAL_ERROR,
-            error.as_s? || "Unknown error"
-          )
-        end
-      end
-
-      # Return the result.
-      raw_response["result"]? || JSON::Any.new(nil)
+      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
+      send_and_await_response(method, message_builder, timeout)
     end
 
     # Sends a JSON-RPC notification (no response expected).
@@ -621,48 +574,8 @@ module ACP
       params : JSON::Any,
       timeout : Float64? = @request_timeout,
     ) : JSON::Any
-      raise ConnectionClosedError.new if closed?
-
-      id = next_id
-      id_str = id.to_s
-
-      response_channel = Channel(JSON::Any).new(1)
-
-      @pending_mutex.synchronize do
-        @pending[id_str] = response_channel
-      end
-
-      message = Protocol.build_request_raw(id, method, params)
-      @transport.send(message)
-
-      ClientLog.debug { "Sent raw request id=#{id} method=#{method}" }
-
-      raw_response = if timeout
-                       receive_with_timeout(response_channel, timeout, id)
-                     else
-                       begin
-                         response_channel.receive
-                       rescue Channel::ClosedError
-                         raise ConnectionClosedError.new("Channel closed while waiting for response to #{method}")
-                       end
-                     end
-
-      @pending_mutex.synchronize do
-        @pending.delete(id_str)
-      end
-
-      if error = raw_response["error"]?
-        if error.raw.is_a?(Hash)
-          raise JsonRpcError.from_json_any(error)
-        else
-          raise JsonRpcError.new(
-            JsonRpcError::INTERNAL_ERROR,
-            error.as_s? || "Unknown error"
-          )
-        end
-      end
-
-      raw_response["result"]? || JSON::Any.new(nil)
+      message_builder = ->(id : Int64) { Protocol.build_request_raw(id, method, params) }
+      send_and_await_response(method, message_builder, timeout)
     end
 
     # Sends a JSON-RPC notification with raw JSON::Any params (no response expected).
@@ -710,6 +623,75 @@ module ACP
     end
 
     # ─── Private Methods ────────────────────────────────────────────
+
+    # Core implementation for sending a JSON-RPC request and awaiting
+    # its response. Both `send_request` and `send_request_raw` delegate
+    # to this method, differing only in how they build the message.
+    #
+    # - `method` — the RPC method name (used for logging and error messages).
+    # - `message_builder` — a proc that receives the request ID and returns
+    #   the serialized message hash ready for transport.
+    # - `timeout` — optional timeout in seconds (nil = no timeout).
+    #
+    # Returns the `result` field from the response as JSON::Any.
+    # Raises `JsonRpcError` if the response contains an error.
+    # Raises `RequestTimeoutError` if the request times out.
+    # Raises `ConnectionClosedError` if the transport is closed.
+    private def send_and_await_response(
+      method : String,
+      message_builder : Int64 -> Hash(String, JSON::Any),
+      timeout : Float64? = @request_timeout,
+    ) : JSON::Any
+      raise ConnectionClosedError.new if closed?
+
+      # Generate a unique ID for this request.
+      id = next_id
+      id_str = id.to_s
+
+      # Create a channel to receive the response.
+      response_channel = Channel(JSON::Any).new(1)
+
+      @pending_mutex.synchronize do
+        @pending[id_str] = response_channel
+      end
+
+      # Build and send the request.
+      message = message_builder.call(id)
+      @transport.send(message)
+
+      ClientLog.debug { "Sent request id=#{id} method=#{method}" }
+
+      # Wait for the response with optional timeout.
+      raw_response = if timeout
+                       receive_with_timeout(response_channel, timeout, id)
+                     else
+                       begin
+                         response_channel.receive
+                       rescue Channel::ClosedError
+                         raise ConnectionClosedError.new("Channel closed while waiting for response to #{method}")
+                       end
+                     end
+
+      # Clean up the pending entry.
+      @pending_mutex.synchronize do
+        @pending.delete(id_str)
+      end
+
+      # Check for errors in the response.
+      if error = raw_response["error"]?
+        if error.raw.is_a?(Hash)
+          raise JsonRpcError.from_json_any(error)
+        else
+          raise JsonRpcError.new(
+            JsonRpcError::INTERNAL_ERROR,
+            error.as_s? || "Unknown error"
+          )
+        end
+      end
+
+      # Return the result.
+      raw_response["result"]? || JSON::Any.new(nil)
+    end
 
     private def next_id : Int64
       id = @next_id

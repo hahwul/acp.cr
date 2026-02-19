@@ -986,16 +986,28 @@ module ACP
 
     # ─── Utility: Build JSON-RPC Messages ─────────────────────────────
 
-    # Builds a JSON-RPC 2.0 request object as a Hash for serialization.
-    def self.build_request(id : RequestId, method : String, params : JSON::Serializable) : Hash(String, JSON::Any)
+    # Creates a new JSON-RPC 2.0 message hash with the "jsonrpc" field set.
+    private def self.new_message : Hash(String, JSON::Any)
       msg = Hash(String, JSON::Any).new
       msg["jsonrpc"] = JSON::Any.new("2.0")
+      msg
+    end
+
+    # Sets the "id" field on a JSON-RPC message hash from a RequestId
+    # (which may be Int64 or String).
+    private def self.set_id(msg : Hash(String, JSON::Any), id : RequestId) : Nil
       case id
       when Int64
         msg["id"] = JSON::Any.new(id)
       when String
         msg["id"] = JSON::Any.new(id)
       end
+    end
+
+    # Builds a JSON-RPC 2.0 request object as a Hash for serialization.
+    def self.build_request(id : RequestId, method : String, params : JSON::Serializable) : Hash(String, JSON::Any)
+      msg = new_message
+      set_id(msg, id)
       msg["method"] = JSON::Any.new(method)
       msg["params"] = JSON.parse(params.to_json)
       msg
@@ -1003,14 +1015,8 @@ module ACP
 
     # Builds a JSON-RPC 2.0 request with raw JSON::Any params.
     def self.build_request_raw(id : RequestId, method : String, params : JSON::Any) : Hash(String, JSON::Any)
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
-      case id
-      when Int64
-        msg["id"] = JSON::Any.new(id)
-      when String
-        msg["id"] = JSON::Any.new(id)
-      end
+      msg = new_message
+      set_id(msg, id)
       msg["method"] = JSON::Any.new(method)
       msg["params"] = params
       msg
@@ -1018,8 +1024,7 @@ module ACP
 
     # Builds a JSON-RPC 2.0 notification (no "id" field).
     def self.build_notification(method : String, params : JSON::Serializable) : Hash(String, JSON::Any)
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
+      msg = new_message
       msg["method"] = JSON::Any.new(method)
       msg["params"] = JSON.parse(params.to_json)
       msg
@@ -1027,8 +1032,7 @@ module ACP
 
     # Builds a JSON-RPC 2.0 notification with raw JSON::Any params.
     def self.build_notification_raw(method : String, params : JSON::Any) : Hash(String, JSON::Any)
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
+      msg = new_message
       msg["method"] = JSON::Any.new(method)
       msg["params"] = params
       msg
@@ -1036,28 +1040,16 @@ module ACP
 
     # Builds a JSON-RPC 2.0 success response.
     def self.build_response(id : RequestId, result : JSON::Serializable) : Hash(String, JSON::Any)
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
-      case id
-      when Int64
-        msg["id"] = JSON::Any.new(id)
-      when String
-        msg["id"] = JSON::Any.new(id)
-      end
+      msg = new_message
+      set_id(msg, id)
       msg["result"] = JSON.parse(result.to_json)
       msg
     end
 
     # Builds a JSON-RPC 2.0 success response with raw JSON::Any result.
     def self.build_response_raw(id : RequestId, result : JSON::Any) : Hash(String, JSON::Any)
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
-      case id
-      when Int64
-        msg["id"] = JSON::Any.new(id)
-      when String
-        msg["id"] = JSON::Any.new(id)
-      end
+      msg = new_message
+      set_id(msg, id)
       msg["result"] = result
       msg
     end
@@ -1071,14 +1063,8 @@ module ACP
         error_obj["data"] = d
       end
 
-      msg = Hash(String, JSON::Any).new
-      msg["jsonrpc"] = JSON::Any.new("2.0")
-      case id
-      when Int64
-        msg["id"] = JSON::Any.new(id)
-      when String
-        msg["id"] = JSON::Any.new(id)
-      end
+      msg = new_message
+      set_id(msg, id)
       msg["error"] = JSON::Any.new(error_obj)
       msg
     end
