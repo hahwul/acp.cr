@@ -113,7 +113,7 @@ module ACP
     # Sends a prompt with multiple text strings, each as a separate
     # TextContentBlock.
     def prompt(*texts : String) : Protocol::SessionPromptResult
-      blocks = texts.map { |text_item| Protocol::TextContentBlock.new(text_item.as(String)).as(Protocol::ContentBlock) }
+      blocks = texts.map { |text_item| Protocol::TextContentBlock.new(text_item).as(Protocol::ContentBlock) }
       prompt(blocks.to_a)
     end
 

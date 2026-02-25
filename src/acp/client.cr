@@ -130,6 +130,11 @@ module ACP
     # Default timeout for requests (in seconds). Nil means no timeout.
     property request_timeout : Float64? = 30.0
 
+    # Timeout for session/prompt requests (in seconds). Prompts can take
+    # significantly longer than other requests, so this defaults to 5 minutes.
+    # Set to nil to wait indefinitely.
+    property prompt_timeout : Float64? = 300.0
+
     # ─── Callbacks ──────────────────────────────────────────────────
 
     # Callback invoked for every `session/update` notification.
@@ -204,6 +209,9 @@ module ACP
 
     # Whether the dispatcher fiber is running.
     @dispatcher_running : Bool = false
+
+    # Tracks consecutive dispatch errors for detecting protocol corruption.
+    @consecutive_dispatch_errors : Int32 = 0
 
     # Channel used to signal the dispatcher to stop.
     # Buffered with capacity 1 so that `close` never blocks if
@@ -371,7 +379,7 @@ module ACP
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
       # Use a longer timeout for prompts since they can take a while.
-      raw_result = send_request("session/prompt", params, timeout: nil)
+      raw_result = send_request("session/prompt", params, timeout: @prompt_timeout)
       Protocol::SessionPromptResult.from_json(raw_result.to_json)
     end
 
@@ -760,8 +768,13 @@ module ACP
 
         begin
           dispatch_message(msg)
+          @consecutive_dispatch_errors = 0
         rescue ex
-          ClientLog.error { "Error dispatching message: #{ex.message}" }
+          @consecutive_dispatch_errors += 1
+          ClientLog.error { "Error dispatching message (#{@consecutive_dispatch_errors} consecutive): #{ex.message}" }
+          if @consecutive_dispatch_errors >= 10
+            ClientLog.error { "Too many consecutive dispatch errors, possible protocol corruption" }
+          end
         end
       end
 
@@ -916,6 +929,8 @@ module ACP
         begin
           typed_params = params_type.from_json((params || JSON::Any.new(nil)).to_json)
           result = h.call(typed_params)
+          # Convert JSON::Serializable result to JSON::Any via round-trip;
+          # Crystal has no direct JSON::Serializable → JSON::Any conversion.
           respond_to_agent(id, JSON.parse(result.to_json))
         rescue ex : JSON::SerializableError
           ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
@@ -950,9 +965,8 @@ module ACP
           respond_to_agent(id, result)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
-          # On error, respond with cancellation.
-          cancelled = JSON.parse(%({"outcome": "cancelled"}))
-          respond_to_agent(id, cancelled)
+          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR,
+            "Permission handler error: #{ex.message}")
         end
       else
         # No handler — auto-cancel the permission request.
@@ -1002,9 +1016,13 @@ module ACP
       # The ACP spec uses "sessionUpdate" as the discriminator field.
       # Some legacy agents may send "type" instead, so we normalize
       # "type" → "sessionUpdate" for backward compatibility.
-      raw_params = params.as_h.dup
+      raw_h = params.as_h?
+      return unless raw_h
+      raw_params = raw_h.dup
       if update = raw_params["update"]?
-        update_h = update.as_h.dup
+        update_h = update.as_h?
+        return unless update_h
+        update_h = update_h.dup
         if !update_h.has_key?("sessionUpdate") && update_h.has_key?("type")
           update_h["sessionUpdate"] = update_h["type"]
           raw_params["update"] = JSON::Any.new(update_h)

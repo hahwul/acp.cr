@@ -241,6 +241,9 @@ module ACP
     # The underlying child process.
     getter process : Process
 
+    # Flag to prevent duplicate close/terminate sequences.
+    @process_closing : Bool = false
+
     # Spawns an agent process with the given command and arguments,
     # and sets up the stdio transport.
     #
@@ -274,6 +277,8 @@ module ACP
     # Closes the transport and terminates the agent process if it's
     # still running.
     def close : Nil
+      return if @process_closing
+      @process_closing = true
       super
 
       # Give the process a moment to exit gracefully, then signal it.

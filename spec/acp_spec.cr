@@ -1950,7 +1950,7 @@ describe ACP::Client do
       transport.close
     end
 
-    it "responds with cancellation when handler raises error" do
+    it "responds with error when handler raises error" do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
 
@@ -1976,7 +1976,9 @@ describe ACP::Client do
 
       response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-error" }
       response.should_not be_nil
-      response.as(JSON::Any)["result"]["outcome"].as_s.should eq("cancelled")
+      error = response.as(JSON::Any)["error"]
+      error["code"].as_i.should eq(-32603)
+      error["message"].as_s.should contain("Permission handler error")
 
       transport.close
     end
