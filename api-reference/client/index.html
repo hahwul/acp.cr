@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Core ACP client for protocol communication">
+  <title>Client - acp.cr</title>
+  <meta property="og:title" content="Client">
+<meta property="og:type" content="article">
+<meta property="og:url" content="/api-reference/client/">
+<meta property="og:description" content="Core ACP client for protocol communication">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Client">
+<meta name="twitter:description" content="Core ACP client for protocol communication">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="api-reference">
+<header class="docs-header">
+  <a href="/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="/user-guide/">User Guide</a>
+    <a href="/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="/user-guide/streaming/">Streaming</a></li>
+        <li><a href="/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="/api-reference/client/">Client</a></li>
+        <li><a href="/api-reference/session/">Session</a></li>
+        <li><a href="/api-reference/transport/">Transport</a></li>
+        <li><a href="/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Client</h1>
+    <h2 id="overview">Overview</h2>
+<p><code>ACP::Client</code> is the core class that manages the ACP protocol lifecycle. It handles request correlation, dispatches incoming messages via a background fiber, and provides methods for all ACP protocol operations.</p>
+<h2 id="constructor">Constructor</h2>
+<h3 id="new"><code>.new</code></h3>
+<pre><code class="language-crystal hljs">ACP::Client.new(
+  transport : ACP::Transport,
+  client_name : String = &quot;acp-crystal&quot;,
+  client_version : String = ACP::VERSION,
+  client_capabilities : ACP::Protocol::ClientCapabilities = ACP::Protocol::ClientCapabilities.new
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>transport</code></td>
+<td><code>Transport</code></td>
+<td>--</td>
+<td>The transport layer to use</td>
+</tr>
+<tr>
+<td><code>client_name</code></td>
+<td><code>String</code></td>
+<td><code>&quot;acp-crystal&quot;</code></td>
+<td>Client application name</td>
+</tr>
+<tr>
+<td><code>client_version</code></td>
+<td><code>String</code></td>
+<td><code>ACP::VERSION</code></td>
+<td>Client version string</td>
+</tr>
+<tr>
+<td><code>client_capabilities</code></td>
+<td><code>ClientCapabilities</code></td>
+<td><code>ClientCapabilities.new</code></td>
+<td>Advertised client capabilities</td>
+</tr>
+</tbody>
+</table>
+<h2 id="lifecycle-methods">Lifecycle Methods</h2>
+<h3 id="initializeconnection"><code>#initialize_connection</code></h3>
+<pre><code class="language-crystal hljs">client.initialize_connection : ACP::Protocol::InitializeResult
+</code></pre>
+<p>Performs the ACP handshake with the agent. Transitions state from <code>Created</code> to <code>Initialized</code>. Returns agent info and capabilities.</p>
+<h3 id="authenticate"><code>#authenticate</code></h3>
+<pre><code class="language-crystal hljs">client.authenticate(method_id : String) : Nil
+</code></pre>
+<p>Authenticates with the agent using the specified method. Call after <code>initialize_connection</code> if authentication is required.</p>
+<h3 id="close"><code>#close</code></h3>
+<pre><code class="language-crystal hljs">client.close : Nil
+</code></pre>
+<p>Closes the connection, stops the dispatcher fiber, and cleans up resources. Transitions state to <code>Closed</code>.</p>
+<h2 id="session-methods">Session Methods</h2>
+<h3 id="sessionnew"><code>#session_new</code></h3>
+<pre><code class="language-crystal hljs">client.session_new(
+  cwd : String,
+  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+) : ACP::Protocol::SessionNewResult
+</code></pre>
+<p>Creates a new session. Transitions state to <code>SessionActive</code>.</p>
+<h3 id="sessionload"><code>#session_load</code></h3>
+<pre><code class="language-crystal hljs">client.session_load(
+  session_id : String,
+  cwd : String,
+  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+) : ACP::Protocol::SessionLoadResult
+</code></pre>
+<p>Resumes a previous session by ID.</p>
+<h3 id="sessionprompt"><code>#session_prompt</code></h3>
+<pre><code class="language-crystal hljs">client.session_prompt(
+  blocks : Array(ACP::Protocol::ContentBlock),
+  session_id : String? = nil
+) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Sends content blocks as a prompt to the active session.</p>
+<h3 id="sessionprompttext"><code>#session_prompt_text</code></h3>
+<pre><code class="language-crystal hljs">client.session_prompt_text(
+  text : String,
+  session_id : String? = nil
+) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Convenience method to send a single text prompt.</p>
+<h3 id="sessioncancel"><code>#session_cancel</code></h3>
+<pre><code class="language-crystal hljs">client.session_cancel(session_id : String? = nil) : Nil
+</code></pre>
+<p>Cancels an in-progress generation.</p>
+<h3 id="sessionsetmode"><code>#session_set_mode</code></h3>
+<pre><code class="language-crystal hljs">client.session_set_mode(
+  mode_id : String,
+  session_id : String? = nil
+) : Nil
+</code></pre>
+<p>Switches the session to a different mode.</p>
+<h3 id="sessionsetconfigoption"><code>#session_set_config_option</code></h3>
+<pre><code class="language-crystal hljs">client.session_set_config_option(
+  config_id : String,
+  value : JSON::Any::Type,
+  session_id : String? = nil
+) : ACP::Protocol::SessionSetConfigOptionResult
+</code></pre>
+<p>Changes a configuration option in the active session.</p>
+<h2 id="extension-methods">Extension Methods</h2>
+<h3 id="extmethod"><code>#ext_method</code></h3>
+<pre><code class="language-crystal hljs">client.ext_method(
+  method : String,
+  params : Hash(String, JSON::Any::Type)? = nil,
+  timeout : Float64? = nil
+) : JSON::Any
+</code></pre>
+<p>Sends a custom extension request to the agent.</p>
+<h3 id="extnotification"><code>#ext_notification</code></h3>
+<pre><code class="language-crystal hljs">client.ext_notification(
+  method : String,
+  params : Hash(String, JSON::Any::Type)? = nil
+) : Nil
+</code></pre>
+<p>Sends a custom extension notification (no response expected).</p>
+<h2 id="state-amp-inspection">State &amp; Inspection</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>state</code></td>
+<td><code>ClientState</code></td>
+<td>Current state (<code>Created</code>, <code>Initialized</code>, <code>SessionActive</code>, <code>Closed</code>)</td>
+</tr>
+<tr>
+<td><code>closed?</code></td>
+<td><code>Bool</code></td>
+<td>Whether the client is closed</td>
+</tr>
+<tr>
+<td><code>session_active?</code></td>
+<td><code>Bool</code></td>
+<td>Whether a session is active</td>
+</tr>
+<tr>
+<td><code>session_id</code></td>
+<td><code>String?</code></td>
+<td>Current session ID</td>
+</tr>
+<tr>
+<td><code>agent_capabilities</code></td>
+<td><code>AgentCapabilities?</code></td>
+<td>Negotiated agent capabilities</td>
+</tr>
+<tr>
+<td><code>agent_info</code></td>
+<td><code>AgentInfo?</code></td>
+<td>Agent metadata</td>
+</tr>
+<tr>
+<td><code>auth_methods</code></td>
+<td><code>Array(JSON::Any)?</code></td>
+<td>Available authentication methods</td>
+</tr>
+<tr>
+<td><code>negotiated_protocol_version</code></td>
+<td><code>UInt16?</code></td>
+<td>Negotiated protocol version</td>
+</tr>
+</tbody>
+</table>
+<h2 id="configuration">Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request_timeout</code></td>
+<td><code>Float64?</code></td>
+<td><code>30.0</code></td>
+<td>Default request timeout in seconds</td>
+</tr>
+<tr>
+<td><code>prompt_timeout</code></td>
+<td><code>Float64?</code></td>
+<td><code>300.0</code></td>
+<td>Prompt-specific timeout (5 minutes)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="callbacks">Callbacks</h2>
+<table>
+<thead>
+<tr>
+<th>Callback</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_update</code></td>
+<td><code>UpdateHandler?</code></td>
+<td>Handle streaming session updates</td>
+</tr>
+<tr>
+<td><code>on_agent_request</code></td>
+<td><code>AgentRequestHandler?</code></td>
+<td>Handle agent-initiated requests</td>
+</tr>
+<tr>
+<td><code>on_notification</code></td>
+<td><code>NotificationHandler?</code></td>
+<td>Handle non-update notifications</td>
+</tr>
+<tr>
+<td><code>on_disconnect</code></td>
+<td><code>(-&gt; Nil)?</code></td>
+<td>Called on connection loss</td>
+</tr>
+</tbody>
+</table>
+<h2 id="typed-client-method-handlers">Typed Client Method Handlers</h2>
+<table>
+<thead>
+<tr>
+<th>Handler</th>
+<th>Params Type</th>
+<th>Result Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_read_text_file</code></td>
+<td><code>ReadTextFileParams</code></td>
+<td><code>ReadTextFileResult</code></td>
+<td>Handle <code>fs/read_text_file</code></td>
+</tr>
+<tr>
+<td><code>on_write_text_file</code></td>
+<td><code>WriteTextFileParams</code></td>
+<td><code>WriteTextFileResult</code></td>
+<td>Handle <code>fs/write_text_file</code></td>
+</tr>
+<tr>
+<td><code>on_create_terminal</code></td>
+<td><code>CreateTerminalParams</code></td>
+<td><code>CreateTerminalResult</code></td>
+<td>Handle <code>terminal/create</code></td>
+</tr>
+<tr>
+<td><code>on_terminal_output</code></td>
+<td><code>TerminalOutputParams</code></td>
+<td><code>TerminalOutputResult</code></td>
+<td>Handle <code>terminal/output</code></td>
+</tr>
+<tr>
+<td><code>on_release_terminal</code></td>
+<td><code>ReleaseTerminalParams</code></td>
+<td><code>ReleaseTerminalResult</code></td>
+<td>Handle <code>terminal/release</code></td>
+</tr>
+<tr>
+<td><code>on_wait_for_terminal_exit</code></td>
+<td><code>WaitForTerminalExitParams</code></td>
+<td><code>WaitForTerminalExitResult</code></td>
+<td>Handle <code>terminal/wait_for_exit</code></td>
+</tr>
+<tr>
+<td><code>on_kill_terminal</code></td>
+<td><code>KillTerminalParams</code></td>
+<td><code>KillTerminalResult</code></td>
+<td>Handle <code>terminal/kill</code></td>
+</tr>
+</tbody>
+</table>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="/js/search.js"></script>
+</body>
+</html>

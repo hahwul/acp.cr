@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="ACP protocol type definitions and enumerations">
+  <title>Protocol Types - acp.cr</title>
+  <meta property="og:title" content="Protocol Types">
+<meta property="og:type" content="article">
+<meta property="og:url" content="/api-reference/protocol/">
+<meta property="og:description" content="ACP protocol type definitions and enumerations">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Protocol Types">
+<meta name="twitter:description" content="ACP protocol type definitions and enumerations">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="api-reference">
+<header class="docs-header">
+  <a href="/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="/user-guide/">User Guide</a>
+    <a href="/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="/user-guide/streaming/">Streaming</a></li>
+        <li><a href="/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="/api-reference/client/">Client</a></li>
+        <li><a href="/api-reference/session/">Session</a></li>
+        <li><a href="/api-reference/transport/">Transport</a></li>
+        <li><a href="/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Protocol Types</h1>
+    <h2 id="overview">Overview</h2>
+<p>The <code>ACP::Protocol</code> module contains all JSON-RPC 2.0 and ACP schema types. All types use <code>JSON::Serializable</code> and many use discriminated unions for polymorphic deserialization.</p>
+<h2 id="enumerations">Enumerations</h2>
+<h3 id="stopreason">StopReason</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::StopReason
+  EndTurn
+  MaxTokens
+  MaxTurnRequests
+  Refusal
+  Cancelled
+end
+</code></pre>
+<h3 id="toolkind">ToolKind</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::ToolKind
+  Read
+  Edit
+  Delete
+  Move
+  Search
+  Execute
+  Think
+  Fetch
+  SwitchMode
+  Other
+end
+</code></pre>
+<h3 id="toolcallstatus">ToolCallStatus</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::ToolCallStatus
+  Pending
+  InProgress
+  Completed
+  Failed
+end
+</code></pre>
+<h3 id="permissionoptionkind">PermissionOptionKind</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::PermissionOptionKind
+  AllowOnce
+  AllowAlways
+  RejectOnce
+  RejectAlways
+end
+</code></pre>
+<h3 id="planentrypriority">PlanEntryPriority</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::PlanEntryPriority
+  High
+  Medium
+  Low
+end
+</code></pre>
+<h3 id="planentrystatus">PlanEntryStatus</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::PlanEntryStatus
+  Pending
+  InProgress
+  Completed
+end
+</code></pre>
+<h3 id="sessionconfigoptioncategory">SessionConfigOptionCategory</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::SessionConfigOptionCategory
+  Mode
+  Model
+  ThoughtLevel
+  Other
+end
+</code></pre>
+<h3 id="role">Role</h3>
+<pre><code class="language-crystal hljs">enum ACP::Protocol::Role
+  Assistant
+  User
+end
+</code></pre>
+<h2 id="content-blocks">Content Blocks</h2>
+<p>Content blocks are used to construct prompts. They form a discriminated union (<code>ContentBlock</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TextContentBlock</code></td>
+<td>Plain text with optional annotations</td>
+</tr>
+<tr>
+<td><code>ImageContentBlock</code></td>
+<td>Base64 image with MIME type</td>
+</tr>
+<tr>
+<td><code>AudioContentBlock</code></td>
+<td>Base64 audio with MIME type</td>
+</tr>
+<tr>
+<td><code>ResourceContentBlock</code></td>
+<td>Embedded resource (URI + content)</td>
+</tr>
+<tr>
+<td><code>ResourceLinkContentBlock</code></td>
+<td>Resource link with metadata</td>
+</tr>
+<tr>
+<td><code>FileContentBlock</code></td>
+<td>Backward-compatible alias for <code>ResourceLinkContentBlock</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="tool-call-content">Tool Call Content</h2>
+<p>Types for tool call content within updates:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ToolCallContentBlock</code></td>
+<td>Wraps a standard content block</td>
+</tr>
+<tr>
+<td><code>ToolCallDiff</code></td>
+<td>File modification diff (path, oldText, newText)</td>
+</tr>
+<tr>
+<td><code>ToolCallTerminal</code></td>
+<td>Embedded terminal reference by ID</td>
+</tr>
+<tr>
+<td><code>ToolCallLocation</code></td>
+<td>File location tracking (path, line)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="session-update-types">Session Update Types</h2>
+<p>Session updates are received via the <code>on_update</code> callback. They form a discriminated union (<code>SessionUpdate</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Key Fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AgentMessageChunkUpdate</code></td>
+<td><code>delta : String</code></td>
+</tr>
+<tr>
+<td><code>AgentThoughtChunkUpdate</code></td>
+<td><code>delta : String</code></td>
+</tr>
+<tr>
+<td><code>ToolCallUpdate</code></td>
+<td><code>tool_name : String</code>, <code>tool_call_id : String</code></td>
+</tr>
+<tr>
+<td><code>ToolCallStatusUpdate</code></td>
+<td><code>status : ToolCallStatus</code>, <code>tool_call_id : String</code></td>
+</tr>
+<tr>
+<td><code>PlanUpdate</code></td>
+<td><code>entries : Array(PlanEntry)</code></td>
+</tr>
+<tr>
+<td><code>UserMessageChunkUpdate</code></td>
+<td><code>delta : String</code></td>
+</tr>
+<tr>
+<td><code>AvailableCommandsUpdate</code></td>
+<td><code>commands : Array(Command)</code></td>
+</tr>
+<tr>
+<td><code>CurrentModeUpdate</code></td>
+<td><code>mode_id : String</code></td>
+</tr>
+<tr>
+<td><code>ConfigOptionUpdate</code></td>
+<td><code>config_id : String</code>, <code>value : JSON::Any</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="capabilities">Capabilities</h2>
+<h3 id="clientcapabilities">ClientCapabilities</h3>
+<pre><code class="language-crystal hljs">ACP::Protocol::ClientCapabilities.new(
+  fs : FsCapabilities? = nil,
+  terminal : Bool? = nil
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fs</code></td>
+<td><code>FsCapabilities?</code></td>
+<td>File system capabilities</td>
+</tr>
+<tr>
+<td><code>terminal</code></td>
+<td><code>Bool?</code></td>
+<td>Terminal support</td>
+</tr>
+</tbody>
+</table>
+<h3 id="fscapabilities">FsCapabilities</h3>
+<pre><code class="language-crystal hljs">ACP::Protocol::FsCapabilities.new(
+  read_text_file : Bool? = nil,
+  write_text_file : Bool? = nil
+)
+</code></pre>
+<h3 id="agentcapabilities">AgentCapabilities</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>load_session</code></td>
+<td><code>Bool?</code></td>
+<td>Session loading support</td>
+</tr>
+<tr>
+<td><code>prompt_capabilities</code></td>
+<td><code>PromptCapabilities?</code></td>
+<td>Prompt format support</td>
+</tr>
+<tr>
+<td><code>mcp_capabilities</code></td>
+<td><code>McpCapabilities?</code></td>
+<td>MCP support</td>
+</tr>
+<tr>
+<td><code>session_capabilities</code></td>
+<td><code>SessionCapabilities?</code></td>
+<td>Session features</td>
+</tr>
+</tbody>
+</table>
+<h3 id="promptcapabilities">PromptCapabilities</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>image</code></td>
+<td><code>Bool?</code></td>
+<td>Image content support</td>
+</tr>
+<tr>
+<td><code>audio</code></td>
+<td><code>Bool?</code></td>
+<td>Audio content support</td>
+</tr>
+<tr>
+<td><code>embedded_context</code></td>
+<td><code>Bool?</code></td>
+<td>Embedded context support</td>
+</tr>
+</tbody>
+</table>
+<h2 id="client-methods">Client Methods</h2>
+<p>Types for agent-initiated requests:</p>
+<h3 id="file-system">File System</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Params</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fs/read_text_file</code></td>
+<td><code>ReadTextFileParams</code></td>
+<td><code>ReadTextFileResult</code></td>
+</tr>
+<tr>
+<td><code>fs/write_text_file</code></td>
+<td><code>WriteTextFileParams</code></td>
+<td><code>WriteTextFileResult</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="terminal">Terminal</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Params</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>terminal/create</code></td>
+<td><code>CreateTerminalParams</code></td>
+<td><code>CreateTerminalResult</code></td>
+</tr>
+<tr>
+<td><code>terminal/output</code></td>
+<td><code>TerminalOutputParams</code></td>
+<td><code>TerminalOutputResult</code></td>
+</tr>
+<tr>
+<td><code>terminal/release</code></td>
+<td><code>ReleaseTerminalParams</code></td>
+<td><code>ReleaseTerminalResult</code></td>
+</tr>
+<tr>
+<td><code>terminal/wait_for_exit</code></td>
+<td><code>WaitForTerminalExitParams</code></td>
+<td><code>WaitForTerminalExitResult</code></td>
+</tr>
+<tr>
+<td><code>terminal/kill</code></td>
+<td><code>KillTerminalParams</code></td>
+<td><code>KillTerminalResult</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="error-codes">Error Codes</h2>
+<pre><code class="language-crystal hljs">module ACP::Protocol::ErrorCode
+  PARSE_ERROR       = -32700
+  INVALID_REQUEST   = -32600
+  METHOD_NOT_FOUND  = -32601
+  INVALID_PARAMS    = -32602
+  INTERNAL_ERROR    = -32603
+  AUTH_REQUIRED     = -32000
+  RESOURCE_NOT_FOUND = -32002
+end
+</code></pre>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="/js/search.js"></script>
+</body>
+</html>

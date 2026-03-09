@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Client lifecycle, transport, sessions, and prompting">
+  <title>Basic Usage - acp.cr</title>
+  <meta property="og:title" content="Basic Usage">
+<meta property="og:type" content="article">
+<meta property="og:url" content="/user-guide/basic-usage/">
+<meta property="og:description" content="Client lifecycle, transport, sessions, and prompting">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Basic Usage">
+<meta name="twitter:description" content="Client lifecycle, transport, sessions, and prompting">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="user-guide">
+<header class="docs-header">
+  <a href="/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="/user-guide/">User Guide</a>
+    <a href="/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="/user-guide/streaming/">Streaming</a></li>
+        <li><a href="/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="/api-reference/client/">Client</a></li>
+        <li><a href="/api-reference/session/">Session</a></li>
+        <li><a href="/api-reference/transport/">Transport</a></li>
+        <li><a href="/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Basic Usage</h1>
+    <h2 id="client-lifecycle">Client Lifecycle</h2>
+<p>The <code>ACP::Client</code> follows a state machine pattern:</p>
+<pre><code>Created → Initialized → SessionActive → Closed
+</code></pre>
+<p>Each state transition happens through specific method calls:</p>
+<pre><code class="language-crystal hljs">client = ACP::Client.new(transport, client_name: &quot;app&quot;, client_version: &quot;1.0&quot;)
+# State: Created
+
+result = client.initialize_connection
+# State: Initialized
+
+session_result = client.session_new(Dir.current)
+# State: SessionActive
+
+client.close
+# State: Closed
+</code></pre>
+<h2 id="transport-options">Transport Options</h2>
+<h3 id="processtransport">ProcessTransport</h3>
+<p>Spawns an agent process and communicates over stdio:</p>
+<pre><code class="language-crystal hljs">transport = ACP::ProcessTransport.new(
+  &quot;npx&quot;,
+  args: [&quot;-y&quot;, &quot;@anthropic-ai/claude-code&quot;, &quot;--agent&quot;],
+  env: {&quot;ANTHROPIC_API_KEY&quot; =&gt; &quot;sk-...&quot;},
+  chdir: Dir.current,
+  stderr: STDERR
+)
+</code></pre>
+<p>You can check the process status:</p>
+<pre><code class="language-crystal hljs">transport.terminated?  # =&gt; false
+transport.wait         # blocks until process exits
+</code></pre>
+<h3 id="stdiotransport">StdioTransport</h3>
+<p>For working with existing IO pairs (e.g., pre-spawned processes):</p>
+<pre><code class="language-crystal hljs">transport = ACP::StdioTransport.new(
+  reader: io_read,
+  writer: io_write,
+  buffer_size: 256
+)
+</code></pre>
+<h2 id="sessions">Sessions</h2>
+<h3 id="creating-a-new-session">Creating a New Session</h3>
+<pre><code class="language-crystal hljs">session = ACP::Session.create(client, Dir.current)
+</code></pre>
+<h3 id="loading-an-existing-session">Loading an Existing Session</h3>
+<pre><code class="language-crystal hljs">session = ACP::Session.load(client, &quot;session-id-123&quot;, Dir.current)
+</code></pre>
+<h3 id="sending-prompts">Sending Prompts</h3>
+<p>Simple text prompt:</p>
+<pre><code class="language-crystal hljs">result = session.prompt(&quot;Explain this code&quot;)
+</code></pre>
+<p>Multiple text blocks:</p>
+<pre><code class="language-crystal hljs">result = session.prompt(&quot;First context&quot;, &quot;Now do this&quot;)
+</code></pre>
+<p>Using the PromptBuilder DSL:</p>
+<pre><code class="language-crystal hljs">result = session.prompt do |b|
+  b.text(&quot;Review this file&quot;)
+  b.resource_link(&quot;/path/to/file.cr&quot;, &quot;text/x-crystal&quot;)
+end
+</code></pre>
+<h3 id="session-modes">Session Modes</h3>
+<p>Switch between available agent modes:</p>
+<pre><code class="language-crystal hljs"># List available modes
+session.available_mode_ids  # =&gt; [&quot;code&quot;, &quot;plan&quot;, &quot;architect&quot;]
+
+# Switch mode
+session.mode = &quot;plan&quot;
+</code></pre>
+<h3 id="configuration-options">Configuration Options</h3>
+<pre><code class="language-crystal hljs">session.set_config_option(&quot;model&quot;, &quot;claude-sonnet&quot;)
+</code></pre>
+<h2 id="handling-callbacks">Handling Callbacks</h2>
+<p>Set up handlers on the client to process streaming updates and agent requests:</p>
+<pre><code class="language-crystal hljs">client.on_update = -&gt;(update : ACP::Protocol::SessionUpdate) {
+  case update
+  when ACP::Protocol::AgentMessageChunkUpdate
+    print update.delta
+  when ACP::Protocol::ToolCallUpdate
+    puts &quot;Tool: #{update.tool_name}&quot;
+  end
+}
+
+client.on_agent_request = -&gt;(method : String, params : JSON::Any?) {
+  # Handle permission requests, fs operations, etc.
+  nil
+}
+</code></pre>
+<h3 id="typed-client-method-handlers">Typed Client Method Handlers</h3>
+<p>For specific agent-initiated requests, use typed handlers:</p>
+<pre><code class="language-crystal hljs">client.on_read_text_file = -&gt;(params : ACP::Protocol::ReadTextFileParams) {
+  content = File.read(params.path)
+  ACP::Protocol::ReadTextFileResult.new(content: content)
+}
+
+client.on_write_text_file = -&gt;(params : ACP::Protocol::WriteTextFileParams) {
+  File.write(params.path, params.content)
+  ACP::Protocol::WriteTextFileResult.new(success: true)
+}
+</code></pre>
+<h2 id="error-handling">Error Handling</h2>
+<p>All errors inherit from <code>ACP::Error</code>. Wrap operations in begin/rescue:</p>
+<pre><code class="language-crystal hljs">begin
+  result = session.prompt(&quot;Do something&quot;)
+rescue ex : ACP::RequestTimeoutError
+  puts &quot;Timed out: #{ex.message}&quot;
+rescue ex : ACP::ConnectionClosedError
+  puts &quot;Connection lost&quot;
+rescue ex : ACP::Error
+  puts &quot;ACP error: #{ex.message}&quot;
+end
+</code></pre>
+<p>See the <a href="/user-guide/error-handling/">Error Handling guide</a> for detailed patterns.</p>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="/js/search.js"></script>
+</body>
+</html>

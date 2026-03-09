@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Crystal implementation of the Agent Client Protocol">
+  <title>acp.cr - acp.cr</title>
+  <meta property="og:title" content="acp.cr">
+<meta property="og:type" content="article">
+<meta property="og:url" content="/">
+<meta property="og:description" content="Crystal implementation of the Agent Client Protocol">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="acp.cr">
+<meta name="twitter:description" content="Crystal implementation of the Agent Client Protocol">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="">
+<header class="docs-header">
+  <a href="/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="/user-guide/">User Guide</a>
+    <a href="/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="/user-guide/streaming/">Streaming</a></li>
+        <li><a href="/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="/api-reference/client/">Client</a></li>
+        <li><a href="/api-reference/session/">Session</a></li>
+        <li><a href="/api-reference/transport/">Transport</a></li>
+        <li><a href="/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>acp.cr</h1>
+    <p>Crystal implementation of the Agent Client Protocol (ACP). Communicate with AI coding agents over stdio transport using JSON-RPC 2.0 directly from Crystal.</p>
+<blockquote>
+<p><strong>Zero dependencies</strong> -- uses only the Crystal standard library.</p>
+</blockquote>
+<h2 id="overview">Overview</h2>
+<p>acp.cr provides a type-safe Crystal client for the Agent Client Protocol, a JSON-RPC 2.0 based communication standard that enables code editors and tools to communicate with AI coding agents. It supports initialization, authentication, session management, streaming updates, tool calls, and agent-initiated requests -- all over stdio transport.</p>
+<h2 id="quick-links">Quick Links</h2>
+<ul>
+<li><strong><a href="/user-guide/getting-started/">Getting Started</a></strong> -- Installation, prerequisites, and your first program</li>
+<li><strong><a href="/user-guide/basic-usage/">Basic Usage</a></strong> -- Client, transport, and session management</li>
+<li><strong><a href="/api-reference/client/">API Reference</a></strong> -- Complete API documentation</li>
+</ul>
+<h2 id="features">Features</h2>
+<ul>
+<li><strong>Full ACP Protocol</strong> -- Initialize, authenticate, create/load sessions, send prompts, handle streaming</li>
+<li><strong>Transport Abstraction</strong> -- <code>StdioTransport</code> for IO pairs, <code>ProcessTransport</code> for spawning agents</li>
+<li><strong>Async Architecture</strong> -- Background dispatcher fiber with Crystal channels for real-time streaming</li>
+<li><strong>Type-Safe API</strong> -- All protocol types use <code>JSON::Serializable</code> with discriminated unions</li>
+<li><strong>Session Wrapper</strong> -- High-level <code>Session</code> class for session-scoped operations</li>
+<li><strong>PromptBuilder DSL</strong> -- Ergonomic content block construction with text, image, audio, and resource support</li>
+</ul>
+<h2 id="installation">Installation</h2>
+<p>Add acp.cr to your <code>shard.yml</code>:</p>
+<pre><code class="language-yaml hljs">dependencies:
+  acp:
+    github: hahwul/acp.cr
+</code></pre>
+<p>Then run:</p>
+<pre><code class="language-bash hljs">shards install
+</code></pre>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="/js/search.js"></script>
+</body>
+</html>
