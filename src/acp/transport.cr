@@ -37,12 +37,6 @@ module ACP
 
     # Returns true if the transport is open and operational.
     abstract def closed? : Bool
-
-    # Convenience: send a JSON::Serializable object that has already
-    # been wrapped in the JSON-RPC envelope.
-    def send_json(obj : Hash(String, JSON::Any)) : Nil
-      send(obj)
-    end
   end
 
   # ─── Stdio Transport ─────────────────────────────────────────────
@@ -285,11 +279,21 @@ module ACP
       unless @process.terminated?
         @process.terminate(graceful: true)
 
-        # Wait briefly for graceful shutdown.
+        # Wait briefly for graceful shutdown, then force-kill if needed.
         spawn do
           sleep 2.seconds
-          unless @process.terminated?
-            @process.terminate(graceful: false)
+          begin
+            unless @process.terminated?
+              @process.terminate(graceful: false)
+            end
+          rescue
+            # Process may have already exited.
+          end
+          # Reap the process to avoid zombies.
+          begin
+            @process.wait unless @process.terminated?
+          rescue
+            # Process may have already been reaped.
           end
         end
       end

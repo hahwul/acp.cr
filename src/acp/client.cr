@@ -652,16 +652,16 @@ module ACP
     ) : JSON::Any
       raise ConnectionClosedError.new if closed?
 
-      # Generate a unique ID for this request.
-      id = next_id
-      id_str = id.to_s
-
-      # Create a channel to receive the response.
+      # Generate a unique ID and register the pending channel atomically.
       response_channel = Channel(JSON::Any).new(1)
 
-      @pending_mutex.synchronize do
-        @pending[id_str] = response_channel
+      id = @pending_mutex.synchronize do
+        current_id = @next_id
+        @next_id += 1
+        @pending[current_id.to_s] = response_channel
+        current_id
       end
+      id_str = id.to_s
 
       # Build and send the request.
       message = message_builder.call(id)
@@ -699,12 +699,6 @@ module ACP
 
       # Return the result.
       raw_response["result"]? || JSON::Any.new(nil)
-    end
-
-    private def next_id : Int64
-      id = @next_id
-      @next_id += 1
-      id
     end
 
     # Ensures the client is in the expected state before performing

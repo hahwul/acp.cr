@@ -38,6 +38,7 @@
 require "json"
 require "./content_block"
 require "./tool_call_content"
+require "./tool_call_content_helper"
 require "./chunk_content_helper"
 
 module ACP
@@ -274,23 +275,7 @@ module ACP
         @session_update = "tool_call"
       end
 
-      # Attempts to parse `content` items as typed `ToolCallContent` values.
-      # Entries that fail to deserialize are silently skipped.
-      def typed_content : Array(ToolCallContent)
-        return [] of ToolCallContent unless items = @content
-        items.compact_map do |item|
-          ToolCallContent.from_json(item.to_json) rescue nil
-        end
-      end
-
-      # Attempts to parse `locations` items as typed `ToolCallLocation` values.
-      # Entries that fail to deserialize are silently skipped.
-      def typed_locations : Array(ToolCallLocation)
-        return [] of ToolCallLocation unless items = @locations
-        items.compact_map do |item|
-          ToolCallLocation.from_json(item.to_json) rescue nil
-        end
-      end
+      include ToolCallContentHelper
     end
 
     # Backward-compatible alias.
@@ -350,23 +335,7 @@ module ACP
         @session_update = "tool_call_update"
       end
 
-      # Attempts to parse `content` items as typed `ToolCallContent` values.
-      # Entries that fail to deserialize are silently skipped.
-      def typed_content : Array(ToolCallContent)
-        return [] of ToolCallContent unless items = @content
-        items.compact_map do |item|
-          ToolCallContent.from_json(item.to_json) rescue nil
-        end
-      end
-
-      # Attempts to parse `locations` items as typed `ToolCallLocation` values.
-      # Entries that fail to deserialize are silently skipped.
-      def typed_locations : Array(ToolCallLocation)
-        return [] of ToolCallLocation unless items = @locations
-        items.compact_map do |item|
-          ToolCallLocation.from_json(item.to_json) rescue nil
-        end
-      end
+      include ToolCallContentHelper
     end
 
     # ─── Plan Update ───────────────────────────────────────────────────
