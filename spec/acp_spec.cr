@@ -4336,3 +4336,146 @@ describe "Protocol::ErrorCode references JsonRpcError" do
     ACP::Protocol::ErrorCode::RESOURCE_NOT_FOUND.should eq(-32002)
   end
 end
+
+# ─── SessionInfo ───────────────────────────────────────────────────────
+
+describe ACP::Protocol::SessionInfo do
+  it "deserializes from JSON with all fields" do
+    json_str = %({"sessionId": "sess-001", "cwd": "/home/user/project", "title": "My Session", "updatedAt": "2026-03-19T12:00:00Z"})
+    info = ACP::Protocol::SessionInfo.from_json(json_str)
+    info.session_id.should eq("sess-001")
+    info.cwd.should eq("/home/user/project")
+    info.title.should eq("My Session")
+    info.updated_at.should eq("2026-03-19T12:00:00Z")
+  end
+
+  it "deserializes with only required fields" do
+    json_str = %({"sessionId": "sess-002", "cwd": "/tmp"})
+    info = ACP::Protocol::SessionInfo.from_json(json_str)
+    info.session_id.should eq("sess-002")
+    info.cwd.should eq("/tmp")
+    info.title.should be_nil
+    info.updated_at.should be_nil
+  end
+
+  it "serializes with correct JSON keys" do
+    info = ACP::Protocol::SessionInfo.new(session_id: "sess-001", cwd: "/tmp", title: "Test")
+    json = JSON.parse(info.to_json)
+    json["sessionId"].as_s.should eq("sess-001")
+    json["cwd"].as_s.should eq("/tmp")
+    json["title"].as_s.should eq("Test")
+  end
+end
+
+# ─── SessionListParams / SessionListResult ─────────────────────────────
+
+describe ACP::Protocol::SessionListParams do
+  it "serializes with optional fields" do
+    params = ACP::Protocol::SessionListParams.new(cwd: "/home/user", cursor: "page2")
+    json = JSON.parse(params.to_json)
+    json["cwd"].as_s.should eq("/home/user")
+    json["cursor"].as_s.should eq("page2")
+  end
+
+  it "serializes with nil optional fields" do
+    params = ACP::Protocol::SessionListParams.new
+    json = JSON.parse(params.to_json)
+    json["cwd"]?.try(&.raw).should be_nil
+    json["cursor"]?.try(&.raw).should be_nil
+  end
+end
+
+describe ACP::Protocol::SessionListResult do
+  it "deserializes with sessions and nextCursor" do
+    json_str = <<-JSON
+      {
+        "sessions": [
+          {"sessionId": "sess-001", "cwd": "/home/user/project1", "title": "First"},
+          {"sessionId": "sess-002", "cwd": "/home/user/project2"}
+        ],
+        "nextCursor": "cursor_abc123"
+      }
+      JSON
+    result = ACP::Protocol::SessionListResult.from_json(json_str)
+    result.sessions.size.should eq(2)
+    result.sessions[0].session_id.should eq("sess-001")
+    result.sessions[0].title.should eq("First")
+    result.sessions[1].session_id.should eq("sess-002")
+    result.sessions[1].title.should be_nil
+    result.next_cursor.should eq("cursor_abc123")
+    result.has_more?.should be_true
+  end
+
+  it "deserializes without nextCursor" do
+    json_str = %({"sessions": []})
+    result = ACP::Protocol::SessionListResult.from_json(json_str)
+    result.sessions.should be_empty
+    result.next_cursor.should be_nil
+    result.has_more?.should be_false
+  end
+end
+
+# ─── SessionCapabilities with list ─────────────────────────────────────
+
+describe ACP::Protocol::SessionCapabilities do
+  it "deserializes with list capability present" do
+    json_str = %({"list": {}})
+    caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
+    caps.list?.should be_true
+    caps.list.should_not be_nil
+  end
+
+  it "deserializes with list capability absent" do
+    json_str = %({})
+    caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
+    caps.list?.should be_false
+    caps.list.should be_nil
+  end
+
+  it "deserializes with list capability null" do
+    json_str = %({"list": null})
+    caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
+    caps.list?.should be_false
+    caps.list.should be_nil
+  end
+end
+
+# ─── SessionInfoUpdate ─────────────────────────────────────────────────
+
+describe ACP::Protocol::SessionInfoUpdate do
+  it "deserializes from JSON" do
+    json_str = %({"sessionUpdate": "session_info_update", "title": "My Conversation", "updatedAt": "2026-03-19T12:00:00Z"})
+    update = ACP::Protocol::SessionUpdate.from_json(json_str)
+    update.should be_a(ACP::Protocol::SessionInfoUpdate)
+    info = update.as(ACP::Protocol::SessionInfoUpdate)
+    info.title.should eq("My Conversation")
+    info.updated_at.should eq("2026-03-19T12:00:00Z")
+  end
+
+  it "deserializes with only title" do
+    json_str = %({"sessionUpdate": "session_info_update", "title": "Test"})
+    update = ACP::Protocol::SessionUpdate.from_json(json_str)
+    info = update.as(ACP::Protocol::SessionInfoUpdate)
+    info.title.should eq("Test")
+    info.updated_at.should be_nil
+  end
+
+  it "works within SessionUpdateParams" do
+    json_str = %({"sessionId": "sess-001", "update": {"sessionUpdate": "session_info_update", "title": "Updated Title"}})
+    params = ACP::Protocol::SessionUpdateParams.from_json(json_str)
+    params.session_id.should eq("sess-001")
+    params.update.should be_a(ACP::Protocol::SessionInfoUpdate)
+  end
+end
+
+# ─── AgentMethod includes session/list ─────────────────────────────────
+
+describe ACP::Protocol::AgentMethod do
+  it "recognizes session/list as a known method" do
+    ACP::Protocol::AgentMethod.known?("session/list").should be_true
+  end
+
+  it "recognizes session/list as a session method" do
+    ACP::Protocol::AgentMethod.session_method?("session/list").should be_true
+  end
+end

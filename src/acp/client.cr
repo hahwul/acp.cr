@@ -357,6 +357,29 @@ module ACP
       result
     end
 
+    # Lists available sessions from the agent.
+    #
+    # Requires the agent to advertise `sessionCapabilities.list` during
+    # initialization.
+    #
+    # - `cwd` — optional filter: only return sessions with this working directory.
+    # - `cursor` — optional pagination cursor from a previous response.
+    #
+    # Returns the list result with sessions and optional next cursor.
+    #
+    # Raises `InvalidStateError` if not initialized.
+    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+    def session_list(
+      cwd : String? = nil,
+      cursor : String? = nil,
+    ) : Protocol::SessionListResult
+      ensure_state(ClientState::Initialized, "session/list")
+
+      params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor)
+      raw_result = send_request("session/list", params)
+      Protocol::SessionListResult.from_json(raw_result.to_json)
+    end
+
     # Sends a prompt to the agent in the active session.
     #
     # - `prompt` — an array of content blocks forming the prompt.

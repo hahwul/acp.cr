@@ -74,6 +74,25 @@ module ACP
       new(client, session_id, result.modes, result.config_options)
     end
 
+    # Lists available sessions from the agent.
+    #
+    # This is a class method because it operates at the client level,
+    # not within a specific session.
+    #
+    # - `client` — an initialized ACP::Client.
+    # - `cwd` — optional filter: only return sessions with this working directory.
+    # - `cursor` — optional pagination cursor.
+    #
+    # Requires the agent to advertise `sessionCapabilities.list`.
+    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+    def self.list(
+      client : Client,
+      cwd : String? = nil,
+      cursor : String? = nil,
+    ) : Protocol::SessionListResult
+      client.session_list(cwd: cwd, cursor: cursor)
+    end
+
     # ─── Constructor ──────────────────────────────────────────────────
 
     # Direct constructor. Prefer `Session.create` or `Session.load`.

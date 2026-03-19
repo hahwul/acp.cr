@@ -489,6 +489,95 @@ module ACP
       end
     end
 
+    # ─── SessionInfo ─────────────────────────────────────────────────
+    # Metadata about a session, returned by `session/list`.
+    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+
+    struct SessionInfo
+      include JSON::Serializable
+
+      # Unique session identifier (required).
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # Absolute path to the working directory (required).
+      property cwd : String
+
+      # Human-readable session title.
+      property title : String?
+
+      # ISO 8601 timestamp of last activity.
+      @[JSON::Field(key: "updatedAt")]
+      property updated_at : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @session_id : String,
+        @cwd : String,
+        @title : String? = nil,
+        @updated_at : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # ─── Session/List Method ─────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+
+    # Params for the `session/list` method (Client → Agent).
+    struct SessionListParams
+      include JSON::Serializable
+
+      # Optional filter: only return sessions with this working directory.
+      property cwd : String?
+
+      # Optional pagination cursor from a previous `nextCursor` response.
+      property cursor : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @cwd : String? = nil,
+        @cursor : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Result of the `session/list` method (Agent → Client).
+    struct SessionListResult
+      include JSON::Serializable
+
+      # Collection of sessions (required).
+      property sessions : Array(SessionInfo)
+
+      # Opaque pagination cursor for fetching the next page. Nil if
+      # there are no more results.
+      @[JSON::Field(key: "nextCursor")]
+      property next_cursor : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @sessions : Array(SessionInfo) = [] of SessionInfo,
+        @next_cursor : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Returns true if there are more pages to fetch.
+      def has_more? : Bool
+        !@next_cursor.nil?
+      end
+    end
+
     # ─── Session/Load Method ──────────────────────────────────────────
     # See: https://agentclientprotocol.com/protocol/session-setup#loading-sessions
 

@@ -117,6 +117,7 @@ module ACP
         "current_mode_update"       => CurrentModeUpdate,
         "config_option_update"      => ConfigOptionUpdate,
         "config_options_update"     => ConfigOptionUpdate,
+        "session_info_update"       => SessionInfoUpdate,
         # ── Non-Standard / Backward Compatibility ──
         "agent_message_start" => AgentMessageStartUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
@@ -512,6 +513,36 @@ module ACP
         @config_options.compact_map do |item|
           ConfigOption.from_json(item.to_json) rescue nil
         end
+      end
+    end
+
+    # ─── Session Info Update ─────────────────────────────────────────
+
+    # Notification that session metadata has changed (e.g., title or timestamp).
+    # Agents send this to inform the client of changes to the session's
+    # human-readable metadata.
+    # See: https://agentclientprotocol.com/protocol/session-setup
+    struct SessionInfoUpdate < SessionUpdate
+      include JSON::Serializable
+
+      # Human-readable title for the session. May be set by the agent
+      # based on conversation content (e.g., a summary of the first prompt).
+      property title : String?
+
+      # ISO 8601 timestamp of last activity.
+      @[JSON::Field(key: "updatedAt")]
+      property updated_at : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @title : String? = nil,
+        @updated_at : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+        @session_update = "session_info_update"
       end
     end
 

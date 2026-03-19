@@ -118,11 +118,11 @@ module ACP
       end
     end
 
-    # Session capabilities supported by the agent.
-    # As a baseline, all Agents MUST support session/new, session/prompt,
-    # session/cancel, and session/update.
-    # See: https://agentclientprotocol.com/protocol/initialization#session-capabilities
-    struct SessionCapabilities
+    # Capabilities for the session/list method.
+    # Presence of this object (even empty) indicates the agent supports
+    # listing sessions via `session/list`.
+    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+    struct SessionListCapabilities
       include JSON::Serializable
 
       # Extension metadata.
@@ -132,6 +132,33 @@ module ACP
       def initialize(
         @meta : Hash(String, JSON::Any)? = nil,
       )
+      end
+    end
+
+    # Session capabilities supported by the agent.
+    # As a baseline, all Agents MUST support session/new, session/prompt,
+    # session/cancel, and session/update.
+    # See: https://agentclientprotocol.com/protocol/initialization#session-capabilities
+    struct SessionCapabilities
+      include JSON::Serializable
+
+      # When present (non-null), indicates the agent supports `session/list`.
+      # The value is a `SessionListCapabilities` object.
+      property list : SessionListCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @list : SessionListCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Returns true if the agent supports session listing.
+      def list? : Bool
+        !@list.nil?
       end
     end
 

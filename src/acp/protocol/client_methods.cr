@@ -430,6 +430,7 @@ module ACP
       # Session management.
       SESSION_NEW               = "session/new"
       SESSION_LOAD              = "session/load"
+      SESSION_LIST              = "session/list"
       SESSION_PROMPT            = "session/prompt"
       SESSION_CANCEL            = "session/cancel"
       SESSION_SET_MODE          = "session/set_mode"
@@ -442,8 +443,9 @@ module ACP
       def self.known?(method : String) : Bool
         case method
         when INITIALIZE, AUTHENTICATE,
-             SESSION_NEW, SESSION_LOAD, SESSION_PROMPT, SESSION_CANCEL,
-             SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE
+             SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_PROMPT,
+             SESSION_CANCEL, SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION,
+             SESSION_UPDATE
           true
         else
           false
@@ -453,8 +455,9 @@ module ACP
       # Returns true if the given method name is a session method.
       def self.session_method?(method : String) : Bool
         case method
-        when SESSION_NEW, SESSION_LOAD, SESSION_PROMPT, SESSION_CANCEL,
-             SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE
+        when SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_PROMPT,
+             SESSION_CANCEL, SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION,
+             SESSION_UPDATE
           true
         else
           false
