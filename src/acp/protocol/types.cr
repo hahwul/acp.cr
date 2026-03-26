@@ -438,7 +438,7 @@ module ACP
 
       # Returns true if this option uses grouped values.
       def grouped? : Bool
-        !!@groups.try(&.any?)
+        !(@groups.nil? || @groups.try(&.empty?))
       end
 
       # Returns all option values across all groups (flattened).

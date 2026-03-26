@@ -127,6 +127,8 @@ module ACP
 
       # Parses a wire-format string into a ToolKind.
       # Returns nil if the string is not a recognized tool kind.
+      #
+      # ameba:disable Metrics/CyclomaticComplexity
       def self.parse?(value : String) : ToolKind?
         case value
         when "read"        then Read
