@@ -1725,6 +1725,139 @@ describe ACP::Client do
     end
   end
 
+  describe "#session_list" do
+    it "sends session/list request and returns result" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessions": [
+              {"sessionId": "sess-001", "cwd": "/home/user/project1", "title": "First Session"},
+              {"sessionId": "sess-002", "cwd": "/home/user/project2"}
+            ],
+            "nextCursor": "cursor_page2"
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_list
+      result.sessions.size.should eq(2)
+      result.sessions[0].session_id.should eq("sess-001")
+      result.sessions[0].cwd.should eq("/home/user/project1")
+      result.sessions[0].title.should eq("First Session")
+      result.sessions[1].session_id.should eq("sess-002")
+      result.sessions[1].title.should be_nil
+      result.next_cursor.should eq("cursor_page2")
+      result.has_more?.should be_true
+
+      transport.close
+    end
+
+    it "sends cwd and cursor parameters" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessions": []
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_list(cwd: "/my/project", cursor: "page2")
+      result.sessions.should be_empty
+      result.has_more?.should be_false
+
+      # Verify params were sent correctly
+      list_req = transport.sent_messages.find { |msg| msg["method"]?.try(&.as_s?) == "session/list" }
+      list_req.should_not be_nil
+      params = list_req.as(JSON::Any)["params"]
+      params["cwd"].as_s.should eq("/my/project")
+      params["cursor"].as_s.should eq("page2")
+
+      transport.close
+    end
+
+    it "returns empty list when no sessions exist" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessions": []
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_list
+      result.sessions.should be_empty
+      result.next_cursor.should be_nil
+      result.has_more?.should be_false
+
+      transport.close
+    end
+
+    it "raises InvalidStateError if not initialized" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      expect_raises(ACP::InvalidStateError) do
+        client.session_list
+      end
+
+      transport.close
+    end
+  end
+
   describe "#session_cancel" do
     it "sends a cancel notification" do
       transport = TestTransport.new
@@ -2147,6 +2280,72 @@ describe ACP::Session do
       session = ACP::Session.load(client, session_id: "sess-existing", cwd: "/tmp")
       session.id.should eq("sess-existing")
       session.closed?.should be_false
+
+      transport.close
+    end
+  end
+
+  describe ".list" do
+    it "lists sessions through the client" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessions": [
+              {"sessionId": "sess-list-1", "cwd": "/project/a", "title": "Session A"},
+              {"sessionId": "sess-list-2", "cwd": "/project/b"}
+            ],
+            "nextCursor": "next_page"
+          }
+          }
+          JSON
+        )
+      end
+
+      result = ACP::Session.list(client)
+      result.sessions.size.should eq(2)
+      result.sessions[0].session_id.should eq("sess-list-1")
+      result.sessions[0].cwd.should eq("/project/a")
+      result.sessions[0].title.should eq("Session A")
+      result.sessions[1].session_id.should eq("sess-list-2")
+      result.sessions[1].title.should be_nil
+      result.next_cursor.should eq("next_page")
+      result.has_more?.should be_true
+
+      transport.close
+    end
+
+    it "passes cwd and cursor to client.session_list" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        sent["method"].as_s.should eq("session/list")
+        params = sent["params"]
+        params["cwd"].as_s.should eq("/filtered/path")
+        params["cursor"].as_s.should eq("cursor_abc")
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessions": []
+          }
+          }
+          JSON
+        )
+      end
+
+      result = ACP::Session.list(client, cwd: "/filtered/path", cursor: "cursor_abc")
+      result.sessions.should be_empty
+      result.has_more?.should be_false
 
       transport.close
     end

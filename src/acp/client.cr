@@ -719,7 +719,17 @@ module ACP
       @pending_mutex.synchronize do
         @pending.each do |_id, channel|
           begin
-            error_any = JSON.parse(%({"error": {"code": #{JsonRpcError::INTERNAL_ERROR}, "message": "#{message}"}}))
+            error_json = JSON.build do |json|
+              json.object do
+                json.field("error") do
+                  json.object do
+                    json.field("code", JsonRpcError::INTERNAL_ERROR)
+                    json.field("message", message)
+                  end
+                end
+              end
+            end
+            error_any = JSON.parse(error_json)
             channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
