@@ -4479,3 +4479,258 @@ describe ACP::Protocol::AgentMethod do
     ACP::Protocol::AgentMethod.session_method?("session/list").should be_true
   end
 end
+
+# ═══════════════════════════════════════════════════════════════════════
+# Edge Case Specs
+# ═══════════════════════════════════════════════════════════════════════
+
+describe "Edge Cases" do
+  describe "classify_message with malformed messages" do
+    it "treats empty object as notification" do
+      msg = JSON.parse(%({}))
+      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
+    end
+
+    it "treats message with null id as notification if method present" do
+      msg = JSON.parse(%({"id": null, "method": "test"}))
+      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
+    end
+
+    it "treats message with null id and no method as notification" do
+      msg = JSON.parse(%({"id": null}))
+      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
+    end
+  end
+
+  describe "extract_id edge cases" do
+    it "returns nil when id is absent" do
+      msg = JSON.parse(%({"method": "test"}))
+      ACP::Protocol.extract_id(msg).should be_nil
+    end
+
+    it "returns nil when id is null" do
+      msg = JSON.parse(%({"id": null}))
+      ACP::Protocol.extract_id(msg).should be_nil
+    end
+
+    it "handles float ID by coercing to Int64" do
+      msg = JSON.parse(%({"id": 42.0}))
+      ACP::Protocol.extract_id(msg).should eq(42_i64)
+    end
+  end
+
+  describe "Client double close" do
+    it "is safe to call close multiple times" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+      client.close
+      client.close
+      client.close
+      client.closed?.should be_true
+    end
+  end
+
+  describe "Client close cancels pending requests with proper error" do
+    it "raises JsonRpcError for pending requests when client is closed" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      # Simulate that a request is pending by injecting an init response
+      # after init starts, then close the client during a second request.
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_init_response(1))
+      end
+      client.initialize_connection
+
+      # Start a session_new request that will hang, then close
+      done = Channel(Exception?).new(1)
+      spawn do
+        begin
+          client.session_new("/tmp")
+          done.send(nil)
+        rescue ex
+          done.send(ex)
+        end
+      end
+
+      sleep 50.milliseconds
+      client.close
+
+      result = done.receive
+      result.should_not be_nil
+      result.should be_a(ACP::JsonRpcError | ACP::ConnectionClosedError)
+    end
+  end
+
+  describe "Session ensure_open! checks" do
+    it "raises InvalidStateError on prompt after session close" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_init_response(1))
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_session_new_response(2))
+      end
+      session = ACP::Session.create(client, cwd: "/tmp")
+      session.close
+
+      expect_raises(ACP::InvalidStateError) do
+        session.prompt("test")
+      end
+
+      client.close
+    end
+
+    it "raises ConnectionClosedError on prompt when client is closed" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_init_response(1))
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_session_new_response(2))
+      end
+      session = ACP::Session.create(client, cwd: "/tmp")
+      client.close
+
+      expect_raises(ACP::ConnectionClosedError) do
+        session.prompt("test")
+      end
+    end
+  end
+
+  describe "PromptBuilder edge cases" do
+    it "resource_link with explicit URI and name" do
+      builder = ACP::PromptBuilder.new
+      builder.resource_link("file:///tmp/test.cr", "test.cr", "text/x-crystal")
+      blocks = builder.build
+      blocks.size.should eq(1)
+      rl = blocks[0].as(ACP::Protocol::ResourceLinkContentBlock)
+      rl.uri.should eq("file:///tmp/test.cr")
+      rl.name.should eq("test.cr")
+      rl.mime_type.should eq("text/x-crystal")
+    end
+
+    it "resource with text content" do
+      builder = ACP::PromptBuilder.new
+      builder.resource("file:///tmp/data.txt", "file content here", "text/plain")
+      blocks = builder.build
+      blocks.size.should eq(1)
+      blocks[0].should be_a(ACP::Protocol::ResourceContentBlock)
+    end
+  end
+
+  describe "JsonRpcError predicates" do
+    it "identifies parse error" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::PARSE_ERROR, "parse")
+      err.parse_error?.should be_true
+      err.server_error?.should be_false
+    end
+
+    it "identifies invalid request" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::INVALID_REQUEST, "invalid")
+      err.invalid_request?.should be_true
+    end
+
+    it "identifies method not found" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::METHOD_NOT_FOUND, "not found")
+      err.method_not_found?.should be_true
+    end
+
+    it "identifies invalid params" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::INVALID_PARAMS, "params")
+      err.invalid_params?.should be_true
+    end
+
+    it "identifies internal error" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::INTERNAL_ERROR, "internal")
+      err.internal_error?.should be_true
+    end
+
+    it "identifies server error range" do
+      err = ACP::JsonRpcError.new(-32050, "server error")
+      err.server_error?.should be_true
+    end
+
+    it "identifies auth required" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::AUTH_REQUIRED, "auth")
+      err.auth_required?.should be_true
+    end
+
+    it "identifies resource not found" do
+      err = ACP::JsonRpcError.new(ACP::JsonRpcError::RESOURCE_NOT_FOUND, "not found")
+      err.resource_not_found?.should be_true
+    end
+
+    it "has correct to_s format" do
+      err = ACP::JsonRpcError.new(-32603, "Internal error", JSON.parse(%({"detail": "oops"})))
+      err.to_s.should contain("JsonRpcError(-32603)")
+      err.to_s.should contain("Internal error")
+      err.to_s.should contain("detail")
+    end
+
+    it "builds from JSON::Any with missing fields" do
+      obj = JSON.parse(%({}))
+      err = ACP::JsonRpcError.from_json_any(obj)
+      err.code.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      err.message.should eq("Unknown error")
+    end
+  end
+
+  describe "StdioTransport double close" do
+    it "is safe to close multiple times" do
+      reader_r, reader_w = IO.pipe
+      writer_r, writer_w = IO.pipe
+      transport = ACP::StdioTransport.new(reader: reader_r, writer: writer_w)
+      transport.close
+      transport.close
+      transport.closed?.should be_true
+      reader_w.close rescue nil
+      writer_r.close rescue nil
+    end
+  end
+
+  describe "TestTransport close and receive" do
+    it "returns nil on receive after close" do
+      transport = TestTransport.new
+      transport.close
+      transport.receive.should be_nil
+    end
+  end
+
+  describe "Session.to_s and inspect" do
+    it "includes session id and modes" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_init_response(1))
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 50.milliseconds
+        transport.inject_raw(build_session_new_response(2))
+      end
+      session = ACP::Session.create(client, cwd: "/tmp")
+
+      session.to_s.should contain("sess-001")
+      session.inspect.should contain("sess-001")
+
+      client.close
+    end
+  end
+end

@@ -82,6 +82,7 @@ module ACP
       raw = msg["id"]?
       return unless raw
       case v = raw.raw
+      when Nil    then nil
       when Int64  then v
       when String then v
       when Int32  then v.to_i64

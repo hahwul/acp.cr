@@ -5,6 +5,8 @@ description: |
   Provides a JSON-RPC 2.0 based client for communicating with
   AI coding agents over stdio transport.
 repository: https://github.com/hahwul/acp.cr
+homepage: https://github.com/hahwul/acp.cr
+documentation: https://github.com/hahwul/acp.cr#readme
 authors:
   - hahwul <hahwul@gmail.com>
 

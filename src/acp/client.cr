@@ -519,12 +519,11 @@ module ACP
 
       ClientLog.info { "Closing client" }
 
-      # Cancel all pending requests.
+      # Cancel all pending requests with a proper JSON-RPC error object.
       @pending_mutex.synchronize do
         @pending.each do |_id, channel|
           begin
-            # Send a nil-like error response to unblock waiters.
-            error_any = JSON.parse(%({"error": "Client closed"}))
+            error_any = JSON.parse(%({"error": {"code": #{JsonRpcError::INTERNAL_ERROR}, "message": "Client closed"}}))
             channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
@@ -797,11 +796,11 @@ module ACP
 
       @dispatcher_running = false
 
-      # Notify pending requests that the connection is lost.
+      # Notify pending requests that the connection is lost with a proper JSON-RPC error object.
       @pending_mutex.synchronize do
         @pending.each do |_id, channel|
           begin
-            error_any = JSON.parse(%({"error": "Connection lost"}))
+            error_any = JSON.parse(%({"error": {"code": #{JsonRpcError::INTERNAL_ERROR}, "message": "Connection lost"}}))
             channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
