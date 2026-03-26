@@ -255,7 +255,7 @@ client_ref : ACP::Client? = nil
 prompting = false
 
 Process.on_terminate do
-  if prompting && (c = client_ref)
+  if prompting && client_ref
     # Send cancel signal to the main loop.
     begin
       cancel_channel.send(nil)
@@ -399,8 +399,6 @@ end
 
 # Step 5: Initialize the connection.
 Term.info("Initializing connection...")
-
-init_result : ACP::Protocol::InitializeResult? = nil
 
 begin
   init_result = client.initialize_connection
