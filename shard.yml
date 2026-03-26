@@ -1,5 +1,5 @@
 name: acp
-version: 0.1.0
+version: 0.2.0
 description: |
   Unofficial Crystal Shard for Agent Client Protocol (ACP).
   Provides a JSON-RPC 2.0 based client for communicating with
