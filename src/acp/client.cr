@@ -719,7 +719,7 @@ module ACP
       @pending_mutex.synchronize do
         @pending.each do |_id, channel|
           begin
-            error_any = JSON.parse(JSON.build { |json|
+            error_json = JSON.build do |json|
               json.object do
                 json.field("error") do
                   json.object do
@@ -728,7 +728,8 @@ module ACP
                   end
                 end
               end
-            })
+            end
+            error_any = JSON.parse(error_json)
             channel.send(error_any)
           rescue Channel::ClosedError
             # Already closed.
