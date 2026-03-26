@@ -275,8 +275,15 @@ module ACP
       @process_closing = true
       super
 
-      # Give the process a moment to exit gracefully, then signal it.
-      unless @process.terminated?
+      if @process.terminated?
+        # Reap the already-terminated process to avoid zombies.
+        begin
+          @process.wait
+        rescue
+          # Already reaped.
+        end
+      else
+        # Give the process a moment to exit gracefully, then signal it.
         @process.terminate(graceful: true)
 
         # Wait briefly for graceful shutdown, then force-kill if needed.

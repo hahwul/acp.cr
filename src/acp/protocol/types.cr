@@ -82,6 +82,7 @@ module ACP
       raw = msg["id"]?
       return unless raw
       case v = raw.raw
+      when Nil    then nil
       when Int64  then v
       when String then v
       when Int32  then v.to_i64
@@ -437,7 +438,7 @@ module ACP
 
       # Returns true if this option uses grouped values.
       def grouped? : Bool
-        !!@groups.try(&.any?)
+        !(@groups.nil? || @groups.try(&.empty?))
       end
 
       # Returns all option values across all groups (flattened).

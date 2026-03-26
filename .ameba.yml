@@ -1,0 +1,4 @@
+Metrics/CyclomaticComplexity:
+  Excluded:
+    - examples/**
+    - src/acp/protocol/enums.cr

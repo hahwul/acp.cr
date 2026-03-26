@@ -519,19 +519,8 @@ module ACP
 
       ClientLog.info { "Closing client" }
 
-      # Cancel all pending requests.
-      @pending_mutex.synchronize do
-        @pending.each do |_id, channel|
-          begin
-            # Send a nil-like error response to unblock waiters.
-            error_any = JSON.parse(%({"error": "Client closed"}))
-            channel.send(error_any)
-          rescue Channel::ClosedError
-            # Already closed.
-          end
-        end
-        @pending.clear
-      end
+      # Cancel all pending requests with a proper JSON-RPC error object.
+      drain_pending_requests("Client closed")
 
       # Stop the dispatcher.
       begin
@@ -724,6 +713,22 @@ module ACP
       raw_response["result"]? || JSON::Any.new(nil)
     end
 
+    # Sends a JSON-RPC error to all pending request channels and clears
+    # the pending map. Used during close and disconnect to unblock callers.
+    private def drain_pending_requests(message : String) : Nil
+      @pending_mutex.synchronize do
+        @pending.each do |_id, channel|
+          begin
+            error_any = JSON.parse(%({"error": {"code": #{JsonRpcError::INTERNAL_ERROR}, "message": "#{message}"}}))
+            channel.send(error_any)
+          rescue Channel::ClosedError
+            # Already closed.
+          end
+        end
+        @pending.clear
+      end
+    end
+
     # Ensures the client is in the expected state before performing
     # an operation. Raises `InvalidStateError` if not.
     private def ensure_state(expected : ClientState, operation : String) : Nil
@@ -798,17 +803,7 @@ module ACP
       @dispatcher_running = false
 
       # Notify pending requests that the connection is lost.
-      @pending_mutex.synchronize do
-        @pending.each do |_id, channel|
-          begin
-            error_any = JSON.parse(%({"error": "Connection lost"}))
-            channel.send(error_any)
-          rescue Channel::ClosedError
-            # Already closed.
-          end
-        end
-        @pending.clear
-      end
+      drain_pending_requests("Connection lost")
 
       # Invoke the disconnect callback if set.
       if cb = @on_disconnect
