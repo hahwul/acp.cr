@@ -4,7 +4,7 @@
 
 title = "acp.cr"
 description = "Crystal implementation of the Agent Client Protocol"
-base_url = ""
+base_url = "https://acp.cr.hahwul.com"
 
 # =============================================================================
 # Plugins
