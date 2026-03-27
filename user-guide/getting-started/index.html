@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Installation, prerequisites, and your first acp.cr program">
+  <title>Getting Started - acp.cr</title>
+  <meta property="og:title" content="Getting Started">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/getting-started/">
+<meta property="og:description" content="Installation, prerequisites, and your first acp.cr program">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-getting-started.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Getting Started">
+<meta name="twitter:description" content="Installation, prerequisites, and your first acp.cr program">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-getting-started.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="user-guide">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Getting Started</h1>
+    <h2 id="prerequisites">Prerequisites</h2>
+<p>Before using acp.cr, ensure your environment meets these requirements:</p>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Crystal</td>
+<td>&gt;= 1.19.1</td>
+</tr>
+<tr>
+<td>An ACP-compatible agent</td>
+<td>e.g., Claude Code, Gemini CLI, Codex</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>acp.cr has zero external dependencies -- it uses only the Crystal standard library.</p>
+</blockquote>
+<h2 id="installation">Installation</h2>
+<p>Add the dependency to your <code>shard.yml</code>:</p>
+<pre><code class="language-yaml hljs">dependencies:
+  acp:
+    github: hahwul/acp.cr
+</code></pre>
+<p>Then install:</p>
+<pre><code class="language-bash hljs">shards install
+</code></pre>
+<h2 id="your-first-program">Your First Program</h2>
+<p>Create a file called <code>hello.cr</code>:</p>
+<pre><code class="language-crystal hljs">require &quot;acp&quot;
+
+# Connect to an ACP agent via process transport
+client = ACP.connect(
+  &quot;npx&quot;,
+  args: [&quot;-y&quot;, &quot;@anthropic-ai/claude-code&quot;, &quot;--agent&quot;],
+  client_name: &quot;my-app&quot;,
+  client_version: &quot;1.0.0&quot;
+)
+
+# Create a new session
+session = ACP::Session.create(client, Dir.current)
+
+# Send a prompt and get the result
+result = session.prompt(&quot;What is the capital of France?&quot;)
+puts result.stop_reason
+
+# Clean up
+session.close
+client.close
+</code></pre>
+<p>Run it:</p>
+<pre><code class="language-bash hljs">crystal run hello.cr
+</code></pre>
+<h2 id="using-the-convenience-connect">Using the Convenience Connect</h2>
+<p><code>ACP.connect</code> is a shorthand that creates a <code>ProcessTransport</code>, wraps it in a <code>Client</code>, and calls <code>initialize_connection</code>:</p>
+<pre><code class="language-crystal hljs">client = ACP.connect(
+  &quot;agent-command&quot;,
+  args: [&quot;--stdio&quot;],
+  client_name: &quot;my-editor&quot;,
+  client_version: &quot;1.0&quot;,
+  capabilities: ACP::Protocol::ClientCapabilities.new,
+  env: {&quot;KEY&quot; =&gt; &quot;value&quot;},
+  chdir: &quot;/working/dir&quot;
+)
+</code></pre>
+<p>For more control, you can create the transport and client manually:</p>
+<pre><code class="language-crystal hljs">transport = ACP::ProcessTransport.new(
+  &quot;agent-command&quot;,
+  args: [&quot;--stdio&quot;]
+)
+
+client = ACP::Client.new(
+  transport,
+  client_name: &quot;my-editor&quot;,
+  client_version: &quot;1.0&quot;
+)
+
+result = client.initialize_connection
+puts result.agent_info
+</code></pre>
+<h2 id="supported-agents">Supported Agents</h2>
+<p>acp.cr works with any ACP-compatible agent. Examples included in the project:</p>
+<ul>
+<li><strong>Claude Code</strong> -- <code>npx -y @anthropic-ai/claude-code --agent</code></li>
+<li><strong>Gemini CLI</strong> -- <code>npx -y @anthropic-ai/claude-code --agent</code> (via adapter)</li>
+<li><strong>Codex</strong> -- Via ACP adapter</li>
+<li><strong>GitHub Copilot</strong> -- Via ACP integration</li>
+</ul>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>

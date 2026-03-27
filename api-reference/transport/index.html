@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Transport layer for ACP communication">
+  <title>Transport - acp.cr</title>
+  <meta property="og:title" content="Transport">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/api-reference/transport/">
+<meta property="og:description" content="Transport layer for ACP communication">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/api-reference-transport.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Transport">
+<meta name="twitter:description" content="Transport layer for ACP communication">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/api-reference-transport.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="api-reference">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Transport</h1>
+    <h2 id="overview">Overview</h2>
+<p>The transport layer handles the low-level communication between the client and the agent process. All transports implement the abstract <code>ACP::Transport</code> base class using newline-delimited JSON over stdio.</p>
+<h2 id="acptransport-abstract-base">ACP::Transport (Abstract Base)</h2>
+<h3 id="send"><code>#send</code></h3>
+<pre><code class="language-crystal hljs">transport.send(message : Hash) : Nil
+</code></pre>
+<p>Sends a JSON-RPC message to the agent.</p>
+<h3 id="receive"><code>#receive</code></h3>
+<pre><code class="language-crystal hljs">transport.receive : JSON::Any?
+</code></pre>
+<p>Receives the next message from the agent. Blocks until a message is available. Returns <code>nil</code> if the transport is closed.</p>
+<h3 id="close"><code>#close</code></h3>
+<pre><code class="language-crystal hljs">transport.close : Nil
+</code></pre>
+<p>Closes the transport.</p>
+<h3 id="closed"><code>#closed?</code></h3>
+<pre><code class="language-crystal hljs">transport.closed? : Bool
+</code></pre>
+<p>Returns whether the transport is closed.</p>
+<h2 id="acpstdiotransport">ACP::StdioTransport</h2>
+<p>Communicates over existing IO pairs using newline-delimited JSON.</p>
+<h3 id="constructor">Constructor</h3>
+<pre><code class="language-crystal hljs">ACP::StdioTransport.new(
+  reader : IO,
+  writer : IO,
+  buffer_size : Int32 = 256
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reader</code></td>
+<td><code>IO</code></td>
+<td>--</td>
+<td>IO to read agent messages from</td>
+</tr>
+<tr>
+<td><code>writer</code></td>
+<td><code>IO</code></td>
+<td>--</td>
+<td>IO to write client messages to</td>
+</tr>
+<tr>
+<td><code>buffer_size</code></td>
+<td><code>Int32</code></td>
+<td><code>256</code></td>
+<td>Internal channel buffer size</td>
+</tr>
+</tbody>
+</table>
+<h3 id="receivetimeout"><code>#receive(timeout)</code></h3>
+<pre><code class="language-crystal hljs">transport.receive(timeout : Time::Span) : JSON::Any?
+</code></pre>
+<p>Receives a message with a timeout. Returns <code>nil</code> if no message arrives within the specified duration.</p>
+<blockquote>
+<p>The <code>StdioTransport</code> spawns a background reader fiber that continuously reads from the IO and pushes parsed JSON messages to a buffered channel.</p>
+</blockquote>
+<h2 id="acpprocesstransport">ACP::ProcessTransport</h2>
+<p>Spawns a child process and communicates over its stdin/stdout.</p>
+<h3 id="constructor-1">Constructor</h3>
+<pre><code class="language-crystal hljs">ACP::ProcessTransport.new(
+  command : String,
+  args : Array(String) = [] of String,
+  env : Hash(String, String)? = nil,
+  chdir : String? = nil,
+  stderr : IO? = nil,
+  buffer_size : Int32 = 256
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>command</code></td>
+<td><code>String</code></td>
+<td>--</td>
+<td>Command to spawn</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td><code>Array(String)</code></td>
+<td><code>[]</code></td>
+<td>Command arguments</td>
+</tr>
+<tr>
+<td><code>env</code></td>
+<td><code>Hash(String, String)?</code></td>
+<td><code>nil</code></td>
+<td>Environment variables</td>
+</tr>
+<tr>
+<td><code>chdir</code></td>
+<td><code>String?</code></td>
+<td><code>nil</code></td>
+<td>Working directory for the process</td>
+</tr>
+<tr>
+<td><code>stderr</code></td>
+<td><code>IO?</code></td>
+<td><code>nil</code></td>
+<td>IO for stderr output (e.g., <code>STDERR</code>)</td>
+</tr>
+<tr>
+<td><code>buffer_size</code></td>
+<td><code>Int32</code></td>
+<td><code>256</code></td>
+<td>Internal channel buffer size</td>
+</tr>
+</tbody>
+</table>
+<h3 id="process-management">Process Management</h3>
+<pre><code class="language-crystal hljs">transport.process        # =&gt; Process (the spawned process)
+transport.terminated?    # =&gt; Bool (has the process exited?)
+transport.wait           # =&gt; Process::Status (blocks until process exits)
+</code></pre>
+<h2 id="acpconnect">ACP.connect</h2>
+<p>Convenience function that creates a <code>ProcessTransport</code>, wraps it in a <code>Client</code>, and calls <code>initialize_connection</code>:</p>
+<pre><code class="language-crystal hljs">client = ACP.connect(
+  command : String,
+  args : Array(String) = [] of String,
+  client_name : String = &quot;acp-crystal&quot;,
+  client_version : String = ACP::VERSION,
+  capabilities : ACP::Protocol::ClientCapabilities = ACP::Protocol::ClientCapabilities.new,
+  env : Hash(String, String)? = nil,
+  chdir : String? = nil
+) : ACP::Client
+</code></pre>
+<p>Example:</p>
+<pre><code class="language-crystal hljs">client = ACP.connect(
+  &quot;npx&quot;,
+  args: [&quot;-y&quot;, &quot;@anthropic-ai/claude-code&quot;, &quot;--agent&quot;],
+  client_name: &quot;my-editor&quot;,
+  client_version: &quot;1.0&quot;
+)
+</code></pre>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Real-time streaming of agent responses and updates">
+  <title>Streaming - acp.cr</title>
+  <meta property="og:title" content="Streaming">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/streaming/">
+<meta property="og:description" content="Real-time streaming of agent responses and updates">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-streaming.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Streaming">
+<meta name="twitter:description" content="Real-time streaming of agent responses and updates">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-streaming.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="user-guide">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Streaming</h1>
+    <h2 id="overview">Overview</h2>
+<p>acp.cr provides real-time streaming of agent responses through the <code>on_update</code> callback. The background dispatcher fiber routes all incoming session updates to your handler as they arrive.</p>
+<h2 id="setting-up-streaming">Setting Up Streaming</h2>
+<p>Register an update handler before sending prompts:</p>
+<pre><code class="language-crystal hljs">client.on_update = -&gt;(update : ACP::Protocol::SessionUpdate) {
+  case update
+  when ACP::Protocol::AgentMessageChunkUpdate
+    print update.delta
+  when ACP::Protocol::AgentThoughtChunkUpdate
+    puts &quot;[Thought] #{update.delta}&quot;
+  when ACP::Protocol::ToolCallUpdate
+    puts &quot;\n=&gt; Tool: #{update.tool_name}&quot;
+  when ACP::Protocol::ToolCallStatusUpdate
+    puts &quot;   Status: #{update.status}&quot;
+  when ACP::Protocol::PlanUpdate
+    update.entries.each do |entry|
+      puts &quot;  [#{entry.status}] #{entry.title}&quot;
+    end
+  end
+}
+
+result = session.prompt(&quot;Refactor this function&quot;)
+puts &quot;\nDone: #{result.stop_reason}&quot;
+</code></pre>
+<h2 id="update-types">Update Types</h2>
+<h3 id="standard-updates">Standard Updates</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AgentMessageChunkUpdate</code></td>
+<td>Streamed text chunk from the agent</td>
+</tr>
+<tr>
+<td><code>AgentThoughtChunkUpdate</code></td>
+<td>Agent reasoning/chain-of-thought</td>
+</tr>
+<tr>
+<td><code>ToolCallUpdate</code></td>
+<td>Tool invocation initiated</td>
+</tr>
+<tr>
+<td><code>ToolCallStatusUpdate</code></td>
+<td>Tool status or result update</td>
+</tr>
+<tr>
+<td><code>PlanUpdate</code></td>
+<td>Execution plan with entries</td>
+</tr>
+<tr>
+<td><code>UserMessageChunkUpdate</code></td>
+<td>User message chunk (during replay)</td>
+</tr>
+<tr>
+<td><code>AvailableCommandsUpdate</code></td>
+<td>Slash commands changed</td>
+</tr>
+<tr>
+<td><code>CurrentModeUpdate</code></td>
+<td>Session mode changed</td>
+</tr>
+<tr>
+<td><code>ConfigOptionUpdate</code></td>
+<td>Configuration updated</td>
+</tr>
+</tbody>
+</table>
+<h3 id="backward-compatible-updates">Backward-Compatible Updates</h3>
+<p>These non-standard types are supported for backward compatibility with older agents:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AgentMessageStartUpdate</code></td>
+<td>Agent message generation started</td>
+</tr>
+<tr>
+<td><code>AgentMessageEndUpdate</code></td>
+<td>Agent message generation ended</td>
+</tr>
+<tr>
+<td><code>ToolCallChunkUpdate</code></td>
+<td>Tool call content chunk</td>
+</tr>
+<tr>
+<td><code>ToolCallEndUpdate</code></td>
+<td>Tool call completed</td>
+</tr>
+<tr>
+<td><code>StatusUpdate</code></td>
+<td>General status update</td>
+</tr>
+<tr>
+<td><code>ErrorUpdate</code></td>
+<td>Error notification</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cancellation">Cancellation</h2>
+<p>Cancel an in-progress generation:</p>
+<pre><code class="language-crystal hljs"># From the session
+session.cancel
+
+# Or directly from the client
+client.session_cancel
+</code></pre>
+<h2 id="disconnect-handling">Disconnect Handling</h2>
+<p>Register a disconnect handler to respond to connection loss:</p>
+<pre><code class="language-crystal hljs">client.on_disconnect = -&gt; {
+  puts &quot;Connection to agent lost&quot;
+  # Attempt reconnection or cleanup
+}
+</code></pre>
+<h2 id="notification-handling">Notification Handling</h2>
+<p>Handle non-update notifications from the agent:</p>
+<pre><code class="language-crystal hljs">client.on_notification = -&gt;(method : String, params : JSON::Any?) {
+  puts &quot;Notification: #{method}&quot;
+}
+</code></pre>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>
