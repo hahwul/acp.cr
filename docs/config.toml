@@ -58,10 +58,7 @@ exclude = []
 [robots]
 enabled = true
 filename = "robots.txt"
-rules = [
-  { user_agent = "*", disallow = [] },
-  { user_agent = "GPTBot", disallow = ["/"] }
-]
+rules = []
 
 # =============================================================================
 # LLMs.txt
