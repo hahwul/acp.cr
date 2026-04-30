@@ -1299,6 +1299,59 @@ describe ACP::StdioTransport do
     transport.close
   end
 
+  it "drops oversized incoming lines and re-syncs at the next message boundary" do
+    reader_r, reader_w = IO.pipe
+    writer_io = IO::Memory.new
+
+    transport = ACP::StdioTransport.new(reader_r, writer_io, max_line_bytes: 256)
+
+    # First line exceeds the limit; second line is well-formed.
+    huge = "{\"junk\":\"" + ("x" * 1024) + "\"}"
+    reader_w.puts huge
+    reader_w.puts %({"id": 42, "method": "valid"})
+    reader_w.flush
+
+    msg = transport.receive(500.milliseconds)
+    msg.should_not be_nil
+    msg.as(JSON::Any)["id"].as_i.should eq(42)
+
+    reader_w.close
+    transport.close
+  end
+
+  it "redacts sensitive params from outgoing DEBUG-level frame logs" do
+    reader_io = IO::Memory.new
+    writer_io = IO::Memory.new
+
+    captured = IO::Memory.new
+    backend = ::Log::IOBackend.new(captured, dispatcher: ::Log::DispatchMode::Sync)
+    backend.formatter = ::Log::Formatter.new do |entry, io|
+      io << entry.message
+    end
+    ::Log.setup do |c|
+      c.bind "acp.transport", :debug, backend
+    end
+
+    transport = ACP::StdioTransport.new(reader_io, writer_io)
+
+    msg = Hash(String, JSON::Any).new
+    msg["jsonrpc"] = JSON::Any.new("2.0")
+    msg["method"] = JSON::Any.new("authenticate")
+    creds = Hash(String, JSON::Any).new
+    creds["token"] = JSON::Any.new("super-secret-bearer-token")
+    msg["params"] = JSON::Any.new(creds)
+    transport.send(msg)
+
+    log_output = captured.to_s
+    log_output.should_not contain("super-secret-bearer-token")
+    log_output.should contain("[REDACTED]")
+    log_output.should contain("authenticate")
+
+    # Restore default logging so subsequent tests aren't affected.
+    ::Log.setup(:none)
+    transport.close
+  end
+
   it "handles multiple messages in sequence" do
     reader_r, reader_w = IO.pipe
     writer_io = IO::Memory.new
