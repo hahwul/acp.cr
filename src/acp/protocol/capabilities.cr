@@ -135,6 +135,42 @@ module ACP
       end
     end
 
+    # Capabilities for the session/resume method.
+    # Presence of this object (even empty) indicates the agent supports
+    # reconnecting to an existing session via `session/resume` without
+    # replaying conversation history.
+    # See: https://agentclientprotocol.com/protocol/session-setup#resuming-sessions
+    struct SessionResumeCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Capabilities for the session/close method.
+    # Presence of this object (even empty) indicates the agent supports
+    # cancelling ongoing work and freeing resources for a session via
+    # `session/close`.
+    # See: https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions
+    struct SessionCloseCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
     # Session capabilities supported by the agent.
     # As a baseline, all Agents MUST support session/new, session/prompt,
     # session/cancel, and session/update.
@@ -146,12 +182,20 @@ module ACP
       # The value is a `SessionListCapabilities` object.
       property list : SessionListCapabilities?
 
+      # When present (non-null), indicates the agent supports `session/resume`.
+      property resume : SessionResumeCapabilities?
+
+      # When present (non-null), indicates the agent supports `session/close`.
+      property close : SessionCloseCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @list : SessionListCapabilities? = nil,
+        @resume : SessionResumeCapabilities? = nil,
+        @close : SessionCloseCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end
@@ -159,6 +203,16 @@ module ACP
       # Returns true if the agent supports session listing.
       def list? : Bool
         !@list.nil?
+      end
+
+      # Returns true if the agent supports resuming sessions.
+      def resume? : Bool
+        !@resume.nil?
+      end
+
+      # Returns true if the agent supports closing sessions.
+      def close? : Bool
+        !@close.nil?
       end
     end
 

@@ -641,6 +641,99 @@ module ACP
       end
     end
 
+    # ─── Session/Resume Method ────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-setup#resuming-sessions
+
+    # Params for the `session/resume` method (Client → Agent).
+    # Unlike session/load, the Agent MUST NOT replay history before
+    # responding — the result returns once the session is ready.
+    struct SessionResumeParams
+      include JSON::Serializable
+
+      # The session ID to resume (required).
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # The current working directory (absolute path) (required).
+      property cwd : String
+
+      # List of MCP servers the agent should connect to (required).
+      @[JSON::Field(key: "mcpServers")]
+      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @session_id : String,
+        @cwd : String,
+        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Result of the `session/resume` method.
+    # Per the ACP spec the response MAY include initial mode, model, or
+    # session configuration state when those features are supported by
+    # the Agent.
+    struct SessionResumeResult
+      include JSON::Serializable
+
+      # Mode state if supported by the Agent.
+      property modes : SessionModeState?
+
+      # Session configuration options if supported by the Agent.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(ConfigOption)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @modes : SessionModeState? = nil,
+        @config_options : Array(ConfigOption)? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # ─── Session/Close Method ─────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions
+
+    # Params for the `session/close` method (Client → Agent).
+    struct SessionCloseParams
+      include JSON::Serializable
+
+      # The ID of the active session to close (required).
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @session_id : String,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Result of the `session/close` method (an empty object on success).
+    struct SessionCloseResult
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # ─── Session/Prompt Method ────────────────────────────────────────
     # See: https://agentclientprotocol.com/protocol/prompt-turn
 
