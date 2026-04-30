@@ -1671,6 +1671,116 @@ describe ACP::Client do
     end
   end
 
+  describe "#session_resume" do
+    it "sends session/resume request, sets active session, and surfaces returned mode state" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "modes": {
+              "currentModeId": "chat",
+              "availableModes": [
+                {"id": "chat", "name": "Chat"},
+                {"id": "code", "name": "Code"}
+              ]
+            }
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_resume("sess-resumed", "/tmp")
+      result.modes.try(&.current_mode_id).should eq("chat")
+
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/resume")
+      sent["params"].as_h["sessionId"].as_s.should eq("sess-resumed")
+      sent["params"].as_h["cwd"].as_s.should eq("/tmp")
+
+      client.session_id.should eq("sess-resumed")
+      client.state.should eq(ACP::ClientState::SessionActive)
+
+      transport.close
+    end
+  end
+
+  describe "#session_close" do
+    it "sends session/close, resets active session, and returns to Initialized state" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+      client.session_new("/tmp")
+      client.state.should eq(ACP::ClientState::SessionActive)
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {"jsonrpc": "2.0", "id": #{sent["id"].as_i64}, "result": {}}
+          JSON
+        )
+      end
+
+      _result = client.session_close
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/close")
+      sent["params"].as_h["sessionId"].as_s.should eq("sess-001")
+
+      client.session_id.should be_nil
+      client.state.should eq(ACP::ClientState::Initialized)
+
+      transport.close
+    end
+
+    it "raises NoActiveSessionError when no session is active and no id is given" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      expect_raises(ACP::NoActiveSessionError) do
+        client.session_close
+      end
+
+      transport.close
+    end
+  end
+
   describe "#session_set_mode" do
     it "sends session/set_mode request" do
       transport = TestTransport.new
@@ -4689,6 +4799,21 @@ describe ACP::Protocol::SessionCapabilities do
     caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
     caps.list?.should be_false
     caps.list.should be_nil
+  end
+
+  it "deserializes resume and close capabilities" do
+    json_str = %({"resume": {}, "close": {}})
+    caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
+    caps.resume?.should be_true
+    caps.close?.should be_true
+    caps.list?.should be_false
+  end
+
+  it "treats absent resume and close as unsupported" do
+    json_str = %({"list": {}})
+    caps = ACP::Protocol::SessionCapabilities.from_json(json_str)
+    caps.resume?.should be_false
+    caps.close?.should be_false
   end
 end
 

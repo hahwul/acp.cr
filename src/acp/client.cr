@@ -380,6 +380,84 @@ module ACP
       Protocol::SessionListResult.from_json(raw_result.to_json)
     end
 
+    # Resumes an existing session by ID without replaying conversation history.
+    #
+    # Unlike `session/load`, the agent will NOT emit `session/update`
+    # notifications to replay prior turns — it just restores context,
+    # reconnects to the requested MCP servers, and returns once the
+    # session is ready to continue.
+    #
+    # Requires the agent to advertise `sessionCapabilities.resume` during
+    # initialization. Callers SHOULD check `agent_capabilities&.session_capabilities&.resume?`
+    # before calling.
+    #
+    # Returns the resume result, which MAY include initial mode/config
+    # state if the agent supports those features.
+    #
+    # Raises `InvalidStateError` if not initialized.
+    # Raises `JsonRpcError` if the agent can't resume the session.
+    # See: https://agentclientprotocol.com/protocol/session-setup#resuming-sessions
+    def session_resume(
+      session_id : String,
+      cwd : String,
+      mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+    ) : Protocol::SessionResumeResult
+      ensure_state(ClientState::Initialized, "session/resume")
+
+      params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers)
+      raw_result = send_request("session/resume", params)
+      result = Protocol::SessionResumeResult.from_json(raw_result.to_json)
+
+      @session_id = session_id
+      @session_modes = result.modes
+      @session_config_options = result.config_options
+      @state = ClientState::SessionActive
+
+      ClientLog.info { "Session resumed: #{session_id}" }
+
+      result
+    end
+
+    # Closes an active session, asking the agent to cancel any ongoing
+    # work and release resources tied to the session.
+    #
+    # Requires the agent to advertise `sessionCapabilities.close` during
+    # initialization. Callers SHOULD check
+    # `agent_capabilities&.session_capabilities&.close?` before calling.
+    #
+    # If `session_id` is nil the active session is closed. After a
+    # successful close the client transitions back to the Initialized
+    # state so a new session can be created or another session resumed.
+    #
+    # Raises `InvalidStateError` if not initialized.
+    # Raises `NoActiveSessionError` if no `session_id` is given and no
+    # session is active.
+    # See: https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions
+    def session_close(session_id : String? = nil) : Protocol::SessionCloseResult
+      ensure_state(ClientState::Initialized, "session/close")
+
+      sid = session_id || @session_id
+      raise NoActiveSessionError.new unless sid
+
+      params = Protocol::SessionCloseParams.new(sid)
+      raw_result = send_request("session/close", params)
+      result = Protocol::SessionCloseResult.from_json(raw_result.to_json)
+
+      # If we just closed the active session, drop the cached session
+      # state so subsequent prompt/cancel calls fail with the correct
+      # error instead of silently re-using stale state.
+      if @session_id == sid
+        @session_id = nil
+        @session_modes = nil
+        @session_config_options = nil
+        @state = ClientState::Initialized
+      end
+
+      ClientLog.info { "Session closed: #{sid}" }
+
+      result
+    end
+
     # Sends a prompt to the agent in the active session.
     #
     # - `prompt` — an array of content blocks forming the prompt.
