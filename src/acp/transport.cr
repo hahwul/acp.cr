@@ -51,6 +51,19 @@ module ACP
   # Thread safety: Crystal fibers are cooperatively scheduled on a
   # single thread, so we don't need mutexes — just channels.
   class StdioTransport < Transport
+    # Hard cap on the size of a single incoming JSON-RPC line. ACP messages
+    # are typically a few KiB; 16 MiB is generous enough for an unusually
+    # large ContentBlock (e.g. embedded image data) while preventing a
+    # runaway / malicious agent from OOM-ing the client by streaming an
+    # unbounded line.
+    DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
+
+    # JSON-RPC method names whose `params` are treated as sensitive. The
+    # transport redacts these from DEBUG-level frame logs so a session
+    # with debug logging enabled does not write credentials/tokens to log
+    # files. Add to this set if new methods carry secrets.
+    SENSITIVE_METHODS = Set{"authenticate"}
+
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).
     getter incoming : Channel(JSON::Any?)
@@ -78,7 +91,14 @@ module ACP
     #   (typically the agent process's stdin).
     # - `buffer_size` — how many messages to buffer in the channel
     #   before back-pressuring the reader fiber. Default 256.
-    def initialize(@reader : IO, @writer : IO, buffer_size : Int32 = 256)
+    # - `max_line_bytes` — abort and log a warning if a single incoming
+    #   line exceeds this many bytes. Default 16 MiB.
+    def initialize(
+      @reader : IO,
+      @writer : IO,
+      buffer_size : Int32 = 256,
+      @max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
+    )
       @incoming = Channel(JSON::Any?).new(buffer_size)
       start_reader
     end
@@ -89,7 +109,7 @@ module ACP
       raise ConnectionClosedError.new if @closed
 
       json_line = message.to_json
-      Log.debug { ">>> #{json_line}" }
+      Log.debug { ">>> #{redact_frame(message)}" }
 
       begin
         @writer.print(json_line)
@@ -168,6 +188,50 @@ module ACP
 
     # ─── Private ────────────────────────────────────────────────────
 
+    # Returns the JSON string to print at DEBUG level for an outgoing
+    # message. If the method is in `SENSITIVE_METHODS`, the `params`
+    # field is replaced with "[REDACTED]" so credentials don't end up
+    # in log files. Errors fall back to a constant string.
+    private def redact_frame(message : Hash(String, JSON::Any)) : String
+      method = message["method"]?.try(&.as_s?)
+      return message.to_json unless method && SENSITIVE_METHODS.includes?(method)
+
+      sanitized = message.dup
+      sanitized["params"] = JSON::Any.new("[REDACTED]") if sanitized.has_key?("params")
+      sanitized.to_json
+    rescue
+      %({"method":"#{method}","params":"[REDACTED]"})
+    end
+
+    # Same as `redact_frame` but operates on a raw incoming JSON string
+    # whose method is the request being responded to or notified. We
+    # only redact when the line is parseable AND its method is
+    # sensitive; otherwise pass through the original line.
+    private def redact_raw_frame(line : String) : String
+      parsed = JSON.parse(line).as_h?
+      return line unless parsed
+      method = parsed["method"]?.try(&.as_s?)
+      return line unless method && SENSITIVE_METHODS.includes?(method)
+
+      parsed["params"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("params")
+      parsed["result"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("result")
+      parsed.to_json
+    rescue
+      "[REDACTED frame]"
+    end
+
+    # Read bytes up to (and including) the next '\n' from `@reader` to
+    # re-sync after an oversized line. Returns the number of bytes
+    # discarded. A nil return from `gets` (EOF) ends the drain.
+    private def drain_oversize_line : Int64
+      drained = 0_i64
+      while (chunk = @reader.gets(@max_line_bytes, chomp: false))
+        drained += chunk.bytesize
+        break if chunk.ends_with?('\n')
+      end
+      drained
+    end
+
     private def start_reader
       @reader_fiber = spawn(name: "acp-transport-reader") do
         read_loop
@@ -182,7 +246,13 @@ module ACP
         break if @closed
 
         begin
-          line = @reader.gets
+          # gets(limit, chomp: true) reads up to `limit` bytes or until
+          # newline, whichever comes first. If the line exceeded the
+          # limit, the returned string will not end on a real newline —
+          # we detect this by checking the post-truncation byte at the
+          # current position and drain the rest of the offending line so
+          # we re-sync with the next message boundary.
+          line = @reader.gets(@max_line_bytes, chomp: true)
         rescue ex : IO::Error
           Log.error { "Read error: #{ex.message}" }
           break
@@ -194,19 +264,27 @@ module ACP
           break
         end
 
-        # Skip blank lines (shouldn't happen, but be defensive).
+        # If the line filled the buffer without hitting a newline, the
+        # next byte in the stream is non-newline data belonging to the
+        # same logical line. Drain to the next '\n' and skip the message.
+        if line.bytesize >= @max_line_bytes
+          drained = drain_oversize_line
+          Log.warn { "Dropped oversized incoming line (>= #{@max_line_bytes} bytes; drained #{drained} more bytes to re-sync)" }
+          next
+        end
+
         line = line.strip
         next if line.empty?
 
-        Log.debug { "<<< #{line}" }
+        Log.debug { "<<< #{redact_raw_frame(line)}" }
 
         begin
           parsed = JSON.parse(line)
           @incoming.send(parsed)
         rescue ex : JSON::ParseException
           Log.warn { "Failed to parse incoming JSON: #{ex.message}" }
-          Log.debug { "Raw line: #{line}" }
-          # Skip malformed messages rather than crashing.
+          # Don't log the raw line at any level — it may be a partially
+          # received frame that contains sensitive data.
           next
         rescue Channel::ClosedError
           # Channel was closed (transport shutting down).
