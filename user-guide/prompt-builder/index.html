@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Building rich prompts with the PromptBuilder DSL">
+  <title>Prompt Builder - acp.cr</title>
+  <meta property="og:title" content="Prompt Builder">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/prompt-builder/">
+<meta property="og:description" content="Building rich prompts with the PromptBuilder DSL">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-prompt-builder.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Prompt Builder">
+<meta name="twitter:description" content="Building rich prompts with the PromptBuilder DSL">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-prompt-builder.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="user-guide">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Prompt Builder</h1>
+    <h2 id="overview">Overview</h2>
+<p><code>ACP::PromptBuilder</code> provides an ergonomic DSL for constructing multi-block prompts with text, images, audio, and resource references.</p>
+<h2 id="basic-usage">Basic Usage</h2>
+<p>Use the block form with <code>Session#prompt</code>:</p>
+<pre><code class="language-crystal hljs">result = session.prompt do |b|
+  b.text(&quot;Please review this code and suggest improvements.&quot;)
+  b.resource_link(&quot;/path/to/file.cr&quot;, &quot;text/x-crystal&quot;)
+end
+</code></pre>
+<p>Or create a builder manually:</p>
+<pre><code class="language-crystal hljs">builder = ACP::PromptBuilder.new
+builder.text(&quot;Hello, world!&quot;)
+blocks = builder.build
+
+result = session.prompt(blocks)
+</code></pre>
+<h2 id="content-types">Content Types</h2>
+<h3 id="text">Text</h3>
+<pre><code class="language-crystal hljs">b.text(&quot;Plain text content&quot;)
+</code></pre>
+<h3 id="image">Image</h3>
+<p>Base64-encoded image data:</p>
+<pre><code class="language-crystal hljs">image_data = Base64.strict_encode(File.read(&quot;screenshot.png&quot;))
+b.image(image_data, &quot;image/png&quot;)
+</code></pre>
+<h3 id="audio">Audio</h3>
+<p>Base64-encoded audio data:</p>
+<pre><code class="language-crystal hljs">audio_data = Base64.strict_encode(File.read(&quot;recording.wav&quot;))
+b.audio(audio_data, &quot;audio/wav&quot;)
+</code></pre>
+<h3 id="embedded-resource">Embedded Resource</h3>
+<p>Include resource content directly:</p>
+<pre><code class="language-crystal hljs">b.resource(&quot;file:///path/to/file.cr&quot;, File.read(&quot;file.cr&quot;), &quot;text/x-crystal&quot;)
+</code></pre>
+<h3 id="resource-link">Resource Link</h3>
+<p>Reference a file by path:</p>
+<pre><code class="language-crystal hljs">b.resource_link(&quot;/path/to/file.cr&quot;, &quot;text/x-crystal&quot;)
+</code></pre>
+<p>Or with a URI and name:</p>
+<pre><code class="language-crystal hljs">b.resource_link(&quot;file:///path/to/file.cr&quot;, &quot;file.cr&quot;, &quot;text/x-crystal&quot;)
+</code></pre>
+<h2 id="builder-inspection">Builder Inspection</h2>
+<pre><code class="language-crystal hljs">builder = ACP::PromptBuilder.new
+builder.text(&quot;Hello&quot;)
+builder.image(data, &quot;image/png&quot;)
+
+builder.size    # =&gt; 2
+builder.empty?  # =&gt; false
+</code></pre>
+<h2 id="combining-with-session">Combining with Session</h2>
+<p>The <code>Session#prompt</code> method accepts multiple input forms:</p>
+<pre><code class="language-crystal hljs"># Single text
+session.prompt(&quot;Hello&quot;)
+
+# Multiple texts
+session.prompt(&quot;Context&quot;, &quot;Question&quot;)
+
+# Pre-built blocks
+session.prompt(builder.build)
+
+# DSL block
+session.prompt { |b| b.text(&quot;Hello&quot;) }
+</code></pre>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>

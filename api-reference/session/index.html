@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="High-level session wrapper for ACP operations">
+  <title>Session - acp.cr</title>
+  <meta property="og:title" content="Session">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/api-reference/session/">
+<meta property="og:description" content="High-level session wrapper for ACP operations">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/api-reference-session.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Session">
+<meta name="twitter:description" content="High-level session wrapper for ACP operations">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/api-reference-session.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="api-reference">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Session</h1>
+    <h2 id="overview">Overview</h2>
+<p><code>ACP::Session</code> is a convenience wrapper around <code>ACP::Client</code> that provides session-scoped operations. It manages the session ID and delegates to the underlying client.</p>
+<h2 id="factory-methods">Factory Methods</h2>
+<h3 id="create"><code>.create</code></h3>
+<pre><code class="language-crystal hljs">ACP::Session.create(
+  client : ACP::Client,
+  cwd : String,
+  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+) : ACP::Session
+</code></pre>
+<p>Creates a new session and returns a <code>Session</code> instance.</p>
+<h3 id="load"><code>.load</code></h3>
+<pre><code class="language-crystal hljs">ACP::Session.load(
+  client : ACP::Client,
+  session_id : String,
+  cwd : String,
+  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+) : ACP::Session
+</code></pre>
+<p>Loads an existing session by ID and returns a <code>Session</code> instance.</p>
+<h2 id="prompt-methods">Prompt Methods</h2>
+<h3 id="prompttext"><code>#prompt(text)</code></h3>
+<pre><code class="language-crystal hljs">session.prompt(text : String) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Sends a single text prompt.</p>
+<h3 id="prompttexts"><code>#prompt(*texts)</code></h3>
+<pre><code class="language-crystal hljs">session.prompt(*texts : String) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Sends multiple text blocks as a single prompt.</p>
+<h3 id="promptblocks"><code>#prompt(blocks)</code></h3>
+<pre><code class="language-crystal hljs">session.prompt(
+  blocks : Array(ACP::Protocol::ContentBlock)
+) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Sends pre-built content blocks.</p>
+<h3 id="promptampblock"><code>#prompt(&amp;block)</code></h3>
+<pre><code class="language-crystal hljs">session.prompt(
+  &amp;block : ACP::PromptBuilder -&gt;
+) : ACP::Protocol::SessionPromptResult
+</code></pre>
+<p>Sends a prompt built using the PromptBuilder DSL.</p>
+<pre><code class="language-crystal hljs">result = session.prompt do |b|
+  b.text(&quot;Review this code&quot;)
+  b.resource_link(&quot;/path/to/file.cr&quot;, &quot;text/x-crystal&quot;)
+end
+</code></pre>
+<h2 id="session-control">Session Control</h2>
+<h3 id="cancel"><code>#cancel</code></h3>
+<pre><code class="language-crystal hljs">session.cancel : Nil
+</code></pre>
+<p>Cancels an in-progress generation.</p>
+<h3 id="mode"><code>#mode=</code></h3>
+<pre><code class="language-crystal hljs">session.mode = (mode_id : String)
+</code></pre>
+<p>Switches the session mode.</p>
+<h3 id="available-mode-ids"><code>#available_mode_ids</code></h3>
+<pre><code class="language-crystal hljs">session.available_mode_ids : Array(String)
+</code></pre>
+<p>Returns the list of available mode IDs for the session.</p>
+<h3 id="set-config-option"><code>#set_config_option</code></h3>
+<pre><code class="language-crystal hljs">session.set_config_option(
+  config_id : String,
+  value : JSON::Any::Type
+) : ACP::Protocol::SessionSetConfigOptionResult
+</code></pre>
+<p>Changes a configuration option.</p>
+<h3 id="close"><code>#close</code></h3>
+<pre><code class="language-crystal hljs">session.close : Nil
+</code></pre>
+<p>Marks the session as closed.</p>
+<h3 id="closed"><code>#closed?</code></h3>
+<pre><code class="language-crystal hljs">session.closed? : Bool
+</code></pre>
+<p>Returns whether the session is closed.</p>
+<h2 id="extension-methods">Extension Methods</h2>
+<h3 id="ext-method"><code>#ext_method</code></h3>
+<pre><code class="language-crystal hljs">session.ext_method(
+  method : String,
+  params : Hash(String, JSON::Any::Type)? = nil
+) : JSON::Any
+</code></pre>
+<p>Sends a custom extension request.</p>
+<h3 id="ext-notification"><code>#ext_notification</code></h3>
+<pre><code class="language-crystal hljs">session.ext_notification(
+  method : String,
+  params : Hash(String, JSON::Any::Type)? = nil
+) : Nil
+</code></pre>
+<p>Sends a custom extension notification.</p>
+<h2 id="properties">Properties</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td><code>String</code></td>
+<td>Session ID</td>
+</tr>
+<tr>
+<td><code>client</code></td>
+<td><code>Client</code></td>
+<td>Underlying client</td>
+</tr>
+<tr>
+<td><code>modes</code></td>
+<td><code>SessionModeState?</code></td>
+<td>Available modes</td>
+</tr>
+<tr>
+<td><code>config_options</code></td>
+<td><code>Array(ConfigOption)?</code></td>
+<td>Configuration options</td>
+</tr>
+</tbody>
+</table>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>

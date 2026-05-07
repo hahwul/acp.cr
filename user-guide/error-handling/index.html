@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Handling errors and edge cases in acp.cr">
+  <title>Error Handling - acp.cr</title>
+  <meta property="og:title" content="Error Handling">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/error-handling/">
+<meta property="og:description" content="Handling errors and edge cases in acp.cr">
+<meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-error-handling.svg">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Error Handling">
+<meta name="twitter:description" content="Handling errors and edge cases in acp.cr">
+<meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-error-handling.svg">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  
+</head>
+<body data-section="user-guide">
+<header class="docs-header">
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav>
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a>
+    <a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>⌘K</kbd>
+    </button>
+    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+  <aside class="docs-sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">User Guide</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">API Reference</div>
+      <ul class="sidebar-links">
+        <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+        <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      </ul>
+    </div>
+  </aside>
+  <main class="docs-main">
+    <h1>Error Handling</h1>
+    <h2 id="error-hierarchy">Error Hierarchy</h2>
+<p>All acp.cr errors inherit from <code>ACP::Error</code>:</p>
+<pre><code>ACP::Error
+├── ACP::TransportError
+│   ├── ACP::ConnectionClosedError
+│   └── ACP::TransportTimeoutError
+├── ACP::ProtocolError
+│   └── ACP::VersionMismatchError
+├── ACP::InvalidStateError
+├── ACP::JsonRpcError
+├── ACP::SessionNotFoundError
+├── ACP::NoActiveSessionError
+├── ACP::AuthenticationError
+├── ACP::RequestTimeoutError
+└── ACP::RequestCancelledError
+</code></pre>
+<h2 id="common-patterns">Common Patterns</h2>
+<h3 id="connection-errors">Connection Errors</h3>
+<pre><code class="language-crystal hljs">begin
+  client = ACP.connect(&quot;agent-command&quot;, args: [&quot;--stdio&quot;],
+    client_name: &quot;app&quot;, client_version: &quot;1.0&quot;)
+rescue ex : ACP::TransportError
+  puts &quot;Failed to connect: #{ex.message}&quot;
+rescue ex : ACP::VersionMismatchError
+  puts &quot;Protocol version mismatch: #{ex.message}&quot;
+end
+</code></pre>
+<h3 id="timeout-handling">Timeout Handling</h3>
+<p>The client has configurable timeouts:</p>
+<pre><code class="language-crystal hljs">client.request_timeout = 30.0   # Default: 30 seconds
+client.prompt_timeout = 300.0   # Default: 5 minutes
+</code></pre>
+<p>Handle timeout errors:</p>
+<pre><code class="language-crystal hljs">begin
+  result = session.prompt(&quot;Long running task&quot;)
+rescue ex : ACP::RequestTimeoutError
+  puts &quot;Request timed out after #{client.prompt_timeout}s&quot;
+  session.cancel
+end
+</code></pre>
+<h3 id="session-errors">Session Errors</h3>
+<pre><code class="language-crystal hljs">begin
+  session = ACP::Session.load(client, &quot;invalid-id&quot;, Dir.current)
+rescue ex : ACP::SessionNotFoundError
+  puts &quot;Session not found, creating new one&quot;
+  session = ACP::Session.create(client, Dir.current)
+end
+</code></pre>
+<h3 id="state-validation">State Validation</h3>
+<p>The client validates state transitions automatically:</p>
+<pre><code class="language-crystal hljs">begin
+  # This will fail if no session is active
+  client.session_prompt_text(&quot;Hello&quot;)
+rescue ex : ACP::NoActiveSessionError
+  puts &quot;No active session&quot;
+rescue ex : ACP::InvalidStateError
+  puts &quot;Client is in wrong state: #{ex.message}&quot;
+end
+</code></pre>
+<h3 id="json-rpc-errors">JSON-RPC Errors</h3>
+<p>Errors returned by the agent in JSON-RPC format:</p>
+<pre><code class="language-crystal hljs">begin
+  result = session.prompt(&quot;Do something&quot;)
+rescue ex : ACP::JsonRpcError
+  puts &quot;Agent error code: #{ex.code}&quot;
+  puts &quot;Agent error message: #{ex.message}&quot;
+end
+</code></pre>
+<h2 id="disconnect-recovery">Disconnect Recovery</h2>
+<pre><code class="language-crystal hljs">client.on_disconnect = -&gt; {
+  puts &quot;Lost connection, attempting to reconnect...&quot;
+  # Your reconnection logic here
+}
+</code></pre>
+<h2 id="best-practices">Best Practices</h2>
+<ul>
+<li>Always wrap <code>connect</code> and <code>prompt</code> calls in error handling</li>
+<li>Set appropriate timeouts for your use case</li>
+<li>Use <code>session.cancel</code> to clean up after timeouts</li>
+<li>Check <code>client.closed?</code> and <code>client.session_active?</code> before operations</li>
+<li>Handle <code>ConnectionClosedError</code> for graceful shutdown</li>
+</ul>
+
+    <div class="docs-footer">
+      <p>acp.cr - Crystal implementation of the Agent Client Protocol</p>
+    </div>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+</body>
+</html>
