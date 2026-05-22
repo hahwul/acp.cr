@@ -225,7 +225,7 @@ module ACP
     # discarded. A nil return from `gets` (EOF) ends the drain.
     private def drain_oversize_line : Int64
       drained = 0_i64
-      while (chunk = @reader.gets(@max_line_bytes, chomp: false))
+      while chunk = @reader.gets(@max_line_bytes, chomp: false)
         drained += chunk.bytesize
         break if chunk.ends_with?('\n')
       end
