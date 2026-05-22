@@ -2,3 +2,7 @@ Metrics/CyclomaticComplexity:
   Excluded:
     - examples/**
     - src/acp/protocol/enums.cr
+
+Naming/BlockParameterName:
+  MinNameLength: 1
+  AllowNamesEndingInNumbers: true
