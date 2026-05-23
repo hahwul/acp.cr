@@ -11,7 +11,7 @@ Add the dependency to your `shard.yml`:
 ```yaml
 dependencies:
   acp:
-    github: hahwul/acp
+    github: hahwul/acp.cr
 ```
 
 Then run:
@@ -82,7 +82,7 @@ crystal tool format
 
 ## Contributing
 
-1. Fork it (<https://github.com/hahwul/acp/fork>)
+1. Fork it (<https://github.com/hahwul/acp.cr/fork>)
 2. Create your feature branch (`git checkout -b my-new-feature`)
 3. Commit your changes (`git commit -am 'Add some feature'`)
 4. Push to the branch (`git push origin my-new-feature`)

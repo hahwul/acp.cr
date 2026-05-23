@@ -415,7 +415,7 @@ begin
     if pc = caps.prompt_capabilities
       features << "image" if pc.image?
       features << "audio" if pc.audio?
-      features << "file" if pc.file
+      features << "embedded_context" if pc.embedded_context?
     end
     Term.info("Agent capabilities: #{features.empty? ? "basic" : features.join(", ")}")
   end
