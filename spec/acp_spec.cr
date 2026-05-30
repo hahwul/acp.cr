@@ -66,6 +66,31 @@ class TestTransport < ACP::Transport
   end
 end
 
+# A transport whose `send` always fails. Used to force dispatch errors
+# (the dispatcher's reply attempts raise), so we can exercise the
+# consecutive-error protection. `receive` keeps delivering injected messages.
+class FailingSendTransport < TestTransport
+  def send(message : Hash(String, JSON::Any)) : Nil
+    raise IO::Error.new("simulated write failure")
+  end
+end
+
+# A transport whose first `fail_first` sends raise, then all later sends
+# succeed. Used to verify the dispatcher's consecutive-error counter resets
+# after a success so transient errors do not tear down the connection.
+class CountingFailTransport < TestTransport
+  def initialize(@fail_first : Int32 = 3)
+    super()
+    @send_count = 0
+  end
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    @send_count += 1
+    raise IO::Error.new("simulated transient write failure") if @send_count <= @fail_first
+    super
+  end
+end
+
 # Helper to build a standard initialize response for tests.
 def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
   <<-JSON
@@ -84,6 +109,31 @@ def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
           "mcpCapabilities": {
             "http": false,
             "sse": false
+          }
+        },
+        "authMethods": [],
+        "agentInfo": {
+          "name": "test-agent",
+          "version": "1.0.0"
+        }
+      }
+    }
+    JSON
+end
+
+# Like build_init_response, but advertises sessionCapabilities.close so the
+# agent is treated as supporting session/close.
+def build_init_response_with_close(id : Int64, protocol_version : UInt16 = 1_u16) : String
+  <<-JSON
+    {
+      "jsonrpc": "2.0",
+      "id": #{id},
+      "result": {
+        "protocolVersion": #{protocol_version},
+        "agentCapabilities": {
+          "loadSession": true,
+          "sessionCapabilities": {
+            "close": {}
           }
         },
         "authMethods": [],
@@ -1533,6 +1583,28 @@ describe ACP::Client do
       transport.close
     end
 
+    it "accepts a negotiated protocol version the client still supports" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          id = msg["id"].as_i64
+          # Agent selects MIN_PROTOCOL_VERSION (a version we still support);
+          # the handshake is a negotiation, not an equality check.
+          transport.inject_raw(build_init_response(id, protocol_version: ACP::MIN_PROTOCOL_VERSION))
+        end
+      end
+
+      result = client.initialize_connection
+      result.protocol_version.should eq(ACP::MIN_PROTOCOL_VERSION)
+      client.negotiated_protocol_version.should eq(ACP::MIN_PROTOCOL_VERSION)
+      client.state.should eq(ACP::ClientState::Initialized)
+
+      transport.close
+    end
+
     it "raises JsonRpcError when agent returns an error" do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
@@ -2101,6 +2173,58 @@ describe ACP::Client do
     end
   end
 
+  describe "dispatcher error protection" do
+    it "tears down the connection after too many consecutive dispatch errors" do
+      transport = FailingSendTransport.new
+      client = ACP::Client.new(transport)
+
+      client.closed?.should be_false
+
+      # Each agent request triggers a reply via the transport, which fails;
+      # that failure counts as a dispatch error. After the threshold the
+      # dispatcher closes the client instead of spinning forever.
+      ACP::Client::MAX_CONSECUTIVE_DISPATCH_ERRORS.times do |i|
+        transport.inject_raw(<<-JSON
+          {"jsonrpc": "2.0", "id": #{i + 1}, "method": "agent/does_not_exist", "params": {}}
+          JSON
+        )
+      end
+
+      # Wait for the dispatcher to process the messages and react.
+      deadline = Time.instant + 2.seconds
+      while !client.closed? && Time.instant < deadline
+        sleep 5.milliseconds
+      end
+
+      client.closed?.should be_true
+      client.state.should eq(ACP::ClientState::Closed)
+      transport.closed?.should be_true
+    end
+
+    it "resets the error counter after a successful dispatch" do
+      # A transport that fails the first few sends, then succeeds, so the
+      # counter never reaches the threshold and the client stays open.
+      transport = CountingFailTransport.new(fail_first: 3)
+      client = ACP::Client.new(transport)
+
+      # Send well over the threshold worth of requests, but successes are
+      # interleaved so consecutive failures never reach the limit.
+      total = ACP::Client::MAX_CONSECUTIVE_DISPATCH_ERRORS * 2
+      total.times do |i|
+        transport.inject_raw(<<-JSON
+          {"jsonrpc": "2.0", "id": #{i + 1}, "method": "agent/does_not_exist", "params": {}}
+          JSON
+        )
+        sleep 1.millisecond
+      end
+
+      sleep 30.milliseconds
+      client.closed?.should be_false
+
+      transport.close
+    end
+  end
+
   describe "notification handling" do
     it "dispatches session/update notifications to on_update" do
       transport = TestTransport.new
@@ -2377,6 +2501,23 @@ def setup_client_with_session
   {transport, client}
 end
 
+# Same as setup_client_with_session, but the agent advertises the
+# session/close capability.
+def setup_client_with_session_and_close
+  transport = TestTransport.new
+  client = ACP::Client.new(transport)
+
+  spawn do
+    sleep 10.milliseconds
+    if msg = transport.last_sent
+      transport.inject_raw(build_init_response_with_close(msg["id"].as_i64))
+    end
+  end
+  client.initialize_connection
+
+  {transport, client}
+end
+
 describe ACP::Session do
   describe ".create" do
     it "creates a new session through the client" do
@@ -2616,6 +2757,108 @@ describe ACP::Session do
       session.closed?.should be_false
       session.close
       session.closed?.should be_true
+
+      transport.close
+    end
+
+    it "does NOT send session/close when the agent lacks the capability" do
+      transport, client = setup_client_with_session
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+      session.agent_supports_close?.should be_false
+      transport.clear_sent
+
+      session.close
+      session.closed?.should be_true
+      # No session/close request should have been sent.
+      transport.sent_messages.any? { |m| m["method"]?.try(&.as_s?) == "session/close" }.should be_false
+
+      transport.close
+    end
+
+    it "sends session/close when the agent advertises the capability" do
+      transport, client = setup_client_with_session_and_close
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64, "sess-closable"))
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+      session.agent_supports_close?.should be_true
+      transport.clear_sent
+
+      # Respond to the session/close request the close call will send.
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {"jsonrpc": "2.0", "id": #{sent["id"].as_i64}, "result": {}}
+          JSON
+        )
+      end
+
+      session.close
+      session.closed?.should be_true
+
+      close_req = transport.sent_messages.find { |m| m["method"]?.try(&.as_s?) == "session/close" }
+      close_req.should_not be_nil
+      close_req.as(JSON::Any)["params"]["sessionId"].as_s.should eq("sess-closable")
+
+      transport.close
+    end
+
+    it "honors notify_agent: false to skip the remote close even when supported" do
+      transport, client = setup_client_with_session_and_close
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+      transport.clear_sent
+
+      session.close(notify_agent: false)
+      session.closed?.should be_true
+      transport.sent_messages.any? { |m| m["method"]?.try(&.as_s?) == "session/close" }.should be_false
+
+      transport.close
+    end
+
+    it "is idempotent: a second close does not send another request" do
+      transport, client = setup_client_with_session_and_close
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(build_session_new_response(sent["id"].as_i64))
+      end
+
+      session = ACP::Session.create(client, cwd: "/tmp")
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {"jsonrpc": "2.0", "id": #{sent["id"].as_i64}, "result": {}}
+          JSON
+        )
+      end
+      session.close
+      transport.clear_sent
+
+      session.close # second call — should be a no-op
+      session.closed?.should be_true
+      transport.sent_messages.should be_empty
 
       transport.close
     end

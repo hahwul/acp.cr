@@ -633,12 +633,11 @@ module ACP
       )
       end
 
-      # Backward-compatible: return a provided session_id or empty string.
-      # (session/load doesn't return a sessionId in the ACP spec,
-      # so this is for code that expects it.)
-      def session_id : String
-        ""
-      end
+      # NOTE: `session/load` does not return a `sessionId` in the ACP spec —
+      # the caller already holds the id it passed to `session/load`. We do
+      # not expose a `session_id` accessor here because there is no real
+      # value to return; surfacing an empty string silently misled callers.
+      # Use the id you passed to `Client#session_load` / `Session.load`.
     end
 
     # ─── Session/Resume Method ────────────────────────────────────────

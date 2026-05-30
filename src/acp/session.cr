@@ -231,11 +231,40 @@ module ACP
 
     # ─── State ────────────────────────────────────────────────────────
 
-    # Marks this session as closed. Further prompt/cancel calls will
-    # raise an error. Note: there is no explicit "session/close" method
-    # in ACP; this is a client-side state flag.
-    def close : Nil
+    # Closes the session.
+    #
+    # If the agent advertised the `session/close` capability
+    # (`agent_capabilities.session_capabilities.close?`), this sends a
+    # `session/close` request so the agent can cancel any ongoing work and
+    # release resources tied to the session. Otherwise it falls back to a
+    # purely client-side state flag (the protocol makes `session/close`
+    # optional).
+    #
+    # After this call further prompt/cancel/config calls raise. Closing is
+    # idempotent: a second call is a no-op. By default a `session/close`
+    # failure is swallowed so local state is always marked closed; pass
+    # `notify_agent: false` to skip the remote call entirely, or
+    # `raise_on_error: true` to surface a remote-close failure to the caller.
+    def close(*, notify_agent : Bool = true, raise_on_error : Bool = false) : Nil
+      return if @closed
+
+      if notify_agent && agent_supports_close?
+        begin
+          @client.session_close(@id)
+        rescue ex
+          raise ex if raise_on_error
+          # Best-effort: the agent may already be gone or not honor the call.
+          # We still mark the session closed locally below.
+        end
+      end
+
       @closed = true
+    end
+
+    # Returns true if the connected agent advertised the `session/close`
+    # capability during initialization.
+    def agent_supports_close? : Bool
+      @client.agent_capabilities.try(&.session_capabilities.try(&.close?)) || false
     end
 
     # Returns a human-readable summary of the session for debugging.

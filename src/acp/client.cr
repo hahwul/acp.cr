@@ -213,6 +213,12 @@ module ACP
     # Tracks consecutive dispatch errors for detecting protocol corruption.
     @consecutive_dispatch_errors : Int32 = 0
 
+    # When this many messages in a row fail to dispatch, the stream is assumed
+    # to be corrupt (e.g. desynchronized framing) and the client tears down the
+    # connection rather than spinning forever on un-dispatchable input. The
+    # counter resets to zero after any successful dispatch.
+    MAX_CONSECUTIVE_DISPATCH_ERRORS = 10
+
     # Channel used to signal the dispatcher to stop.
     # Buffered with capacity 1 so that `close` never blocks if
     # nobody is receiving from this channel.
@@ -258,17 +264,21 @@ module ACP
       raw_result = send_request("initialize", params)
       result = Protocol::InitializeResult.from_json(raw_result.to_json)
 
-      # Validate protocol version compatibility.
-      if result.protocol_version != ACP::PROTOCOL_VERSION
+      # The handshake is a negotiation: the agent returns the version it will
+      # use, which may be lower than we requested. Accept any version we still
+      # support; only bail when the agent picks a version outside our range
+      # (e.g. a newer version we can't speak).
+      unless ACP.supports_protocol_version?(result.protocol_version)
         ClientLog.error do
-          "Protocol version mismatch: client=#{ACP::PROTOCOL_VERSION}, " \
+          "Unsupported negotiated protocol version: client supports " \
+          "#{ACP::MIN_PROTOCOL_VERSION}..#{ACP::PROTOCOL_VERSION}, " \
           "agent=#{result.protocol_version}"
         end
         close
         raise VersionMismatchError.new(ACP::PROTOCOL_VERSION, result.protocol_version)
       end
 
-      # Store negotiated state.
+      # Store negotiated state, using the version the agent selected.
       @negotiated_protocol_version = result.protocol_version
       @agent_capabilities = result.agent_capabilities
       @agent_info = result.agent_info
@@ -882,8 +892,15 @@ module ACP
         rescue ex
           @consecutive_dispatch_errors += 1
           ClientLog.error { "Error dispatching message (#{@consecutive_dispatch_errors} consecutive): #{ex.message}" }
-          if @consecutive_dispatch_errors >= 10
-            ClientLog.error { "Too many consecutive dispatch errors, possible protocol corruption" }
+          if @consecutive_dispatch_errors >= MAX_CONSECUTIVE_DISPATCH_ERRORS
+            # The input stream looks corrupt — keep reading it would just spin.
+            # Tear the connection down: stop the dispatcher and close the
+            # transport. The post-loop cleanup below drains any pending
+            # requests and fires the disconnect callback. `close` is
+            # idempotent, so this is safe even if the caller also closes.
+            ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
+            close
+            break
           end
         end
       end
