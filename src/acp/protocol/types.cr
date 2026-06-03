@@ -341,9 +341,11 @@ module ACP
     struct ConfigOptionGroup
       include JSON::Serializable
 
-      # Unique identifier for this group (required).
-      # Maps to the Rust SDK's `SessionConfigGroupId`.
-      property id : String
+      # Unique identifier for this group (required). Per the ACP schema
+      # (`SessionConfigSelectGroup`) this is carried on the wire under the key
+      # `"group"` — NOT `"id"`. Maps to the Rust SDK's `SessionConfigGroupId`.
+      @[JSON::Field(key: "group")]
+      property group : String
 
       # Human-readable label for this group (required).
       property name : String
@@ -356,11 +358,17 @@ module ACP
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
-        @id : String,
+        @group : String,
         @name : String,
         @options : Array(ConfigOptionValue) = [] of ConfigOptionValue,
         @meta : Hash(String, JSON::Any)? = nil,
       )
+      end
+
+      # Backward-compatible alias. This identifier used to be exposed (and
+      # mis-serialized) as `id`; `group` is the spec-correct name.
+      def id : String
+        @group
       end
     end
 
@@ -399,15 +407,25 @@ module ACP
       @[JSON::Field(key: "currentValue")]
       property current_value : String?
 
-      # Flat list of available values for this option.
-      # Used when options are not grouped. Maps to the Rust SDK's
-      # `SessionConfigSelectOptions::Flat`.
-      property options : Array(ConfigOptionValue)?
+      # Raw wire form of the selectable values. Per the ACP schema
+      # (`SessionConfigSelect.options` -> `SessionConfigSelectOptions`) this is
+      # a SINGLE `"options"` array that is EITHER a flat list of
+      # `SessionConfigSelectOption` values OR a list of
+      # `SessionConfigSelectGroup` groups. There is NO separate `"groups"` key.
+      # We keep the raw array here and expose typed `options`/`groups` views.
+      @[JSON::Field(key: "options")]
+      property options_raw : Array(JSON::Any)?
 
-      # Grouped list of available values for this option.
+      # Flat list of available values for this option (nil when grouped).
+      # Maps to the Rust SDK's `SessionConfigSelectOptions::Ungrouped`.
+      @[JSON::Field(ignore: true)]
+      property options : Array(ConfigOptionValue)? = nil
+
+      # Grouped list of available values for this option (nil when flat).
       # Used when options are organized into logical sections (e.g., by provider).
       # Maps to the Rust SDK's `SessionConfigSelectOptions::Grouped`.
-      property groups : Array(ConfigOptionGroup)?
+      @[JSON::Field(ignore: true)]
+      property groups : Array(ConfigOptionGroup)? = nil
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -424,6 +442,22 @@ module ACP
         @category : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
+        @options_raw = build_options_raw
+      end
+
+      # Populate the typed `options`/`groups` views from the raw wire array
+      # after JSON deserialization. A group element is identified by the
+      # presence of the `"group"` key (per `SessionConfigSelectGroup`).
+      def after_initialize : Nil
+        raw = @options_raw
+        return unless raw
+        if raw.any? { |item| item.as_h?.try(&.has_key?("group")) }
+          @groups = raw.compact_map { |item| ConfigOptionGroup.from_json(item.to_json) rescue nil }
+          @options = nil
+        else
+          @options = raw.compact_map { |item| ConfigOptionValue.from_json(item.to_json) rescue nil }
+          @groups = nil
+        end
       end
 
       # Backward-compatible alias for `name`.
@@ -451,6 +485,16 @@ module ACP
           grps.flat_map(&.options)
         else
           [] of ConfigOptionValue
+        end
+      end
+
+      # Builds the raw wire `options` array from whichever typed view is set,
+      # so both flat and grouped options serialize under the single spec key.
+      private def build_options_raw : Array(JSON::Any)?
+        if grps = @groups
+          grps.map { |g| JSON.parse(g.to_json) }
+        elsif opts = @options
+          opts.map { |o| JSON.parse(o.to_json) }
         end
       end
     end

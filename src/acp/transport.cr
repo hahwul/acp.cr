@@ -155,6 +155,11 @@ module ACP
       when timeout(timeout)
         nil
       end
+    rescue Channel::ClosedError
+      # The channel was closed (transport shutting down) while we were blocked
+      # in the select; treat it the same as a nil sentinel.
+      @closed = true
+      nil
     end
 
     # Closes the transport, signaling the reader to stop and
@@ -163,17 +168,16 @@ module ACP
       return if @closed
       @closed = true
 
-      # Send nil sentinel so any blocked receive call unblocks.
-      unless @close_sent
-        @close_sent = true
-        begin
-          @incoming.send(nil)
-        rescue Channel::ClosedError
-          # Already closed, that's fine.
-        end
-      end
-
-      # Close the incoming channel to unblock any further receives.
+      # Mark the EOF sentinel as handled so the reader fiber won't try to push
+      # a nil into a channel we're about to close, then close the channel.
+      #
+      # We deliberately do NOT perform a blocking `@incoming.send(nil)` here:
+      # if the buffer is full and no fiber is currently receiving (e.g. the
+      # dispatcher already stopped), that send would block forever and hang
+      # close(). Closing the channel alone is sufficient to unblock any pending
+      # `receive` — both `receive` variants treat `Channel::ClosedError` (and a
+      # nil sentinel) as "transport closed -> nil".
+      @close_sent = true
       @incoming.close
 
       # Close the underlying IOs if they support it.
@@ -246,34 +250,41 @@ module ACP
         break if @closed
 
         begin
-          # gets(limit, chomp: true) reads up to `limit` bytes or until
-          # newline, whichever comes first. If the line exceeded the
-          # limit, the returned string will not end on a real newline —
-          # we detect this by checking the post-truncation byte at the
-          # current position and drain the rest of the offending line so
-          # we re-sync with the next message boundary.
-          line = @reader.gets(@max_line_bytes, chomp: true)
+          # Read up to ONE byte past the limit, without chomping, so we can
+          # distinguish a complete line from a truncated (oversize) one. A
+          # complete line ends with '\n' (or is a final, unterminated line that
+          # fit within the limit); an oversize line fills `@max_line_bytes + 1`
+          # bytes with no terminating newline.
+          raw = @reader.gets(@max_line_bytes + 1, chomp: false)
         rescue ex : IO::Error
-          Log.error { "Read error: #{ex.message}" }
+          # A read error during/after an intentional close is expected — the
+          # reader IO was closed underneath us — so don't surface it as an
+          # error on a clean shutdown.
+          Log.error { "Read error: #{ex.message}" } unless @closed
           break
         end
 
         # nil from gets means EOF — the agent process closed its stdout.
-        if line.nil?
+        if raw.nil?
           Log.debug { "Reader reached EOF" }
           break
         end
 
-        # If the line filled the buffer without hitting a newline, the
-        # next byte in the stream is non-newline data belonging to the
-        # same logical line. Drain to the next '\n' and skip the message.
-        if line.bytesize >= @max_line_bytes
+        # We read past the limit and still found no newline: this is an
+        # oversize line. Drain the rest of the offending logical line and skip
+        # it so we re-sync at the next message boundary.
+        #
+        # A line whose content is exactly `@max_line_bytes` long is
+        # `@max_line_bytes + 1` bytes INCLUDING its trailing '\n', so it ends
+        # with '\n' here and is correctly treated as a valid, complete line
+        # rather than being misclassified as oversize and dropped.
+        if raw.bytesize > @max_line_bytes && !raw.ends_with?('\n')
           drained = drain_oversize_line
-          Log.warn { "Dropped oversized incoming line (>= #{@max_line_bytes} bytes; drained #{drained} more bytes to re-sync)" }
+          Log.warn { "Dropped oversized incoming line (> #{@max_line_bytes} bytes; drained #{drained} more bytes to re-sync)" }
           next
         end
 
-        line = line.strip
+        line = raw.chomp.strip
         next if line.empty?
 
         Log.debug { "<<< #{redact_raw_frame(line)}" }

@@ -14,9 +14,10 @@ require "../src/acp"
 require "colorize"
 
 # 1. Prepare the agent command.
-# We use 'gemini --experimental-acp' to start Gemini in ACP mode.
+# We use 'gemini --acp' to start Gemini in ACP mode.
+# (Older Gemini CLI versions used '--experimental-acp', now deprecated.)
 agent_command = "gemini"
-agent_args = ["--experimental-acp"]
+agent_args = ["--acp"]
 
 puts "--- Gemini ACP Agent Example ---"
 

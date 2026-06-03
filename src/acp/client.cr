@@ -224,6 +224,12 @@ module ACP
     # nobody is receiving from this channel.
     @stop_channel : Channel(Nil) = Channel(Nil).new(1)
 
+    # Set when the caller invokes `close` explicitly. Used so the dispatcher
+    # does NOT fire the `on_disconnect` ("connection lost") callback on an
+    # intentional shutdown — that callback is reserved for unexpected loss
+    # of the transport (EOF, transport error, or protocol corruption).
+    @user_closed : Bool = false
+
     # ─── Constructor ────────────────────────────────────────────────
 
     # Creates a new ACP client connected to the given transport.
@@ -603,6 +609,7 @@ module ACP
     # Closes the client, stopping the dispatcher and closing the transport.
     def close : Nil
       return if @state == ClientState::Closed
+      @user_closed = true
       @state = ClientState::Closed
 
       ClientLog.info { "Closing client" }
@@ -763,9 +770,16 @@ module ACP
       end
       id_str = id.to_s
 
-      # Build and send the request.
+      # Build and send the request. If the send fails (e.g. the transport was
+      # closed underneath us), drop the pending entry we just registered so it
+      # can never linger unresolved in `@pending`.
       message = message_builder.call(id)
-      @transport.send(message)
+      begin
+        @transport.send(message)
+      rescue ex
+        @pending_mutex.synchronize { @pending.delete(id_str) }
+        raise ex
+      end
 
       ClientLog.debug { "Sent request id=#{id} method=#{method}" }
 
@@ -899,7 +913,14 @@ module ACP
             # requests and fires the disconnect callback. `close` is
             # idempotent, so this is safe even if the caller also closes.
             ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
-            close
+            # Tear the connection down WITHOUT going through the public `close`
+            # (which would mark this as an intentional shutdown). This is an
+            # unexpected loss of the stream, so we leave `@user_closed` false
+            # and let the post-loop cleanup drain pending requests and fire the
+            # `on_disconnect` callback.
+            @state = ClientState::Closed
+            @dispatcher_running = false
+            @transport.close
             break
           end
         end
@@ -910,8 +931,11 @@ module ACP
       # Notify pending requests that the connection is lost.
       drain_pending_requests("Connection lost")
 
-      # Invoke the disconnect callback if set.
-      if cb = @on_disconnect
+      # Invoke the disconnect callback if set — but only for an UNEXPECTED loss
+      # of the transport. When the caller asked for `close`, the dispatcher
+      # exits too, and firing "connection lost" there would be a spurious
+      # signal (it could, e.g., trigger reconnect logic on a clean shutdown).
+      if !@user_closed && (cb = @on_disconnect)
         begin
           cb.call
         rescue ex
@@ -1087,8 +1111,16 @@ module ACP
         end
       else
         # No handler — auto-cancel the permission request.
+        #
+        # The ACP spec models `RequestPermissionResponse.outcome` as a nested
+        # `RequestPermissionOutcome` object, so the result MUST be
+        # `{"outcome": {"outcome": "cancelled"}}`, not a bare
+        # `{"outcome": "cancelled"}`. Agents (e.g. Gemini) silently reject the
+        # un-nested form and keep re-requesting permission, which spins the
+        # prompt turn until it times out. Reuse the typed builder so this path
+        # stays consistent with `Protocol::RequestPermissionResult.cancelled`.
         ClientLog.warn { "No handler for permission request; auto-cancelling" }
-        cancelled = JSON.parse(%({"outcome": "cancelled"}))
+        cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
         respond_to_agent(id, cancelled)
       end
     end
