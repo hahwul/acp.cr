@@ -413,19 +413,22 @@ module ACP
       # `SessionConfigSelectOption` values OR a list of
       # `SessionConfigSelectGroup` groups. There is NO separate `"groups"` key.
       # We keep the raw array here and expose typed `options`/`groups` views.
+      # Exposed read-only: the typed views and this wire array are derived from
+      # each other at construction / deserialization, so a public setter could
+      # silently desync them. Construct a new ConfigOption to change the values.
       @[JSON::Field(key: "options")]
-      property options_raw : Array(JSON::Any)?
+      getter options_raw : Array(JSON::Any)?
 
       # Flat list of available values for this option (nil when grouped).
       # Maps to the Rust SDK's `SessionConfigSelectOptions::Ungrouped`.
       @[JSON::Field(ignore: true)]
-      property options : Array(ConfigOptionValue)? = nil
+      getter options : Array(ConfigOptionValue)? = nil
 
       # Grouped list of available values for this option (nil when flat).
       # Used when options are organized into logical sections (e.g., by provider).
       # Maps to the Rust SDK's `SessionConfigSelectOptions::Grouped`.
       @[JSON::Field(ignore: true)]
-      property groups : Array(ConfigOptionGroup)? = nil
+      getter groups : Array(ConfigOptionGroup)? = nil
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -442,6 +445,11 @@ module ACP
         @category : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
+        # Per the ACP schema an option's value set is EITHER flat or grouped,
+        # never both. Fail fast instead of silently dropping one on the wire.
+        if (o = @options) && !o.empty? && (g = @groups) && !g.empty?
+          raise ArgumentError.new("ConfigOption accepts either `options` or `groups`, not both")
+        end
         @options_raw = build_options_raw
       end
 

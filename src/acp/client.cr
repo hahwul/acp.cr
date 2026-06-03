@@ -907,17 +907,13 @@ module ACP
           @consecutive_dispatch_errors += 1
           ClientLog.error { "Error dispatching message (#{@consecutive_dispatch_errors} consecutive): #{ex.message}" }
           if @consecutive_dispatch_errors >= MAX_CONSECUTIVE_DISPATCH_ERRORS
-            # The input stream looks corrupt — keep reading it would just spin.
-            # Tear the connection down: stop the dispatcher and close the
-            # transport. The post-loop cleanup below drains any pending
-            # requests and fires the disconnect callback. `close` is
-            # idempotent, so this is safe even if the caller also closes.
+            # The input stream looks corrupt — continuing to read it would just
+            # spin. This is an UNEXPECTED loss of the stream, so we tear the
+            # connection down WITHOUT going through the public `close` (which
+            # would mark it as an intentional shutdown): we leave `@user_closed`
+            # false and let the post-loop cleanup drain pending requests and
+            # fire the `on_disconnect` callback.
             ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
-            # Tear the connection down WITHOUT going through the public `close`
-            # (which would mark this as an intentional shutdown). This is an
-            # unexpected loss of the stream, so we leave `@user_closed` false
-            # and let the post-loop cleanup drain pending requests and fire the
-            # `on_disconnect` callback.
             @state = ClientState::Closed
             @dispatcher_running = false
             @transport.close

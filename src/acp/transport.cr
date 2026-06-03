@@ -83,6 +83,10 @@ module ACP
     # The background reader fiber.
     @reader_fiber : Fiber? = nil
 
+    # Maximum size of a single incoming JSON-RPC line, in bytes. Clamped at
+    # construction so the read loop's `@max_line_bytes + 1` cannot overflow.
+    @max_line_bytes : Int32
+
     # Creates a new stdio transport.
     #
     # - `reader` — the IO to read incoming JSON-RPC messages from
@@ -97,8 +101,11 @@ module ACP
       @reader : IO,
       @writer : IO,
       buffer_size : Int32 = 256,
-      @max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
+      max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
     )
+      # Clamp so the read loop's `@max_line_bytes + 1` can never overflow Int32
+      # (and a pathological non-positive value can't disable line reads).
+      @max_line_bytes = max_line_bytes.clamp(1, Int32::MAX - 1)
       @incoming = Channel(JSON::Any?).new(buffer_size)
       start_reader
     end

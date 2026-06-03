@@ -1,7 +1,7 @@
 # Gemini ACP Agent Example
 #
 # This example demonstrates using the Gemini CLI as an ACP agent.
-# It uses the `gemini --experimental-acp` command to start the agent.
+# It uses the `gemini --acp` command to start the agent.
 #
 # Prerequisites:
 #   - Gemini CLI installed (`npm install -g @google/gemini-cli`)

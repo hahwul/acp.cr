@@ -2222,6 +2222,27 @@ describe ACP::Client do
       transport.closed?.should be_true
     end
 
+    it "fires on_disconnect when tearing down after protocol corruption" do
+      transport = FailingSendTransport.new
+      client = ACP::Client.new(transport)
+
+      # A corruption teardown is an UNEXPECTED loss, so on_disconnect must fire
+      # (unlike an intentional close()).
+      disconnected = Channel(Nil).new(1)
+      client.on_disconnect = -> { disconnected.send(nil) rescue nil; nil }
+
+      ACP::Client::MAX_CONSECUTIVE_DISPATCH_ERRORS.times do |i|
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{i + 1},"method":"agent/does_not_exist","params":{}}))
+      end
+
+      select
+      when disconnected.receive
+        # fired as expected
+      when timeout(2.seconds)
+        fail "on_disconnect was not called on protocol-corruption teardown"
+      end
+    end
+
     it "resets the error counter after a successful dispatch" do
       # A transport that fails the first few sends, then succeeds, so the
       # counter never reaches the threshold and the client stays open.
@@ -4696,6 +4717,20 @@ describe "ConfigOption with groups" do
     opt = ACP::Protocol::ConfigOption.new(id: "empty", name: "Empty")
     opt.grouped?.should be_false
     opt.all_values.should be_empty
+  end
+
+  it "raises if constructed with both options and groups" do
+    expect_raises(ArgumentError, /either .options. or .groups./) do
+      ACP::Protocol::ConfigOption.new(
+        id: "model",
+        name: "Model",
+        options: [ACP::Protocol::ConfigOptionValue.new(value: "a", name: "A")],
+        groups: [ACP::Protocol::ConfigOptionGroup.new(
+          group: "g", name: "G",
+          options: [ACP::Protocol::ConfigOptionValue.new(value: "b", name: "B")]
+        )]
+      )
+    end
   end
 end
 
