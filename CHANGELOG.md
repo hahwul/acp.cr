@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.3.0
+
+### Features
+- Add `session/close` and `session/resume` support — `Client#session_close`, `Client#session_resume`, related params/result types, and `SessionCloseCapabilities`/`SessionResumeCapabilities`
+- Add protocol version negotiation — `MIN_PROTOCOL_VERSION` constant and `ACP.supports_protocol_version?` helper, so the client accepts any agent-returned version within the supported range
+- Add Crystal 1.20 support
+
+### Bug Fixes
+- Fix ACP spec-conformance and robustness bugs surfaced by live Gemini agent testing (transport framing, client request handling, and protocol type edge cases)
+- Fix `interactive_client` example capability check
+- Fix dispatch-error handling for malformed protocol frames
+
+### Security
+- Bound incoming line size to prevent unbounded memory growth from malicious or malformed frames
+- Redact sensitive fields in frame logs
+
+### Documentation
+- Simplify README and fix the dependency URL
+
+### CI
+- Standardize CI workflow and align matrix
+- Extend ameba config and clear remaining lint findings
+
 ## v0.2.0
 
 ### Features
