@@ -1,5 +1,7 @@
 module ACP
-  VERSION = "0.1.0"
+  # Keep this in sync with `version:` in shard.yml — it is also advertised to
+  # agents as `clientInfo.version` during the initialize handshake.
+  VERSION = "0.2.0"
 
   # The latest ACP protocol version this client implements. This is the
   # version sent in the `initialize` request.

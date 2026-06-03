@@ -380,20 +380,26 @@ client.on_agent_request = ->(method : String, params : JSON::Any) do
 
       selected = Term.pick("Choose an action:", options)
 
+      # The ACP RequestPermissionResponse `outcome` is a nested object:
+      # {"outcome": {"outcome": "selected", "optionId": "..."}} or
+      # {"outcome": {"outcome": "cancelled"}}. Use the library's typed builders
+      # so the wire shape is correct — agents reject the flat form.
       if selected
-        result_hash = {"outcome" => {"selected" => selected}}
-        JSON.parse(result_hash.to_json)
+        JSON.parse(ACP::Protocol::RequestPermissionResult.selected(selected).to_json)
       else
-        JSON.parse(%({"outcome": "cancelled"}))
+        JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
       end
     rescue ex
       Term.error("Error parsing permission request: #{ex.message}")
-      JSON.parse(%({"outcome": "cancelled"}))
+      JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
     end
   else
     Term.warn("Agent called unknown method: #{method}")
     Term.info("Params: #{params.to_json}")
-    JSON.parse(%({"error": "Method not supported"}))
+    # Raise so the client dispatcher replies with a real JSON-RPC error
+    # response. (Returning a value here is sent verbatim as the RPC *result*,
+    # so returning {"error": ...} would masquerade as a successful result.)
+    raise "Client does not handle method: #{method}"
   end
 end
 

@@ -1424,6 +1424,27 @@ describe ACP::StdioTransport do
     reader_w.close
     transport.close
   end
+
+  it "delivers a line whose length is exactly max_line_bytes (not dropped as oversize)" do
+    reader_r, reader_w = IO.pipe
+    writer_io = IO::Memory.new
+
+    # A valid JSON line; cap the limit at exactly its byte length. The full
+    # logical line is `line.bytesize + 1` bytes including the trailing newline,
+    # so it must still be delivered (the boundary `==` is NOT oversize).
+    line = %({"id":1,"p":"#{"x" * 40}"})
+    transport = ACP::StdioTransport.new(reader_r, writer_io, max_line_bytes: line.bytesize)
+
+    reader_w.puts line
+    reader_w.flush
+
+    msg = transport.receive(500.milliseconds)
+    msg.should_not be_nil
+    msg.as(JSON::Any)["id"].as_i.should eq(1)
+
+    reader_w.close
+    transport.close
+  end
 end
 
 describe TestTransport do
@@ -2201,6 +2222,27 @@ describe ACP::Client do
       transport.closed?.should be_true
     end
 
+    it "fires on_disconnect when tearing down after protocol corruption" do
+      transport = FailingSendTransport.new
+      client = ACP::Client.new(transport)
+
+      # A corruption teardown is an UNEXPECTED loss, so on_disconnect must fire
+      # (unlike an intentional close()).
+      disconnected = Channel(Nil).new(1)
+      client.on_disconnect = -> { disconnected.send(nil) rescue nil; nil }
+
+      ACP::Client::MAX_CONSECUTIVE_DISPATCH_ERRORS.times do |i|
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{i + 1},"method":"agent/does_not_exist","params":{}}))
+      end
+
+      select
+      when disconnected.receive
+        # fired as expected
+      when timeout(2.seconds)
+        fail "on_disconnect was not called on protocol-corruption teardown"
+      end
+    end
+
     it "resets the error counter after a successful dispatch" do
       # A transport that fails the first few sends, then succeeds, so the
       # counter never reaches the threshold and the client stays open.
@@ -2365,7 +2407,9 @@ describe ACP::Client do
 
       response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-2" }
       response.should_not be_nil
-      response.as(JSON::Any)["result"]["outcome"].as_s.should eq("cancelled")
+      # The ACP spec requires the outcome to be a nested RequestPermissionOutcome
+      # object: {"outcome": {"outcome": "cancelled"}}.
+      response.as(JSON::Any)["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
 
       transport.close
     end
@@ -2446,6 +2490,25 @@ describe ACP::Client do
       disconnected.should be_true
 
       transport.close
+    end
+
+    it "does NOT call on_disconnect on an intentional close()" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      disconnected = false
+      client.on_disconnect = -> do
+        disconnected = true
+        nil
+      end
+
+      # An explicit close is not a lost connection; the callback must stay
+      # silent so reconnect/error logic isn't triggered on a clean shutdown.
+      client.close
+
+      sleep 50.milliseconds
+
+      disconnected.should be_false
     end
   end
 
@@ -4509,36 +4572,39 @@ end
 describe ACP::Protocol::ConfigOptionGroup do
   it "creates a group with values" do
     group = ACP::Protocol::ConfigOptionGroup.new(
-      id: "openai",
+      group: "openai",
       name: "OpenAI Models",
       options: [
         ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
         ACP::Protocol::ConfigOptionValue.new(value: "gpt-3.5", name: "GPT-3.5"),
       ]
     )
-    group.id.should eq("openai")
+    group.group.should eq("openai")
+    group.id.should eq("openai") # backward-compatible alias
     group.name.should eq("OpenAI Models")
     group.options.size.should eq(2)
   end
 
-  it "serializes to JSON" do
+  it "serializes to JSON with the spec-required \"group\" key" do
     group = ACP::Protocol::ConfigOptionGroup.new(
-      id: "anthropic",
+      group: "anthropic",
       name: "Anthropic",
       options: [
         ACP::Protocol::ConfigOptionValue.new(value: "claude-4", name: "Claude 4"),
       ]
     )
     json = JSON.parse(group.to_json)
-    json["id"].as_s.should eq("anthropic")
+    json["group"].as_s.should eq("anthropic")
+    json.as_h.has_key?("id").should be_false
     json["name"].as_s.should eq("Anthropic")
     json["options"].as_a.size.should eq(1)
     json["options"][0]["value"].as_s.should eq("claude-4")
   end
 
-  it "deserializes from JSON" do
-    json_str = %({"id": "g1", "name": "Group 1", "options": [{"value": "v1", "name": "Value 1"}]})
+  it "deserializes from JSON using the \"group\" key" do
+    json_str = %({"group": "g1", "name": "Group 1", "options": [{"value": "v1", "name": "Value 1"}]})
     group = ACP::Protocol::ConfigOptionGroup.from_json(json_str)
+    group.group.should eq("g1")
     group.id.should eq("g1")
     group.options.first.value.should eq("v1")
   end
@@ -4565,7 +4631,7 @@ describe "ConfigOption with groups" do
       category: "model",
       groups: [
         ACP::Protocol::ConfigOptionGroup.new(
-          id: "openai",
+          group: "openai",
           name: "OpenAI",
           options: [
             ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
@@ -4573,7 +4639,7 @@ describe "ConfigOption with groups" do
           ]
         ),
         ACP::Protocol::ConfigOptionGroup.new(
-          id: "anthropic",
+          group: "anthropic",
           name: "Anthropic",
           options: [
             ACP::Protocol::ConfigOptionValue.new(value: "claude-4", name: "Claude 4"),
@@ -4587,14 +4653,14 @@ describe "ConfigOption with groups" do
     opt.all_values.map(&.value).should contain("claude-4")
   end
 
-  it "serializes grouped options to JSON" do
+  it "serializes grouped options under the single spec \"options\" key" do
     opt = ACP::Protocol::ConfigOption.new(
       id: "model",
       name: "Model",
       current_value: "gpt-4",
       groups: [
         ACP::Protocol::ConfigOptionGroup.new(
-          id: "openai",
+          group: "openai",
           name: "OpenAI",
           options: [
             ACP::Protocol::ConfigOptionValue.new(value: "gpt-4", name: "GPT-4"),
@@ -4603,13 +4669,16 @@ describe "ConfigOption with groups" do
       ]
     )
     json = JSON.parse(opt.to_json)
-    json["groups"].as_a.size.should eq(1)
-    json["groups"][0]["id"].as_s.should eq("openai")
-    json["groups"][0]["options"][0]["value"].as_s.should eq("gpt-4")
+    # Per the ACP schema, grouped values live inside the single "options" key
+    # (each element is a SessionConfigSelectGroup), NOT a separate "groups" key.
+    json.as_h.has_key?("groups").should be_false
+    json["options"].as_a.size.should eq(1)
+    json["options"][0]["group"].as_s.should eq("openai")
+    json["options"][0]["options"][0]["value"].as_s.should eq("gpt-4")
     json["currentValue"].as_s.should eq("gpt-4")
   end
 
-  it "deserializes grouped options from JSON" do
+  it "deserializes grouped options from the spec \"options\" key" do
     json_str = <<-JSON
       {
         "id": "model",
@@ -4617,9 +4686,9 @@ describe "ConfigOption with groups" do
         "type": "select",
         "category": "model",
         "currentValue": "claude-4",
-        "groups": [
+        "options": [
           {
-            "id": "anthropic",
+            "group": "anthropic",
             "name": "Anthropic",
             "options": [
               {"value": "claude-4", "name": "Claude 4"},
@@ -4627,7 +4696,7 @@ describe "ConfigOption with groups" do
             ]
           },
           {
-            "id": "openai",
+            "group": "openai",
             "name": "OpenAI",
             "options": [
               {"value": "gpt-4", "name": "GPT-4"}
@@ -4638,6 +4707,7 @@ describe "ConfigOption with groups" do
       JSON
     opt = ACP::Protocol::ConfigOption.from_json(json_str)
     opt.grouped?.should be_true
+    opt.groups.as(Array(ACP::Protocol::ConfigOptionGroup)).first.group.should eq("anthropic")
     opt.category.should eq("model")
     opt.current_value.should eq("claude-4")
     opt.all_values.size.should eq(3)
@@ -4647,6 +4717,20 @@ describe "ConfigOption with groups" do
     opt = ACP::Protocol::ConfigOption.new(id: "empty", name: "Empty")
     opt.grouped?.should be_false
     opt.all_values.should be_empty
+  end
+
+  it "raises if constructed with both options and groups" do
+    expect_raises(ArgumentError, /either .options. or .groups./) do
+      ACP::Protocol::ConfigOption.new(
+        id: "model",
+        name: "Model",
+        options: [ACP::Protocol::ConfigOptionValue.new(value: "a", name: "A")],
+        groups: [ACP::Protocol::ConfigOptionGroup.new(
+          group: "g", name: "G",
+          options: [ACP::Protocol::ConfigOptionValue.new(value: "b", name: "B")]
+        )]
+      )
+    end
   end
 end
 
@@ -4661,7 +4745,7 @@ describe "Type aliases" do
   end
 
   it "SessionConfigSelectGroup is alias for ConfigOptionGroup" do
-    group = ACP::Protocol::SessionConfigSelectGroup.new(id: "g1", name: "G1")
+    group = ACP::Protocol::SessionConfigSelectGroup.new(group: "g1", name: "G1")
     group.should be_a(ACP::Protocol::ConfigOptionGroup)
   end
 

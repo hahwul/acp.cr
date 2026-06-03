@@ -76,8 +76,16 @@ module ACP
   # - `env` — optional environment variables for the agent process.
   # - `chdir` — optional working directory for the agent process.
   #
-  # Returns an initialized `ACP::Client` connected to the spawned agent.
-  # The caller is responsible for calling `client.close` when done.
+  # Spawns the agent, wraps it in a `Client`, performs the `initialize`
+  # handshake, and returns the ready-to-use (initialized) client — so callers
+  # can immediately create a session. The caller is responsible for calling
+  # `client.close` when done.
+  #
+  # Raises whatever `Client#initialize_connection` raises if the handshake
+  # fails (e.g. `VersionMismatchError`, `JsonRpcError`). On such a failure the
+  # spawned process is torn down before the error propagates. Callers who need
+  # to register callbacks or authenticate *before* the handshake should build
+  # a `ProcessTransport` + `Client` directly instead of using this shortcut.
   def self.connect(
     command : String,
     args : Array(String) = [] of String,
@@ -94,11 +102,21 @@ module ACP
       chdir: chdir
     )
 
-    Client.new(
+    client = Client.new(
       transport,
       client_name: client_name,
       client_version: client_version,
       client_capabilities: capabilities
     )
+
+    begin
+      client.initialize_connection
+    rescue ex
+      # Don't leak the spawned agent process if the handshake fails.
+      client.close rescue nil
+      raise ex
+    end
+
+    client
   end
 end
