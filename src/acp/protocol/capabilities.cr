@@ -428,8 +428,7 @@ module ACP
     module McpServerParser
       # Parses a JSON::Any value into the appropriate McpServer subtype.
       def self.from_json_any(value : JSON::Any) : McpServer
-        obj = value.as_h
-        transport_type = obj["type"]?.try(&.as_s?)
+        transport_type = value.as_h?.try(&.["type"]?).try(&.as_s?)
 
         case transport_type
         when "http"
@@ -444,7 +443,7 @@ module ACP
 
       # Parses a JSON array of MCP servers.
       def self.array_from_json(value : JSON::Any) : Array(McpServer)
-        value.as_a.map { |item| from_json_any(item) }
+        (value.as_a? || [] of JSON::Any).map { |item| from_json_any(item) }
       end
     end
 

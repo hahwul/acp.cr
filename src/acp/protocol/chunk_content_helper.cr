@@ -13,7 +13,7 @@ module ACP
       # Helper to get the actual text content regardless of wrapping.
       def text : String
         if (h = @content.as_h?) && h["text"]?
-          h["text"].as_s
+          h["text"].as_s? || @content.to_json
         elsif s = @content.as_s?
           s
         else
