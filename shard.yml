@@ -10,7 +10,7 @@ documentation: https://github.com/hahwul/acp.cr#readme
 authors:
   - hahwul <hahwul@gmail.com>
 
-crystal: ">= 1.19.1"
+crystal: ">= 1.21.0"
 
 license: MIT
 
