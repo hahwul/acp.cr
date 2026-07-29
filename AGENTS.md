@@ -4,7 +4,7 @@
 
 **acp.cr** is an unofficial Crystal implementation of the [Agent Client Protocol (ACP)](https://agentclientprotocol.com). It provides a JSON-RPC 2.0 based client library for communicating with AI coding agents over stdio transport.
 
-- **Language**: Crystal (>= 1.19.1)
+- **Language**: Crystal (>= 1.21.0)
 - **License**: MIT
 - **Author**: hahwul
 - **No external dependencies** — uses only the Crystal standard library.

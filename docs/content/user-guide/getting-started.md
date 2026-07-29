@@ -10,7 +10,7 @@ Before using acp.cr, ensure your environment meets these requirements:
 
 | Requirement | Version |
 |-------------|---------|
-| Crystal | >= 1.19.1 |
+| Crystal | >= 1.21.0 |
 | An ACP-compatible agent | e.g., Claude Code, Gemini CLI, Codex |
 
 > acp.cr has zero external dependencies -- it uses only the Crystal standard library.
