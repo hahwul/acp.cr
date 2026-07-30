@@ -158,3 +158,69 @@ describe "ACP::Protocol.extract_id (malformed ids)" do
     transport.close
   end
 end
+
+# ─── R4: omitted collection fields must not fail whole-message parsing ──
+describe "lenient parsing of omitted optional-in-practice fields" do
+  it "parses an initialize result without agentCapabilities" do
+    result = ACP::Protocol::InitializeResult.from_json(%({"protocolVersion": 1}))
+    result.protocol_version.should eq(1_u16)
+    result.agent_capabilities.load_session?.should be_false
+  end
+
+  it "completes the handshake when the agent omits agentCapabilities" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{msg["id"].as_i64},"result":{"protocolVersion":1}}))
+      end
+    end
+
+    result = client.initialize_connection
+    result.protocol_version.should eq(1_u16)
+    client.state.should eq(ACP::ClientState::Initialized)
+
+    transport.close
+  end
+
+  it "parses a session/list result with no sessions key" do
+    ACP::Protocol::SessionListResult.from_json("{}").sessions.should be_empty
+  end
+
+  it "parses a set_config_option result with no configOptions key" do
+    ACP::Protocol::SessionSetConfigOptionResult.from_json("{}").config_options.should be_empty
+  end
+
+  it "parses a mode state with no availableModes key" do
+    state = ACP::Protocol::SessionModeState.from_json(%({"currentModeId": "ask"}))
+    state.available_modes.should be_empty
+  end
+
+  it "parses a plan update with entries missing priority/status" do
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate": "plan", "entries": [{"content": "step one"}]})
+    )
+    plan = update.as(ACP::Protocol::PlanUpdate)
+    plan.entries.size.should eq(1)
+    plan.entries[0].priority.should eq("medium")
+    plan.entries[0].status.should eq("pending")
+  end
+
+  it "parses an available_commands_update with no availableCommands key" do
+    update = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate": "available_commands_update"}))
+    update.as(ACP::Protocol::AvailableCommandsUpdate).available_commands.should be_empty
+  end
+
+  it "parses a config_option_update with no configOptions key" do
+    update = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate": "config_option_update"}))
+    update.as(ACP::Protocol::ConfigOptionUpdate).config_options.should be_empty
+  end
+
+  it "parses a terminal/output result that omits truncated" do
+    result = ACP::Protocol::TerminalOutputResult.from_json(%({"output": "hi"}))
+    result.output.should eq("hi")
+    result.truncated?.should be_false
+  end
+end

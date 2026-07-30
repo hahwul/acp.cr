@@ -349,7 +349,7 @@ module ACP
       # The list of tasks to be accomplished (required).
       # When updating, the agent MUST send a complete list; the client
       # replaces the entire plan with each update.
-      property entries : Array(PlanEntry)
+      property entries : Array(PlanEntry) = [] of PlanEntry
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -372,10 +372,10 @@ module ACP
       property content : String
 
       # The relative importance of this task: "high", "medium", or "low" (required).
-      property priority : String
+      property priority : String = "medium"
 
       # Current execution status: "pending", "in_progress", or "completed" (required).
-      property status : String
+      property status : String = "pending"
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -402,7 +402,7 @@ module ACP
 
       # The commands the agent can execute.
       @[JSON::Field(key: "availableCommands")]
-      property available_commands : Array(AvailableCommand)
+      property available_commands : Array(AvailableCommand) = [] of AvailableCommand
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -494,7 +494,7 @@ module ACP
       # Stored as `Array(JSON::Any)` for wire compatibility; use
       # `typed_config_options` for parsed `ConfigOption` structs.
       @[JSON::Field(key: "configOptions")]
-      property config_options : Array(JSON::Any)
+      property config_options : Array(JSON::Any) = [] of JSON::Any
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]

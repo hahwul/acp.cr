@@ -144,7 +144,7 @@ module ACP
 
       # Capabilities the agent advertises to the client.
       @[JSON::Field(key: "agentCapabilities")]
-      property agent_capabilities : AgentCapabilities
+      property agent_capabilities : AgentCapabilities = AgentCapabilities.new
 
       # Authentication methods the agent supports.
       # If empty or nil, no authentication is required.
@@ -292,7 +292,7 @@ module ACP
 
       # The set of modes that the Agent can operate in.
       @[JSON::Field(key: "availableModes")]
-      property available_modes : Array(SessionMode)
+      property available_modes : Array(SessionMode) = [] of SessionMode
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -614,7 +614,7 @@ module ACP
       include JSON::Serializable
 
       # Collection of sessions (required).
-      property sessions : Array(SessionInfo)
+      property sessions : Array(SessionInfo) = [] of SessionInfo
 
       # Opaque pagination cursor for fetching the next page. Nil if
       # there are no more results.
@@ -929,7 +929,7 @@ module ACP
 
       # The full set of configuration options and their current values (required).
       @[JSON::Field(key: "configOptions")]
-      property config_options : Array(ConfigOption)
+      property config_options : Array(ConfigOption) = [] of ConfigOption
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
