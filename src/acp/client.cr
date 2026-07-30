@@ -1136,12 +1136,8 @@ module ACP
       else
         # Delegate to the generic notification handler.
         # Extension notifications (prefixed with `_`) are also routed here.
-        if handler = @on_notification
-          begin
-            handler.call(method_name, params)
-          rescue ex
-            ClientLog.error { "Error in notification handler: #{ex.message}" }
-          end
+        if @on_notification
+          deliver_raw_notification(method_name, params)
         else
           if Protocol::ExtensionMethod.extension?(method_name)
             ClientLog.debug { "Unhandled extension notification: #{method_name}" }
@@ -1175,19 +1171,37 @@ module ACP
       end
       normalized_params = JSON::Any.new(raw_params)
 
-      if handler = @on_update
-        begin
-          update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
-          handler.call(update_params)
-        rescue ex : JSON::SerializableError
-          ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
-          # Try the raw notification handler as fallback.
-          if fallback = @on_notification
-            fallback.call("session/update", params)
-          end
-        rescue ex
-          ClientLog.error { "Error in update handler: #{ex.message}" }
-        end
+      unless handler = @on_update
+        # No typed handler registered. `session/update` is still a
+        # notification, so hand it to the generic notification handler rather
+        # than dropping it — a client that only registers `on_notification`
+        # would otherwise never see any session updates at all.
+        deliver_raw_notification("session/update", params)
+        return
+      end
+
+      begin
+        update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
+        handler.call(update_params)
+      rescue ex : JSON::SerializableError
+        ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
+        # Try the raw notification handler as fallback.
+        deliver_raw_notification("session/update", params)
+      rescue ex
+        ClientLog.error { "Error in update handler: #{ex.message}" }
+      end
+    end
+
+    # Passes a notification to the generic `on_notification` callback, if one
+    # is registered. Handler errors are logged, never propagated — a throwing
+    # callback must not count against the dispatcher's corruption budget.
+    private def deliver_raw_notification(method_name : String, params : JSON::Any?) : Nil
+      return unless fallback = @on_notification
+
+      begin
+        fallback.call(method_name, params)
+      rescue ex
+        ClientLog.error { "Error in notification handler: #{ex.message}" }
       end
     end
   end
