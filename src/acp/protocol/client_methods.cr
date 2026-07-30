@@ -245,7 +245,7 @@ module ACP
       property output : String
 
       # Whether the output was truncated due to byte limits (required).
-      property? truncated : Bool
+      property? truncated : Bool = false
 
       # Exit status if the command has completed. Nil if still running.
       @[JSON::Field(key: "exitStatus")]
@@ -431,6 +431,8 @@ module ACP
       SESSION_NEW               = "session/new"
       SESSION_LOAD              = "session/load"
       SESSION_LIST              = "session/list"
+      SESSION_RESUME            = "session/resume"
+      SESSION_CLOSE             = "session/close"
       SESSION_PROMPT            = "session/prompt"
       SESSION_CANCEL            = "session/cancel"
       SESSION_SET_MODE          = "session/set_mode"
@@ -439,29 +441,22 @@ module ACP
       # Session update notification (agent → client).
       SESSION_UPDATE = "session/update"
 
+      # Every session-scoped method name, in one place so `known?` and
+      # `session_method?` cannot drift apart as methods are added.
+      SESSION_METHODS = {
+        SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_RESUME,
+        SESSION_CLOSE, SESSION_PROMPT, SESSION_CANCEL, SESSION_SET_MODE,
+        SESSION_SET_CONFIG_OPTION, SESSION_UPDATE,
+      }
+
       # Returns true if the given method name is a known agent method.
       def self.known?(method : String) : Bool
-        case method
-        when INITIALIZE, AUTHENTICATE,
-             SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_PROMPT,
-             SESSION_CANCEL, SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION,
-             SESSION_UPDATE
-          true
-        else
-          false
-        end
+        method == INITIALIZE || method == AUTHENTICATE || session_method?(method)
       end
 
       # Returns true if the given method name is a session method.
       def self.session_method?(method : String) : Bool
-        case method
-        when SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_PROMPT,
-             SESSION_CANCEL, SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION,
-             SESSION_UPDATE
-          true
-        else
-          false
-        end
+        SESSION_METHODS.includes?(method)
       end
     end
 
@@ -488,7 +483,14 @@ module ACP
       end
 
       # Adds the extension prefix to a method name.
+      #
+      # Idempotent: a name that is already prefixed is returned unchanged.
+      # Agent-initiated extension requests are handed to `on_agent_request`
+      # under their full wire name, so echoing that name straight back into
+      # `Client#ext_method` is the natural thing to write — and used to put
+      # `__foo` on the wire, which no agent recognizes.
       def self.add_prefix(method : String) : String
+        return method if extension?(method)
         "#{PREFIX}#{method}"
       end
     end

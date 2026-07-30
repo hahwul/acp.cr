@@ -19,7 +19,7 @@
 #   crystal run examples/interactive_client.cr -- my-agent --mode stdio
 #
 # Environment variables:
-#   ACP_LOG_LEVEL  — set to "debug", "info", "warn", or "error" (default: "info")
+#   ACP_LOG_LEVEL  — set to "debug", "info", "warn", or "error" (default: "warn")
 #   ACP_CWD        — override the working directory for the session (default: Dir.current)
 #   ACP_TIMEOUT    — request timeout in seconds (default: 30, 0 = no timeout)
 #
@@ -48,7 +48,7 @@ log_severity = case LOG_LEVEL.downcase
                when "info"  then ::Log::Severity::Info
                when "warn"  then ::Log::Severity::Warn
                when "error" then ::Log::Severity::Error
-               else              ::Log::Severity::Info
+               else              ::Log::Severity::Warn
                end
 
 ::Log.setup(log_severity, ::Log::IOBackend.new(io: STDERR, formatter: ::Log::ShortFormat))
@@ -237,7 +237,7 @@ if ARGV.empty?
   STDERR.puts "  crystal run examples/interactive_client.cr -- my-agent --mode stdio"
   STDERR.puts ""
   STDERR.puts "Environment variables:"
-  STDERR.puts "  ACP_LOG_LEVEL  debug|info|warn|error (default: info)"
+  STDERR.puts "  ACP_LOG_LEVEL  debug|info|warn|error (default: warn)"
   STDERR.puts "  ACP_CWD        working directory (default: current)"
   STDERR.puts "  ACP_TIMEOUT    request timeout in seconds (default: 30)"
   exit(1)
@@ -442,18 +442,28 @@ rescue ex : Exception
 end
 
 # Step 6: Handle authentication if required.
-if (ir = init_result) && (methods = ir.auth_methods)
-  if methods.size > 0
-    Term.header("Authentication Required")
-    Term.info("Available methods: #{methods.join(", ")}")
+if (ir = init_result) && (raw_methods = ir.auth_methods) && !raw_methods.empty?
+  # Parse leniently: reaching into the raw JSON (`entry.as_h["id"].as_s`)
+  # raises on any agent whose authMethods entry isn't shaped exactly as
+  # expected, killing the client right after a successful handshake.
+  auth_methods = raw_methods.compact_map do |entry|
+    ACP::Protocol::AuthMethod.from_json(entry.to_json) rescue nil
+  end
 
-    method_id = if methods.size == 1
-                  methods[0].as_h["id"].as_s
+  if auth_methods.empty?
+    Term.warn("Agent advertised #{raw_methods.size} authentication method(s) in an unrecognized format; skipping")
+  else
+    if auth_methods.size < raw_methods.size
+      Term.warn("Skipped #{raw_methods.size - auth_methods.size} unrecognized authentication method(s)")
+    end
+
+    Term.header("Authentication Required")
+    Term.info("Available methods: #{auth_methods.map(&.name).join(", ")}")
+
+    method_id = if auth_methods.size == 1
+                  auth_methods[0].id
                 else
-                  options = methods.map do |auth_method|
-                    auth_hash = auth_method.as_h
-                    {id: auth_hash["id"].as_s, label: auth_hash["name"]?.try(&.as_s) || auth_hash["id"].as_s}
-                  end
+                  options = auth_methods.map { |m| {id: m.id, label: m.name} }
                   Term.pick("Select authentication method:", options)
                 end
 
@@ -513,6 +523,35 @@ Term.info("  /cancel  — cancel current operation")
 Term.info("  /quit    — exit")
 Term.info("  CTRL+C   — cancel current prompt or exit")
 STDERR.puts ""
+
+# A single long-lived listener translates CTRL+C into `session/cancel`.
+#
+# Spawning one of these per prompt instead would leak a fiber per turn, and
+# — worse — leave several fibers competing for the one signal. Whichever
+# stale fiber won owned a different `cancel_sent` flag, so the turn the user
+# actually cancelled never learned about it and reported a bogus stop reason.
+cancel_requested = false
+current_session : ACP::Session? = nil
+
+spawn do
+  loop do
+    begin
+      cancel_channel.receive
+    rescue Channel::ClosedError
+      break
+    end
+
+    next unless prompting
+    next if cancel_requested
+
+    if active = current_session
+      cancel_requested = true
+      STDERR.puts ""
+      Term.warn("Cancelling...")
+      active.cancel rescue nil
+    end
+  end
+end
 
 loop do
   input = Term.prompt
@@ -591,30 +630,14 @@ loop do
     next
   end
 
+  current_session = s
+  cancel_requested = false
   prompting = true
-
-  # Spawn a fiber to listen for cancel signals during the prompt.
-  cancel_sent = false
-  _cancel_fiber = spawn do
-    loop do
-      begin
-        cancel_channel.receive
-        unless cancel_sent
-          cancel_sent = true
-          STDERR.puts ""
-          Term.warn("Cancelling...")
-          s.cancel rescue nil
-        end
-      rescue Channel::ClosedError
-        break
-      end
-    end
-  end
 
   begin
     result = s.prompt(input)
 
-    unless cancel_sent
+    unless cancel_requested
       # The update handler already printed the response content.
       # Just show the stop reason if it's interesting.
       case result.stop_reason

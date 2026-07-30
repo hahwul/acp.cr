@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+- Serialize outgoing transport writes — concurrent senders could interleave bytes within a JSON-RPC frame and hand the agent an unparseable line
+- Deliver `session/update` to `on_notification` when no `on_update` handler is registered, instead of dropping every session update
+- Reject JSON-RPC ids that cannot be represented exactly in `Protocol.extract_id` — a fractional id was truncated onto an unrelated pending request, and an out-of-range numeric id raised `OverflowError` inside the dispatcher
+- Accept omitted collection fields when parsing agent messages (`agentCapabilities`, `sessions`, `configOptions`, `availableModes`, `entries`, `availableCommands`, `truncated`, `PlanEntry` priority/status), matching the defaults their constructors already used
+- Add the missing `session/resume` and `session/close` constants to `Protocol::AgentMethod`, and derive `known?`/`session_method?` from a single list
+- Make `ExtensionMethod.add_prefix` idempotent so echoing an agent's extension method name no longer puts `__method` on the wire
+- Forward `max_line_bytes` from `ProcessTransport` to the underlying `StdioTransport`
+- Make `ProcessTransport#wait` safe to call repeatedly and after `close`, instead of racing the internal reaper fiber and raising `Channel::ClosedError`
+- Clear the client's cached active session on every `Session#close` path, so an id-less `session_prompt` raises `NoActiveSessionError` rather than targeting a closed session
+- Percent-encode and decode `file://` URIs in `ResourceLinkContentBlock`, fixing paths containing spaces, `#`, `?`, or `%`
+- Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
+
+### Improvements
+- Add `Client#forget_session` for releasing cached session state locally
+- Add `ProcessTransport#exit_status` for a non-blocking exit status check
+
 ## v0.3.0
 
 ### Features

@@ -30,6 +30,7 @@
 require "json"
 require "log"
 require "./protocol/types"
+require "./protocol/client_methods"
 require "./transport"
 require "./errors"
 
@@ -267,7 +268,7 @@ module ACP
         client_info: @client_info
       )
 
-      raw_result = send_request("initialize", params)
+      raw_result = send_request(Protocol::AgentMethod::INITIALIZE, params)
       result = Protocol::InitializeResult.from_json(raw_result.to_json)
 
       # The handshake is a negotiation: the agent returns the version it will
@@ -311,7 +312,7 @@ module ACP
       ensure_state(ClientState::Initialized, "authenticate")
 
       params = Protocol::AuthenticateParams.new(method_id, credentials)
-      send_request("authenticate", params)
+      send_request(Protocol::AgentMethod::AUTHENTICATE, params)
 
       ClientLog.info { "Authenticated with method: #{method_id}" }
     end
@@ -332,7 +333,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/new")
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers)
-      raw_result = send_request("session/new", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_NEW, params)
       result = Protocol::SessionNewResult.from_json(raw_result.to_json)
 
       @session_id = result.session_id
@@ -360,7 +361,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/load")
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers)
-      raw_result = send_request("session/load", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_LOAD, params)
       result = Protocol::SessionLoadResult.from_json(raw_result.to_json)
 
       @session_id = session_id
@@ -392,7 +393,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/list")
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor)
-      raw_result = send_request("session/list", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_LIST, params)
       Protocol::SessionListResult.from_json(raw_result.to_json)
     end
 
@@ -421,7 +422,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/resume")
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers)
-      raw_result = send_request("session/resume", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_RESUME, params)
       result = Protocol::SessionResumeResult.from_json(raw_result.to_json)
 
       @session_id = session_id
@@ -456,22 +457,41 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionCloseParams.new(sid)
-      raw_result = send_request("session/close", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
       result = Protocol::SessionCloseResult.from_json(raw_result.to_json)
 
       # If we just closed the active session, drop the cached session
       # state so subsequent prompt/cancel calls fail with the correct
       # error instead of silently re-using stale state.
-      if @session_id == sid
-        @session_id = nil
-        @session_modes = nil
-        @session_config_options = nil
-        @state = ClientState::Initialized
-      end
+      forget_session(sid)
 
       ClientLog.info { "Session closed: #{sid}" }
 
       result
+    end
+
+    # Drops the cached state for `session_id` if it is the active session,
+    # returning the client to the Initialized state. Purely local — nothing
+    # is sent to the agent.
+    #
+    # Use this when a session ends by some route other than a successful
+    # `session/close`: the agent doesn't support `session/close`, the caller
+    # skipped the remote call, or the remote call failed. Without it the
+    # client keeps reporting a dead session as active, and a
+    # `session_prompt` / `session_cancel` that omits an explicit ID silently
+    # targets it instead of raising `NoActiveSessionError`.
+    #
+    # Returns true if cached state was actually dropped.
+    def forget_session(session_id : String) : Bool
+      return false unless @session_id == session_id
+
+      @session_id = nil
+      @session_modes = nil
+      @session_config_options = nil
+      # Only step back to Initialized from an active session; never resurrect
+      # a client the caller has already closed.
+      @state = ClientState::Initialized if @state == ClientState::SessionActive
+      true
     end
 
     # Sends a prompt to the agent in the active session.
@@ -496,7 +516,7 @@ module ACP
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
       # Use a longer timeout for prompts since they can take a while.
-      raw_result = send_request("session/prompt", params, timeout: @prompt_timeout)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_PROMPT, params, timeout: @prompt_timeout)
       Protocol::SessionPromptResult.from_json(raw_result.to_json)
     end
 
@@ -523,7 +543,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionCancelParams.new(sid)
-      send_notification("session/cancel", params)
+      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
 
       ClientLog.info { "Sent cancel for session: #{sid}" }
     end
@@ -537,7 +557,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionSetModeParams.new(sid, mode_id)
-      send_request("session/set_mode", params)
+      send_request(Protocol::AgentMethod::SESSION_SET_MODE, params)
 
       ClientLog.info { "Mode set to: #{mode_id}" }
     end
@@ -559,7 +579,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
-      raw_result = send_request("session/set_config_option", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params)
       result = Protocol::SessionSetConfigOptionResult.from_json(raw_result.to_json)
 
       @session_config_options = result.config_options
@@ -958,7 +978,10 @@ module ACP
     # Finds the corresponding channel by ID and sends the response into it.
     private def handle_response(msg : JSON::Any) : Nil
       id = Protocol.extract_id(msg)
-      return unless id
+      unless id
+        ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
+        return
+      end
 
       id_str = id.to_s
 
@@ -987,7 +1010,12 @@ module ACP
     #   3. Method-not-found error
     private def handle_agent_request(msg : JSON::Any) : Nil
       id = Protocol.extract_id(msg)
-      return unless id
+      unless id
+        # We cannot echo an ID we are unable to represent, and a response
+        # carrying the wrong ID is worse than none.
+        ClientLog.warn { "Ignoring agent request with an unusable JSON-RPC id" }
+        return
+      end
 
       method_name = msg["method"]?.try(&.as_s?)
       return unless method_name
@@ -1131,17 +1159,13 @@ module ACP
       ClientLog.debug { "Notification: method=#{method_name}" }
 
       case method_name
-      when "session/update"
+      when Protocol::AgentMethod::SESSION_UPDATE
         handle_session_update(params)
       else
         # Delegate to the generic notification handler.
         # Extension notifications (prefixed with `_`) are also routed here.
-        if handler = @on_notification
-          begin
-            handler.call(method_name, params)
-          rescue ex
-            ClientLog.error { "Error in notification handler: #{ex.message}" }
-          end
+        if @on_notification
+          deliver_raw_notification(method_name, params)
         else
           if Protocol::ExtensionMethod.extension?(method_name)
             ClientLog.debug { "Unhandled extension notification: #{method_name}" }
@@ -1175,19 +1199,37 @@ module ACP
       end
       normalized_params = JSON::Any.new(raw_params)
 
-      if handler = @on_update
-        begin
-          update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
-          handler.call(update_params)
-        rescue ex : JSON::SerializableError
-          ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
-          # Try the raw notification handler as fallback.
-          if fallback = @on_notification
-            fallback.call("session/update", params)
-          end
-        rescue ex
-          ClientLog.error { "Error in update handler: #{ex.message}" }
-        end
+      unless handler = @on_update
+        # No typed handler registered. `session/update` is still a
+        # notification, so hand it to the generic notification handler rather
+        # than dropping it — a client that only registers `on_notification`
+        # would otherwise never see any session updates at all.
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        return
+      end
+
+      begin
+        update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
+        handler.call(update_params)
+      rescue ex : JSON::SerializableError
+        ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
+        # Try the raw notification handler as fallback.
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+      rescue ex
+        ClientLog.error { "Error in update handler: #{ex.message}" }
+      end
+    end
+
+    # Passes a notification to the generic `on_notification` callback, if one
+    # is registered. Handler errors are logged, never propagated — a throwing
+    # callback must not count against the dispatcher's corruption budget.
+    private def deliver_raw_notification(method_name : String, params : JSON::Any?) : Nil
+      return unless fallback = @on_notification
+
+      begin
+        fallback.call(method_name, params)
+      rescue ex
+        ClientLog.error { "Error in notification handler: #{ex.message}" }
       end
     end
   end

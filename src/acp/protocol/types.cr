@@ -76,21 +76,28 @@ module ACP
       end
     end
 
-    # Extract the request ID from a raw JSON message. Returns nil if not present.
-    # Handles both integer and string IDs.
+    # Extract the request ID from a raw JSON message. Returns nil if the ID
+    # is absent, null, or not representable as a JSON-RPC 2.0 ID.
+    #
+    # JSON-RPC 2.0 IDs are strings or numbers (and SHOULD NOT be fractional).
+    # A value we cannot represent exactly — a fractional or out-of-range
+    # number, or a bool/array/object — is reported as nil rather than coerced:
+    # truncating `1.9` to `1` would correlate a response with the wrong
+    # pending request, and stringifying a container produced an ID that could
+    # never match anything.
     def self.extract_id(msg : JSON::Any) : RequestId?
       raw = msg["id"]?
       return unless raw
       case v = raw.raw
-      when Nil    then nil
       when Int64  then v
       when String then v
       when Int32  then v.to_i64
       when Float64
-        # JSON numbers without decimals may parse as float; coerce to Int64.
+        # JSON numbers without decimals may parse as float; coerce to Int64
+        # only when the value is integral and inside Int64's range.
+        return unless v.finite? && v == v.trunc
+        return unless v >= Int64::MIN.to_f64 && v <= Int64::MAX.to_f64
         v.to_i64
-      else
-        raw.to_s
       end
     end
 
@@ -137,7 +144,7 @@ module ACP
 
       # Capabilities the agent advertises to the client.
       @[JSON::Field(key: "agentCapabilities")]
-      property agent_capabilities : AgentCapabilities
+      property agent_capabilities : AgentCapabilities = AgentCapabilities.new
 
       # Authentication methods the agent supports.
       # If empty or nil, no authentication is required.
@@ -285,7 +292,7 @@ module ACP
 
       # The set of modes that the Agent can operate in.
       @[JSON::Field(key: "availableModes")]
-      property available_modes : Array(SessionMode)
+      property available_modes : Array(SessionMode) = [] of SessionMode
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -607,7 +614,7 @@ module ACP
       include JSON::Serializable
 
       # Collection of sessions (required).
-      property sessions : Array(SessionInfo)
+      property sessions : Array(SessionInfo) = [] of SessionInfo
 
       # Opaque pagination cursor for fetching the next page. Nil if
       # there are no more results.
@@ -922,7 +929,7 @@ module ACP
 
       # The full set of configuration options and their current values (required).
       @[JSON::Field(key: "configOptions")]
-      property config_options : Array(ConfigOption)
+      property config_options : Array(ConfigOption) = [] of ConfigOption
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]

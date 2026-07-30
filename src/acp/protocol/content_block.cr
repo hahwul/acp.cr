@@ -22,6 +22,7 @@
 # the correct subtype based on the "type" field.
 
 require "json"
+require "uri"
 
 module ACP
   module Protocol
@@ -363,18 +364,28 @@ module ACP
       end
 
       # Creates a resource link from an absolute file path.
+      #
+      # The path is percent-encoded, so paths containing spaces, `#`, `?`, or
+      # `%` produce a valid URI rather than one a strict parser rejects or
+      # truncates at the first `#`. `path` reverses the encoding.
       def self.from_path(path : String, mime_type : String? = nil) : ResourceLinkContentBlock
-        uri = path.starts_with?("/") ? "file://#{path}" : path
+        uri = path.starts_with?("/") ? "file://#{URI.encode_path(path)}" : path
         name = File.basename(path)
         new(uri: uri, name: name, mime_type: mime_type)
       end
 
-      # Helper to extract the file path from a file:// URI.
+      # Helper to extract the file path from a `file://` URI.
+      #
+      # Percent escapes are decoded, so a URI like `file:///My%20Docs/a.cr`
+      # yields a path that can actually be opened. Returns nil for any other
+      # scheme.
       def path : String?
-        if @uri.starts_with?("file://")
-          @uri.sub("file://", "")
-        end
+        return unless @uri.starts_with?(FILE_URI_PREFIX)
+        URI.decode(@uri[FILE_URI_PREFIX.size..])
       end
+
+      # The scheme prefix recognized by `path` / produced by `from_path`.
+      private FILE_URI_PREFIX = "file://"
     end
 
     # ─── Convenience Constructors ─────────────────────────────────────
