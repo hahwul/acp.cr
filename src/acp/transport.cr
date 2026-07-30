@@ -355,6 +355,13 @@ module ACP
     # Flag to prevent duplicate close/terminate sequences.
     @process_closing : Bool = false
 
+    # Memoized exit status, so the process is reaped exactly once no matter
+    # how many callers (or the internal reaper fiber) ask for it.
+    @exit_status : Process::Status? = nil
+
+    # Guards the single reap of the child process.
+    @wait_mutex : Mutex = Mutex.new
+
     # Spawns an agent process with the given command and arguments,
     # and sets up the stdio transport.
     #
@@ -364,6 +371,8 @@ module ACP
     # - `chdir` — optional working directory for the process.
     # - `stderr` — where to send the agent's stderr (default: STDERR).
     # - `buffer_size` — channel buffer size (default: 256).
+    # - `max_line_bytes` — abort and log a warning if a single incoming
+    #   line exceeds this many bytes. Default 16 MiB.
     def initialize(
       command : String,
       args : Array(String) = [] of String,
@@ -371,6 +380,7 @@ module ACP
       chdir : String? = nil,
       stderr : IO = STDERR,
       buffer_size : Int32 = 256,
+      max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
     )
       @process = Process.new(
         command,
@@ -382,7 +392,7 @@ module ACP
         error: stderr
       )
 
-      super(@process.output, @process.input, buffer_size)
+      super(@process.output, @process.input, buffer_size, max_line_bytes)
     end
 
     # Closes the transport and terminates the agent process if it's
@@ -394,11 +404,7 @@ module ACP
 
       if @process.terminated?
         # Reap the already-terminated process to avoid zombies.
-        begin
-          @process.wait
-        rescue
-          # Already reaped.
-        end
+        wait rescue nil
       else
         # Give the process a moment to exit gracefully, then signal it.
         @process.terminate(graceful: true)
@@ -414,18 +420,43 @@ module ACP
             # Process may have already exited.
           end
           # Reap the process to avoid zombies.
-          begin
-            @process.wait unless @process.terminated?
-          rescue
-            # Process may have already been reaped.
-          end
+          wait rescue nil
         end
       end
     end
 
     # Waits for the agent process to exit and returns its status.
+    #
+    # Safe to call any number of times, from any fiber, and after `close`:
+    # the child is reaped exactly once and every caller gets the same status.
+    # `Process#wait` itself is single-shot — a second call raises
+    # `Channel::ClosedError` — and `close` spawns a reaper fiber that also
+    # waits, so calling this without the memo would raise or not depending on
+    # which fiber won the race.
     def wait : Process::Status
-      @process.wait
+      @wait_mutex.synchronize do
+        if status = @exit_status
+          return status
+        end
+
+        status = begin
+          @process.wait
+        rescue ex : Channel::ClosedError
+          # Something outside this class already reaped the process; we have
+          # no status to report.
+          raise TransportError.new("Agent process was already reaped: #{ex.message}")
+        end
+
+        @exit_status = status
+        status
+      end
+    end
+
+    # Returns the agent process's exit status if it has already been reaped,
+    # or nil if it is still running (or has not been waited on yet). Never
+    # blocks — use `wait` when you want to block until the process exits.
+    def exit_status : Process::Status?
+      @exit_status
     end
 
     # Returns true if the agent process has terminated.

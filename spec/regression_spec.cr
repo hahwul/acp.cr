@@ -286,3 +286,49 @@ describe ACP::Protocol::ExtensionMethod do
     transport.close
   end
 end
+
+# ─── R7: ProcessTransport lifecycle ────────────────────────────────────
+describe "ACP::ProcessTransport lifecycle" do
+  it "forwards max_line_bytes to the underlying stdio transport" do
+    # Emit one line well over the cap, then a small valid one. The oversized
+    # line must be dropped and the reader must re-sync on the next message.
+    cmd = %(printf '{"big":"%0999d"}\\n{"ok":1}\\n' 0)
+    transport = ACP::ProcessTransport.new("sh", ["-c", cmd], max_line_bytes: 64)
+
+    msg = transport.receive
+    msg.should_not be_nil
+    msg.as(JSON::Any)["ok"].as_i.should eq(1)
+
+    transport.close
+  end
+
+  it "returns the same status from repeated waits after close" do
+    transport = ACP::ProcessTransport.new("cat")
+    transport.close
+
+    first = transport.wait
+    second = transport.wait
+    second.should eq(first)
+    transport.exit_status.should eq(first)
+  end
+
+  it "does not raise when wait races the reaper fiber spawned by close" do
+    transport = ACP::ProcessTransport.new("cat")
+    transport.close
+
+    results = Channel(Process::Status | Exception).new(4)
+    4.times do
+      spawn do
+        begin
+          results.send(transport.wait)
+        rescue ex
+          results.send(ex)
+        end
+      end
+    end
+
+    statuses = Array(Process::Status | Exception).new(4) { results.receive }
+    statuses.each(&.should be_a(Process::Status))
+    statuses.uniq.size.should eq(1)
+  end
+end
