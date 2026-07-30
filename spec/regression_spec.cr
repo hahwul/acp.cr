@@ -418,3 +418,41 @@ describe "ACP::Session#close (client state)" do
     transport.close
   end
 end
+
+# ─── R9: file:// URIs must percent-encode / decode ─────────────────────
+describe "ACP::Protocol::ResourceLinkContentBlock file:// URIs" do
+  it "leaves an ordinary path untouched" do
+    block = ACP::Protocol::ResourceLinkContentBlock.from_path("/path/to/file.txt")
+    block.uri.should eq("file:///path/to/file.txt")
+    block.path.should eq("/path/to/file.txt")
+  end
+
+  it "percent-encodes characters that are not URI-safe" do
+    block = ACP::Protocol::ResourceLinkContentBlock.from_path("/My Docs/report #2.md")
+    block.uri.should eq("file:///My%20Docs/report%20%232.md")
+  end
+
+  it "round-trips a path containing spaces, '#', '?' and '%'" do
+    original = "/tmp/a b/c#d?e%f.cr"
+    ACP::Protocol::ResourceLinkContentBlock.from_path(original).path.should eq(original)
+  end
+
+  it "decodes an encoded URI supplied by the agent" do
+    block = ACP::Protocol::ResourceLinkContentBlock.new(
+      uri: "file:///My%20Docs/a.cr", name: "a.cr"
+    )
+    block.path.should eq("/My Docs/a.cr")
+  end
+
+  it "returns nil for a non-file scheme" do
+    block = ACP::Protocol::ResourceLinkContentBlock.new(
+      uri: "https://example.com/a.cr", name: "a.cr"
+    )
+    block.path.should be_nil
+  end
+
+  it "keeps the display name as the raw, unencoded basename" do
+    block = ACP::Protocol::ResourceLinkContentBlock.from_path("/My Docs/report #2.md")
+    block.name.should eq("report #2.md")
+  end
+end
