@@ -1,0 +1,15 @@
+<aside class="docs-sidebar" id="sidebar">
+{% include "partials/brand.html" %}
+  {% for sec in site.sections | sort(attribute="weight") %}{% if sec.name != "" and sec.language == page_language %}
+  <div class="sidebar-section">
+    <div class="sidebar-title">{{ sec.title | e }}</div>
+    <ul class="sidebar-links">
+      <li><a href="{{ base_url }}{{ sec.url }}"{% if sec.url | active_path %} class="active" aria-current="page"{% endif %}>Overview</a></li>
+      {% for p in sec.pages | sort(attribute="path") | sort(attribute="weight") %}{% if not p.is_index %}
+      <li><a href="{{ base_url }}{{ p.url }}"{% if p.url | active_path %} class="active" aria-current="page"{% endif %}>{{ p.title | e }}</a></li>
+      {% endif %}{% endfor %}
+    </ul>
+  </div>
+  {% endif %}{% endfor %}
+</aside>
+<div class="sidebar-scrim"></div>

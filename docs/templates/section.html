@@ -1,60 +1,20 @@
 {% include "header.html" %}
-<header class="docs-header">
-  <a href="{{ base_url }}/" class="logo">acp.cr <span>Documentation</span></a>
-  <nav>
-    <a href="{{ base_url }}/user-guide/">User Guide</a>
-    <a href="{{ base_url }}/api-reference/">API Reference</a>
-  </nav>
-  <div class="header-right">
-    <button class="search-trigger" onclick="openSearch()" title="Search (⌘K)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <span>Search</span>
-      <kbd>⌘K</kbd>
-    </button>
-    <a href="https://github.com/hahwul/acp.cr">GitHub</a>
-  </div>
-</header>
-<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
-  <div class="search-modal">
-    <div class="search-input-wrap">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input type="text" id="searchInput" placeholder="Search documentation..." autocomplete="off">
-      <kbd onclick="closeSearch()">ESC</kbd>
-    </div>
-    <div class="search-results" id="searchResults"></div>
-  </div>
-</div>
+{% include "partials/nav.html" %}
+{% include "partials/search.html" %}
 <div class="docs-container">
-  <aside class="docs-sidebar">
-    <div class="sidebar-section">
-      <div class="sidebar-title">User Guide</div>
-      <ul class="sidebar-links">
-        <li><a href="{{ base_url }}/user-guide/getting-started/">Getting Started</a></li>
-        <li><a href="{{ base_url }}/user-guide/basic-usage/">Basic Usage</a></li>
-        <li><a href="{{ base_url }}/user-guide/streaming/">Streaming</a></li>
-        <li><a href="{{ base_url }}/user-guide/prompt-builder/">Prompt Builder</a></li>
-        <li><a href="{{ base_url }}/user-guide/error-handling/">Error Handling</a></li>
-      </ul>
-    </div>
-    <div class="sidebar-section">
-      <div class="sidebar-title">API Reference</div>
-      <ul class="sidebar-links">
-        <li><a href="{{ base_url }}/api-reference/client/">Client</a></li>
-        <li><a href="{{ base_url }}/api-reference/session/">Session</a></li>
-        <li><a href="{{ base_url }}/api-reference/transport/">Transport</a></li>
-        <li><a href="{{ base_url }}/api-reference/protocol/">Protocol Types</a></li>
-        <li><a href="{{ base_url }}/api-reference/prompt-builder/">PromptBuilder</a></li>
-        <li><a href="{{ base_url }}/api-reference/errors/">Errors</a></li>
-      </ul>
-    </div>
-  </aside>
-  <main class="docs-main">
-    <h1>{{ page.title }}</h1>
+{% include "partials/sidebar.html" %}
+  <main id="main" class="docs-main">
+    {% if page.title is present %}<h1>{{ page.title | e }}</h1>{% endif %}
+    {% if page.description is present %}<p class="lede">{{ page.description | e }}</p>{% endif %}
     {{ content }}
-
-    <h2>In This Section</h2>
-    <ul class="section-list">
-      {{ section.list }}
-    </ul>
+    <h2 class="section-index-title">In This Section</h2>
+    <div class="section-cards">
+      {% for p in section.pages | sort(attribute="path") | sort(attribute="weight") %}{% if not p.is_index %}
+      <a class="section-card" href="{{ base_url }}{{ p.url }}">
+        <span class="section-card-title">{{ p.title | e }}</span>
+        {% if p.description is present %}<span class="section-card-desc">{{ p.description | e }}</span>{% endif %}
+      </a>
+      {% endif %}{% endfor %}
+    </div>
     {{ pagination }}
 {% include "footer.html" %}

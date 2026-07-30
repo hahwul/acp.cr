@@ -190,3 +190,7 @@ emoji = false
 
 [og.auto_image]
 enabled = true
+background = "#101014"
+text_color = "#f2f2f5"
+accent_color = "#6cadff"
+secondary_color = "#a2a2ad"

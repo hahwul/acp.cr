@@ -7,7 +7,7 @@
 
   function loadSearchData(cb) {
     if (searchData) return cb(searchData);
-    var base = document.querySelector('link[rel="stylesheet"]').href;
+    var base = document.querySelector('link[rel="stylesheet"][href*="/css/"]').href;
     var searchUrl = base.substring(0, base.indexOf('/css/')) + '/search.json';
     fetch(searchUrl)
       .then(function (r) { return r.json(); })
@@ -80,7 +80,9 @@
       var titleIdx = item.title.toLowerCase().indexOf(q);
       var contentIdx = item.content.toLowerCase().indexOf(q);
       if (titleIdx !== -1 || contentIdx !== -1) {
-        var score = titleIdx !== -1 ? 100 - titleIdx : contentIdx;
+        // Title matches always outrank content matches; within each group,
+        // an earlier match position scores higher.
+        var score = titleIdx !== -1 ? 1000 - titleIdx : Math.max(1, 500 - contentIdx);
         results.push({ item: item, score: score });
       }
     }
@@ -125,6 +127,7 @@
     input.addEventListener('keydown', function (e) {
       var items = resultsEl.querySelectorAll('.search-result-item');
       var count = items.length;
+      if (count === 0) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         activeIndex = (activeIndex + 1) % count;

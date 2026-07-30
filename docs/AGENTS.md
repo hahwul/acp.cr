@@ -1,219 +1,86 @@
-# AGENTS.md - AI Agent Instructions for Hwaro Site
+# AGENTS.md - AI Agent Instructions for the acp.cr Documentation Site
 
-This document provides instructions for AI agents working on this Hwaro-generated website.
+This document is for AI agents editing the acp.cr documentation site under `docs/`.
 
 ## Project Overview
 
-This is a static website built with [Hwaro](https://github.com/hahwul/hwaro), a fast and lightweight static site generator written in Crystal.
+This is the documentation companion to [acp.cr](https://github.com/hahwul/acp.cr), a Crystal implementation of the Agent Client Protocol (ACP). The site is a static site built with [Hwaro](https://github.com/hahwul/hwaro) (Crinja/Jinja2 templates).
+
+It shares a single canonical design system with the docs sites of the sibling libraries (acp.cr, caido.cr, cvss.cr, cwe.cr, epss.cr, fm.cr, kev.cr, purl.cr, sarif.cr, spdx.cr, vex.cr, zap.cr): `templates/` (except the two slot partials), `static/css/style.css`, `static/js/search.js`, and `static/fonts/` are byte-identical across all of them. If you change one of those files here, port the change to every sibling site.
 
 ## Hwaro Usage
 
-### Installation
-
-**Homebrew:**
-```bash
-brew tap hahwul/hwaro
-brew install hwaro
-```
-
-**From Source (Crystal):**
-```bash
-git clone https://github.com/hahwul/hwaro.git
-cd hwaro
-shards install
-shards build --release --no-debug --production
-# Binary: ./bin/hwaro
-```
-
-### Essential Commands
+Run from inside `docs/`:
 
 | Command | Description |
 |---------|-------------|
-| `hwaro init [DIR]` | Initialize a new site |
-| `hwaro build` | Build the site to `public/` directory |
-| `hwaro serve` | Start development server with live reload |
-| `hwaro version` | Show version information |
-| `hwaro deploy` | Deploy the site (requires configuration) |
-
-### Build & Serve Options
-
-- **Drafts:** `hwaro build --drafts` / `hwaro serve --drafts` (Include content with `draft = true`)
-- **Port:** `hwaro serve -p 8080` (Default: 3000)
-- **Open:** `hwaro serve --open` (Open browser automatically)
-- **Base URL:** `hwaro build --base-url "https://example.com"`
+| `hwaro build` | Build the site to `public/` |
+| `hwaro serve` | Local dev server with live reload (port 3000) |
+| `hwaro doctor` | Sanity-check config and content |
 
 ## Directory Structure
 
 ```
-.
-├── config.toml          # Site configuration
-├── content/             # Markdown content files
-│   ├── _index.md        # Homepage content
-│   ├── about.md         # About page
-│   └── blog/            # Blog section
-│       ├── _index.md    # Blog listing page
-│       └── *.md         # Individual blog posts
-├── templates/           # Jinja2 templates (.html, .j2)
-│   ├── header.html      # Site header partial
-│   ├── footer.html      # Site footer partial
-│   ├── page.html        # Default page template
-│   ├── section.html     # Section listing template
-│   └── 404.html         # Not found page
-└── static/              # Static assets (copied as-is)
+docs/
+├── config.toml            # Site configuration (incl. [og.auto_image] brand colors)
+├── content/               # Markdown content (user-guide/, api-reference/ + index.md)
+├── templates/
+│   ├── header.html        # <head>, no-FOUC theme script, css link
+│   ├── footer.html        # footer, search.js, theme-toggle + mobile-drawer scripts
+│   ├── page.html          # page body + prev/next nav
+│   ├── section.html       # section body + "In This Section" cards
+│   ├── 404.html
+│   ├── taxonomy.html / taxonomy_term.html
+│   ├── partials/
+│   │   ├── nav.html       # top bar: brand, section links, search, theme, GitHub
+│   │   ├── sidebar.html   # DYNAMIC sidebar (loops site.sections, weight-sorted)
+│   │   ├── search.html    # command-K search overlay
+│   │   ├── brand.html     # per-site slot: sidebar logo (empty by default)
+│   │   └── icons.html     # per-site slot: favicons (empty by default)
+│   └── shortcodes/alert.html
+└── static/
+    ├── css/style.css      # design tokens + all component styles
+    ├── js/search.js       # search modal logic
+    └── fonts/             # Geist + Geist Mono (variable woff2, self-hosted)
 ```
 
-## Content Management
+## Design System (do not regress these)
 
-### Creating New Pages
+- **Theming:** every color is a `light-dark()` token in `:root`. The theme toggle pins a scheme via `data-theme` on `<html>`; auto follows the OS. Never hardcode a color in a component rule - add or reuse a token.
+- **Syntax highlighting** is server-side (Tartrazine, hljs-compatible classes) colored by the `--code-*` tokens in `style.css`. Do **not** re-add `{{ highlight_css }}` to `header.html` - the CDN theme would fight the tokens.
+- **Typography:** Geist (sans) and Geist Mono, self-hosted in `static/fonts/`. Do not add webfont CDN links.
+- **Mobile:** the sidebar becomes a drawer behind the hamburger button under 768px. Keep the drawer script in `footer.html` intact.
+- **No new JS dependencies.** The site uses only `static/js/search.js` and the inline scripts in `header.html`/`footer.html`.
 
-Create a new `.md` file in the `content/` directory.
+## Content Guidelines
 
-**Example Front Matter (TOML):**
+### Front matter
+
+TOML front matter delimited by `+++`:
+
 ```toml
 +++
 title = "Page Title"
-date = "2024-01-01"
-draft = false
-tags = ["tag1", "tag2"]
-+++
-
-Your markdown content here.
-```
-
-### Creating Sections
-
-1. Create a directory under `content/` (e.g., `content/projects/`)
-2. Add `_index.md` for the section listing page
-3. Add individual `.md` files for section items
-
-**Section `_index.md` Example:**
-```toml
-+++
-title = "Projects"
-paginate = 10
-pagination_enabled = true
-sort_by = "date"   # "date" | "title" | "weight"
-reverse = false
+description = "Short SEO description (also rendered as the page lede)"
+weight = 1
 +++
 ```
 
-### Front Matter Fields
+- **Always preserve front matter** when editing.
+- `description` renders under the h1 as the page lede and on section cards - keep it one sentence, informative, no trailing period needed.
+- Cross-link generously between pages. **Keep URLs relative** - `{{ base_url }}/...` in templates, `/section/page/` in markdown links.
 
-| Field       | Type     | Description                              |
-|-------------|----------|------------------------------------------|
-| title       | string   | Page title (required)                    |
-| date        | string   | Publication date (YYYY-MM-DD)            |
-| draft       | boolean  | If true, excluded from production build  |
-| description | string   | Page description for SEO                 |
-| image       | string   | Featured image URL for social sharing    |
-| tags        | array    | List of tags                             |
-| categories  | array    | List of categories                       |
-| template    | string   | Custom template name (without extension) |
-| weight      | integer  | Sort order (lower = first)               |
-| slug        | string   | Custom URL slug                          |
-| aliases     | array    | URL redirects to this page               |
+### Adding a new page
 
-### Markdown Features
+1. Create the `.md` under the right section directory with `title`, `description`, and `weight`.
+2. That's it. The sidebar, header nav, section cards, and prev/next links are all generated dynamically from `site.sections` (weight-sorted). **No template edits needed.**
 
-- **Standard Markdown:** Headers, lists, code blocks, etc.
-- **Tables:** Supported.
-- **Footnotes:** Supported.
-- **Raw HTML:** Supported (unless `safe = true` in config).
+### Editing rules
 
-## Template Development
-
-### Template Location
-
-All templates are in the `templates/` directory using Jinja2 syntax (powered by Crinja).
-
-### Key Variables
-
-#### Global Objects
-- `site`: Site configuration and metadata (`site.title`, `site.base_url`).
-- `page`: Current page object (available in page templates).
-- `section`: Current section object (available in section templates).
-
-#### Page Variables
-Variables can be accessed via the `page` object:
-- `{{ page.title }}` - Page title
-- `{{ page.content }}` - Rendered content
-- `{{ page.date }}` - Date object
-- `{{ page.url }}` - Relative URL (e.g., `/blog/post/`)
-- `{{ page.permalink }}` - Absolute URL
-- `{{ page.section }}` - Section name
-- `{{ page.params.custom_field }}` - Access extra front matter fields
-
-### Common Jinja2 Syntax
-
-- **Output:** `{{ variable }}`
-- **Logic:** `{% if condition %}...{% endif %}`
-- **Loops:** `{% for item in items %}...{% endfor %}`
-- **Comments:** `{# comment #}`
-- **Filters:** `{{ value | filter }}`
-
-### Template Inheritance
-
-**Base Template (`templates/base.html`):**
-```jinja
-<!DOCTYPE html>
-<html>
-<head>
-  <title>{% block title %}{{ site.title }}{% endblock %}</title>
-</head>
-<body>
-  {% block content %}{% endblock %}
-</body>
-</html>
-```
-
-**Child Template (`templates/page.html`):**
-```jinja
-{% extends "base.html" %}
-
-{% block title %}{{ page.title }} - {{ site.title }}{% endblock %}
-
-{% block content %}
-  <article>
-    <h1>{{ page.title }}</h1>
-    {{ content }}
-  </article>
-{% endblock %}
-```
-
-### Partials
-
-Include reusable components:
-```jinja
-{% include "header.html" %}
-{% include "footer.html" %}
-```
-
-### Custom Filters
-
-- `{{ date | date("%Y-%m-%d") }}` - Format date
-- `{{ text | truncate_words(50) }}` - Truncate text
-- `{{ text | slugify }}` - Convert to slug
-- `{{ url | absolute_url }}` - Make URL absolute
-- `{{ url | relative_url }}` - Prefix with base_url
-- `{{ html | strip_html }}` - Remove HTML tags
-- `{{ markdown | markdownify }}` - Render markdown
-
-## Styling & Assets
-
-### CSS Location
-- Place CSS files in `static/css/`.
-- Reference in templates: `<link rel="stylesheet" href="{{ base_url }}/css/style.css">`.
-
-### Static Files
-- Any file in `static/` is copied to the root of the output directory.
-- Example: `static/robots.txt` -> `public/robots.txt`.
+- Keep terminology consistent with the library and the upstream protocol: "agent", "client", "session", "capability", "JSON-RPC".
+- Code samples must be valid Crystal that runs against the latest acp.cr - copy from the repo's `examples/` directory when in doubt.
 
 ## Notes for AI Agents
 
-1. **Always preserve front matter** when editing content files.
-2. **Use `hwaro serve`** to preview changes.
-3. **Check `config.toml`** for site-wide settings (e.g., markdown safety, pagination).
-4. **Template Syntax:** Use standard Jinja2 syntax.
-5. **Validate TOML syntax** in config.toml after edits.
-6. **Keep URLs relative** using `{{ base_url }}` prefix where appropriate, or `page.url`.
-7. **Escape user content** with `{{ value | escape }}` when needed.
+1. **Don't invent APIs.** Only document symbols that exist in `src/**`. Verify by grepping the source before adding examples.
+2. **Use `crystal spec`** (from the repo root) to confirm any code sample you add still type-checks semantically.
