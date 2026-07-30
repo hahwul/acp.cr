@@ -224,3 +224,33 @@ describe "lenient parsing of omitted optional-in-practice fields" do
     result.truncated?.should be_false
   end
 end
+
+# ─── R5: AgentMethod must cover every method the client implements ─────
+describe ACP::Protocol::AgentMethod do
+  it "defines constants for session/resume and session/close" do
+    ACP::Protocol::AgentMethod::SESSION_RESUME.should eq("session/resume")
+    ACP::Protocol::AgentMethod::SESSION_CLOSE.should eq("session/close")
+  end
+
+  it "recognizes every method ACP::Client can send" do
+    %w[
+      initialize authenticate
+      session/new session/load session/list session/resume session/close
+      session/prompt session/cancel session/set_mode session/set_config_option
+      session/update
+    ].each do |method|
+      ACP::Protocol::AgentMethod.known?(method).should be_true
+    end
+  end
+
+  it "classifies session/resume and session/close as session methods" do
+    ACP::Protocol::AgentMethod.session_method?("session/resume").should be_true
+    ACP::Protocol::AgentMethod.session_method?("session/close").should be_true
+    ACP::Protocol::AgentMethod.session_method?("initialize").should be_false
+  end
+
+  it "still rejects unknown methods" do
+    ACP::Protocol::AgentMethod.known?("session/bogus").should be_false
+    ACP::Protocol::AgentMethod.known?("fs/read_text_file").should be_false
+  end
+end

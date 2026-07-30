@@ -30,6 +30,7 @@
 require "json"
 require "log"
 require "./protocol/types"
+require "./protocol/client_methods"
 require "./transport"
 require "./errors"
 
@@ -267,7 +268,7 @@ module ACP
         client_info: @client_info
       )
 
-      raw_result = send_request("initialize", params)
+      raw_result = send_request(Protocol::AgentMethod::INITIALIZE, params)
       result = Protocol::InitializeResult.from_json(raw_result.to_json)
 
       # The handshake is a negotiation: the agent returns the version it will
@@ -311,7 +312,7 @@ module ACP
       ensure_state(ClientState::Initialized, "authenticate")
 
       params = Protocol::AuthenticateParams.new(method_id, credentials)
-      send_request("authenticate", params)
+      send_request(Protocol::AgentMethod::AUTHENTICATE, params)
 
       ClientLog.info { "Authenticated with method: #{method_id}" }
     end
@@ -332,7 +333,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/new")
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers)
-      raw_result = send_request("session/new", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_NEW, params)
       result = Protocol::SessionNewResult.from_json(raw_result.to_json)
 
       @session_id = result.session_id
@@ -360,7 +361,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/load")
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers)
-      raw_result = send_request("session/load", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_LOAD, params)
       result = Protocol::SessionLoadResult.from_json(raw_result.to_json)
 
       @session_id = session_id
@@ -392,7 +393,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/list")
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor)
-      raw_result = send_request("session/list", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_LIST, params)
       Protocol::SessionListResult.from_json(raw_result.to_json)
     end
 
@@ -421,7 +422,7 @@ module ACP
       ensure_state(ClientState::Initialized, "session/resume")
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers)
-      raw_result = send_request("session/resume", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_RESUME, params)
       result = Protocol::SessionResumeResult.from_json(raw_result.to_json)
 
       @session_id = session_id
@@ -456,7 +457,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionCloseParams.new(sid)
-      raw_result = send_request("session/close", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
       result = Protocol::SessionCloseResult.from_json(raw_result.to_json)
 
       # If we just closed the active session, drop the cached session
@@ -496,7 +497,7 @@ module ACP
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
       # Use a longer timeout for prompts since they can take a while.
-      raw_result = send_request("session/prompt", params, timeout: @prompt_timeout)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_PROMPT, params, timeout: @prompt_timeout)
       Protocol::SessionPromptResult.from_json(raw_result.to_json)
     end
 
@@ -523,7 +524,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionCancelParams.new(sid)
-      send_notification("session/cancel", params)
+      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
 
       ClientLog.info { "Sent cancel for session: #{sid}" }
     end
@@ -537,7 +538,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionSetModeParams.new(sid, mode_id)
-      send_request("session/set_mode", params)
+      send_request(Protocol::AgentMethod::SESSION_SET_MODE, params)
 
       ClientLog.info { "Mode set to: #{mode_id}" }
     end
@@ -559,7 +560,7 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
-      raw_result = send_request("session/set_config_option", params)
+      raw_result = send_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params)
       result = Protocol::SessionSetConfigOptionResult.from_json(raw_result.to_json)
 
       @session_config_options = result.config_options
@@ -1139,7 +1140,7 @@ module ACP
       ClientLog.debug { "Notification: method=#{method_name}" }
 
       case method_name
-      when "session/update"
+      when Protocol::AgentMethod::SESSION_UPDATE
         handle_session_update(params)
       else
         # Delegate to the generic notification handler.
