@@ -1204,7 +1204,7 @@ module ACP
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
         # would otherwise never see any session updates at all.
-        deliver_raw_notification("session/update", params)
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
         return
       end
 
@@ -1214,7 +1214,7 @@ module ACP
       rescue ex : JSON::SerializableError
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
-        deliver_raw_notification("session/update", params)
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
       end
