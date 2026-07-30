@@ -463,16 +463,35 @@ module ACP
       # If we just closed the active session, drop the cached session
       # state so subsequent prompt/cancel calls fail with the correct
       # error instead of silently re-using stale state.
-      if @session_id == sid
-        @session_id = nil
-        @session_modes = nil
-        @session_config_options = nil
-        @state = ClientState::Initialized
-      end
+      forget_session(sid)
 
       ClientLog.info { "Session closed: #{sid}" }
 
       result
+    end
+
+    # Drops the cached state for `session_id` if it is the active session,
+    # returning the client to the Initialized state. Purely local — nothing
+    # is sent to the agent.
+    #
+    # Use this when a session ends by some route other than a successful
+    # `session/close`: the agent doesn't support `session/close`, the caller
+    # skipped the remote call, or the remote call failed. Without it the
+    # client keeps reporting a dead session as active, and a
+    # `session_prompt` / `session_cancel` that omits an explicit ID silently
+    # targets it instead of raising `NoActiveSessionError`.
+    #
+    # Returns true if cached state was actually dropped.
+    def forget_session(session_id : String) : Bool
+      return false unless @session_id == session_id
+
+      @session_id = nil
+      @session_modes = nil
+      @session_config_options = nil
+      # Only step back to Initialized from an active session; never resurrect
+      # a client the caller has already closed.
+      @state = ClientState::Initialized if @state == ClientState::SessionActive
+      true
     end
 
     # Sends a prompt to the agent in the active session.

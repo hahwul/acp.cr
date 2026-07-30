@@ -332,3 +332,89 @@ describe "ACP::ProcessTransport lifecycle" do
     statuses.uniq.size.should eq(1)
   end
 end
+
+# ─── R8: closing a session must clear the client's active-session state ──
+private def r8_client_with_session : {TestTransport, ACP::Client, ACP::Session}
+  transport = TestTransport.new
+  client = ACP::Client.new(transport)
+
+  spawn do
+    sleep 10.milliseconds
+    if msg = transport.last_sent
+      transport.inject_raw(build_init_response(msg["id"].as_i64))
+    end
+  end
+  client.initialize_connection
+
+  spawn do
+    sleep 10.milliseconds
+    if msg = transport.last_sent
+      transport.inject_raw(
+        %({"jsonrpc":"2.0","id":#{msg["id"].as_i64},"result":{"sessionId":"sess-r8"}})
+      )
+    end
+  end
+  session = ACP::Session.create(client, cwd: "/tmp")
+
+  {transport, client, session}
+end
+
+describe "ACP::Session#close (client state)" do
+  it "clears the client's active session when the agent lacks session/close" do
+    transport, client, session = r8_client_with_session
+
+    client.session_id.should eq("sess-r8")
+    client.session_active?.should be_true
+
+    session.agent_supports_close?.should be_false
+    session.close
+
+    client.session_id.should be_nil
+    client.session_active?.should be_false
+    client.state.should eq(ACP::ClientState::Initialized)
+
+    transport.close
+  end
+
+  it "makes a subsequent id-less prompt raise instead of targeting the dead session" do
+    transport, client, session = r8_client_with_session
+    session.close
+
+    expect_raises(ACP::NoActiveSessionError) do
+      client.session_prompt_text("still there?")
+    end
+
+    transport.close
+  end
+
+  it "clears the cached state when notify_agent is false" do
+    transport, client, session = r8_client_with_session
+    session.close(notify_agent: false)
+
+    client.session_id.should be_nil
+
+    transport.close
+  end
+
+  it "leaves an unrelated active session alone" do
+    transport, client, _session = r8_client_with_session
+
+    other = ACP::Session.new(client, "sess-other")
+    other.close
+
+    client.session_id.should eq("sess-r8")
+    client.session_active?.should be_true
+
+    transport.close
+  end
+
+  it "does not resurrect a closed client" do
+    transport, client, session = r8_client_with_session
+    client.close
+    session.close(notify_agent: false)
+
+    client.state.should eq(ACP::ClientState::Closed)
+
+    transport.close
+  end
+end

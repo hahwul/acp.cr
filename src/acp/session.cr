@@ -258,6 +258,14 @@ module ACP
         end
       end
 
+      # Drop the client's cached pointer at this session on every path.
+      # `Client#session_close` already does so on success, but the other
+      # routes here — agent without the capability, `notify_agent: false`,
+      # or a failed remote close — would otherwise leave the client
+      # reporting this dead session as active, so a `client.session_prompt`
+      # that omits an explicit ID would keep prompting it.
+      @client.forget_session(@id)
+
       @closed = true
     end
 
