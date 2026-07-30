@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Client lifecycle, transport, sessions, and prompting">
+  <title>Basic Usage - acp.cr</title>
+  <script>(function(){try{var t=localStorage.getItem("hwaro-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}})()</script>
+  <meta property="og:title" content="Basic Usage">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/basic-usage/">
+  <meta property="og:description" content="Client lifecycle, transport, sessions, and prompting">
+  <meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-basic-usage.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Basic Usage">
+  <meta name="twitter:description" content="Client lifecycle, transport, sessions, and prompting">
+  <meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-basic-usage.png">
+  <link rel="canonical" href="https://acp.cr.hahwul.com/user-guide/basic-usage/">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  
+  <meta name="apple-mobile-web-app-title" content="acp.cr">
+
+</head>
+<body data-section="user-guide">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="docs-header">
+  <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+  </button>
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav class="header-nav" aria-label="Sections">
+    <a href="https://acp.cr.hahwul.com/user-guide/" class="active">User Guide</a><a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" type="button" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>&#8984;K</kbd>
+    </button>
+    <button class="theme-toggle" type="button" data-mode="auto" aria-label="Theme: auto" title="Theme: auto">
+      <svg class="tt-auto" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.75a6.25 6.25 0 0 1 0 12.5z" fill="currentColor"/></svg>
+      <svg class="tt-light" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 .9v2M8 13.1v2M.9 8h2M13.1 8h2M2.98 2.98l1.42 1.42M11.6 11.6l1.42 1.42M13.02 2.98L11.6 4.4M4.4 11.6l-1.42 1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <svg class="tt-dark" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 9.9A5.8 5.8 0 0 1 6.1 2.6a5.8 5.8 0 1 0 7.3 7.3z" fill="currentColor"/></svg>
+    </button>
+    <a class="gh-link" href="https://github.com/hahwul/acp.cr" aria-label="GitHub repository">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" id="searchInput" aria-label="Search" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+<aside class="docs-sidebar" id="sidebar">
+
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">User Guide</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/user-guide/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/" class="active" aria-current="page">Basic Usage</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      
+    </ul>
+  </div>
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">API Reference</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/api-reference/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      
+    </ul>
+  </div>
+  
+</aside>
+<div class="sidebar-scrim"></div>
+  <main id="main" class="docs-main">
+    <h1>Basic Usage</h1>
+    <p class="lede">Client lifecycle, transport, sessions, and prompting</p>
+    <h2 id="client-lifecycle">Client Lifecycle</h2>
+<p>The <code>ACP::Client</code> follows a state machine pattern:</p>
+<pre><code>Created → Initialized → SessionActive → Closed
+</code></pre>
+<p>Each state transition happens through specific method calls:</p>
+<pre><code class="language-crystal hljs">client <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Client</span>.new(transport, client_name: <span class="hljs-string">&quot;</span><span class="hljs-string">app</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, client_version: <span class="hljs-string">&quot;</span><span class="hljs-string">1.0</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+<span class="hljs-comment"># State: Created</span>
+
+result <span class="hljs-operator">=</span> client.initialize_connection
+<span class="hljs-comment"># State: Initialized</span>
+
+session_result <span class="hljs-operator">=</span> client.session_new(<span class="hljs-variable constant_">Dir</span>.current)
+<span class="hljs-comment"># State: SessionActive</span>
+
+client.close
+<span class="hljs-comment"># State: Closed</span>
+</code></pre>
+<h2 id="transport-options">Transport Options</h2>
+<h3 id="processtransport">ProcessTransport</h3>
+<p>Spawns an agent process and communicates over stdio:</p>
+<pre><code class="language-crystal hljs">transport <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">ProcessTransport</span>.new(
+  <span class="hljs-string">&quot;</span><span class="hljs-string">npx</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>,
+  args: [<span class="hljs-string">&quot;</span><span class="hljs-string">-y</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-string">&quot;</span><span class="hljs-string">@anthropic-ai/claude-code</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-string">&quot;</span><span class="hljs-string">--agent</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>],
+  env: {<span class="hljs-string">&quot;</span><span class="hljs-string">ANTHROPIC_API_KEY</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span> <span class="hljs-operator">=&gt;</span> <span class="hljs-string">&quot;</span><span class="hljs-string">sk-...</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>},
+  chdir: <span class="hljs-variable constant_">Dir</span>.current,
+  stderr: <span class="hljs-variable constant_">STDERR</span>
+)
+</code></pre>
+<p>You can check the process status:</p>
+<pre><code class="language-crystal hljs">transport.terminated?  <span class="hljs-comment"># =&gt; false</span>
+transport.wait         <span class="hljs-comment"># blocks until process exits</span>
+</code></pre>
+<h3 id="stdiotransport">StdioTransport</h3>
+<p>For working with existing IO pairs (e.g., pre-spawned processes):</p>
+<pre><code class="language-crystal hljs">transport <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">StdioTransport</span>.new(
+  reader: io_read,
+  writer: io_write,
+  buffer_size: <span class="hljs-number">256</span>
+)
+</code></pre>
+<h2 id="sessions">Sessions</h2>
+<h3 id="creating-a-new-session">Creating a New Session</h3>
+<pre><code class="language-crystal hljs">session <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Session</span>.create(client, <span class="hljs-variable constant_">Dir</span>.current)
+</code></pre>
+<h3 id="loading-an-existing-session">Loading an Existing Session</h3>
+<pre><code class="language-crystal hljs">session <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Session</span>.load(client, <span class="hljs-string">&quot;</span><span class="hljs-string">session-id-123</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-variable constant_">Dir</span>.current)
+</code></pre>
+<h3 id="sending-prompts">Sending Prompts</h3>
+<p>Simple text prompt:</p>
+<pre><code class="language-crystal hljs">result <span class="hljs-operator">=</span> session.prompt(<span class="hljs-string">&quot;</span><span class="hljs-string">Explain this code</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+</code></pre>
+<p>Multiple text blocks:</p>
+<pre><code class="language-crystal hljs">result <span class="hljs-operator">=</span> session.prompt(<span class="hljs-string">&quot;</span><span class="hljs-string">First context</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-string">&quot;</span><span class="hljs-string">Now do this</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+</code></pre>
+<p>Using the PromptBuilder DSL:</p>
+<pre><code class="language-crystal hljs">result <span class="hljs-operator">=</span> session.prompt <span class="hljs-keyword">do</span> <span class="hljs-operator">|</span>b<span class="hljs-operator">|</span>
+  b.text(<span class="hljs-string">&quot;</span><span class="hljs-string">Review this file</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+  b.resource_link(<span class="hljs-string">&quot;</span><span class="hljs-string">/path/to/file.cr</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-string">&quot;</span><span class="hljs-string">text/x-crystal</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+<span class="hljs-keyword">end</span>
+</code></pre>
+<h3 id="session-modes">Session Modes</h3>
+<p>Switch between available agent modes:</p>
+<pre><code class="language-crystal hljs"><span class="hljs-comment"># List available modes</span>
+session.available_mode_ids  <span class="hljs-comment"># =&gt; [&quot;code&quot;, &quot;plan&quot;, &quot;architect&quot;]</span>
+
+<span class="hljs-comment"># Switch mode</span>
+session.mode <span class="hljs-operator">=</span> <span class="hljs-string">&quot;</span><span class="hljs-string">plan</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>
+</code></pre>
+<h3 id="configuration-options">Configuration Options</h3>
+<pre><code class="language-crystal hljs">session.set_config_option(<span class="hljs-string">&quot;</span><span class="hljs-string">model</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>, <span class="hljs-string">&quot;</span><span class="hljs-string">claude-sonnet</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+</code></pre>
+<h2 id="handling-callbacks">Handling Callbacks</h2>
+<p>Set up handlers on the client to process streaming updates and agent requests:</p>
+<pre><code class="language-crystal hljs">client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">SessionUpdate</span>) {
+  <span class="hljs-keyword">case</span> update
+  <span class="hljs-keyword">when</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">AgentMessageChunkUpdate</span>
+    print update.delta
+  <span class="hljs-keyword">when</span> <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">ToolCallUpdate</span>
+    puts <span class="hljs-string">&quot;</span><span class="hljs-string">Tool: </span><span class="hljs-subst">#{</span>update.tool_name<span class="hljs-subst">}</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>
+  <span class="hljs-keyword">end</span>
+}
+
+client.on_agent_request <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(method : <span class="hljs-variable constant_">String</span>, params : <span class="hljs-variable constant_">JSON</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Any</span>?) {
+  <span class="hljs-comment"># Handle permission requests, fs operations, etc.</span>
+  <span class="hljs-literal">nil</span>
+}
+</code></pre>
+<h3 id="typed-client-method-handlers">Typed Client Method Handlers</h3>
+<p>For specific agent-initiated requests, use typed handlers:</p>
+<pre><code class="language-crystal hljs">client.on_read_text_file <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(params : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">ReadTextFileParams</span>) {
+  content <span class="hljs-operator">=</span> <span class="hljs-variable constant_">File</span>.read(params.path)
+  <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">ReadTextFileResult</span>.new(content: content)
+}
+
+client.on_write_text_file <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(params : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">WriteTextFileParams</span>) {
+  <span class="hljs-variable constant_">File</span>.write(params.path, params.content)
+  <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Protocol</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">WriteTextFileResult</span>.new(success: <span class="hljs-literal">true</span>)
+}
+</code></pre>
+<h2 id="error-handling">Error Handling</h2>
+<p>All errors inherit from <code>ACP::Error</code>. Wrap operations in begin/rescue:</p>
+<pre><code class="language-crystal hljs"><span class="hljs-keyword">begin</span>
+  result <span class="hljs-operator">=</span> session.prompt(<span class="hljs-string">&quot;</span><span class="hljs-string">Do something</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>)
+<span class="hljs-keyword">rescue</span> ex : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">RequestTimeoutError</span>
+  puts <span class="hljs-string">&quot;</span><span class="hljs-string">Timed out: </span><span class="hljs-subst">#{</span>ex.message<span class="hljs-subst">}</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>
+<span class="hljs-keyword">rescue</span> ex : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">ConnectionClosedError</span>
+  puts <span class="hljs-string">&quot;</span><span class="hljs-string">Connection lost</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>
+<span class="hljs-keyword">rescue</span> ex : <span class="hljs-variable constant_">ACP</span><span class="hljs-variable constant_">::</span><span class="hljs-variable constant_">Error</span>
+  puts <span class="hljs-string">&quot;</span><span class="hljs-string">ACP error: </span><span class="hljs-subst">#{</span>ex.message<span class="hljs-subst">}</span><span class="hljs-string">&quot;</span><span class="hljs-string"></span>
+<span class="hljs-keyword">end</span>
+</code></pre>
+<p>See the <a href="/user-guide/error-handling/">Error Handling guide</a> for detailed patterns.</p>
+
+    
+    <nav class="page-nav" aria-label="Adjacent pages">
+      
+      <a class="page-nav-link page-nav-prev" href="https://acp.cr.hahwul.com/user-guide/getting-started/" rel="prev">
+        <span class="page-nav-label">Previous</span>
+        <span class="page-nav-title">Getting Started</span>
+      </a>
+      
+      
+      <a class="page-nav-link page-nav-next" href="https://acp.cr.hahwul.com/user-guide/streaming/" rel="next">
+        <span class="page-nav-label">Next</span>
+        <span class="page-nav-title">Streaming</span>
+      </a>
+      
+    </nav>
+    
+    <div class="docs-footer">
+      <p>acp.cr documentation</p>
+      <div class="docs-footer-links">
+        <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+        <a href="https://github.com/hahwul/hwaro">Built with Hwaro</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+<script>
+(function () {
+  var KEY = "hwaro-theme";
+  var MODES = ["auto", "light", "dark"];
+  var root = document.documentElement;
+  var btn = document.querySelector(".theme-toggle");
+  if (!btn) return;
+  function apply(mode) {
+    if (mode === "auto") {
+      root.removeAttribute("data-theme");
+      try { localStorage.removeItem(KEY); } catch (e) {}
+    } else {
+      root.setAttribute("data-theme", mode);
+      try { localStorage.setItem(KEY, mode); } catch (e) {}
+    }
+    btn.setAttribute("data-mode", mode);
+    btn.setAttribute("aria-label", "Theme: " + mode);
+    btn.title = "Theme: " + mode;
+  }
+  var stored = "auto";
+  try { var t = localStorage.getItem(KEY); if (t === "light" || t === "dark") stored = t; } catch (e) {}
+  btn.addEventListener("click", function () {
+    apply(MODES[(MODES.indexOf(btn.getAttribute("data-mode")) + 1) % MODES.length]);
+  });
+  apply(stored);
+})();
+(function () {
+  var btn = document.querySelector(".nav-toggle");
+  var scrim = document.querySelector(".sidebar-scrim");
+  var sidebar = document.getElementById("sidebar");
+  if (!btn) return;
+  function set(open) {
+    document.body.classList.toggle("nav-open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  btn.addEventListener("click", function () {
+    set(!document.body.classList.contains("nav-open"));
+  });
+  if (scrim) scrim.addEventListener("click", function () { set(false); });
+  if (sidebar) sidebar.addEventListener("click", function (e) {
+    if (e.target.closest("a")) set(false);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") set(false);
+  });
+})();
+</script>
+
+</body>
+</html>

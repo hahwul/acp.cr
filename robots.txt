@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://acp.cr.hahwul.com/sitemap.xml

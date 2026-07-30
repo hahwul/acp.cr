@@ -1,0 +1,27 @@
+# acp.cr
+
+> Crystal implementation of the Agent Client Protocol
+
+This is the documentation for acp.cr, a Crystal implementation of the Agent Client Protocol.
+
+## Pages
+
+- [acp.cr](https://acp.cr.hahwul.com/): Crystal implementation of the Agent Client Protocol
+
+## API Reference
+
+- [Client](https://acp.cr.hahwul.com/api-reference/client/): Core ACP client for protocol communication
+- [Errors](https://acp.cr.hahwul.com/api-reference/errors/): Error types and error codes
+- [PromptBuilder](https://acp.cr.hahwul.com/api-reference/prompt-builder/): DSL for constructing multi-block prompts
+- [Protocol Types](https://acp.cr.hahwul.com/api-reference/protocol/): ACP protocol type definitions and enumerations
+- [Session](https://acp.cr.hahwul.com/api-reference/session/): High-level session wrapper for ACP operations
+- [Transport](https://acp.cr.hahwul.com/api-reference/transport/): Transport layer for ACP communication
+
+## User Guide
+
+- [Basic Usage](https://acp.cr.hahwul.com/user-guide/basic-usage/): Client lifecycle, transport, sessions, and prompting
+- [Error Handling](https://acp.cr.hahwul.com/user-guide/error-handling/): Handling errors and edge cases in acp.cr
+- [Getting Started](https://acp.cr.hahwul.com/user-guide/getting-started/): Installation, prerequisites, and your first acp.cr program
+- [Prompt Builder](https://acp.cr.hahwul.com/user-guide/prompt-builder/): Building rich prompts with the PromptBuilder DSL
+- [Streaming](https://acp.cr.hahwul.com/user-guide/streaming/): Real-time streaming of agent responses and updates
+
