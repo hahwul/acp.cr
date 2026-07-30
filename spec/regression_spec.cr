@@ -254,3 +254,35 @@ describe ACP::Protocol::AgentMethod do
     ACP::Protocol::AgentMethod.known?("fs/read_text_file").should be_false
   end
 end
+
+# ─── R6: extension prefixing must be idempotent ────────────────────────
+describe ACP::Protocol::ExtensionMethod do
+  it "does not double-prefix an already-prefixed method name" do
+    ACP::Protocol::ExtensionMethod.add_prefix("ping").should eq("_ping")
+    ACP::Protocol::ExtensionMethod.add_prefix("_ping").should eq("_ping")
+  end
+
+  it "round-trips a wire name back onto the wire unchanged" do
+    wire = "_vendor/ping"
+    ACP::Protocol::ExtensionMethod.add_prefix(wire).should eq(wire)
+  end
+
+  it "puts a single prefix on the wire when echoing an agent's method name" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    spawn do
+      sleep 10.milliseconds
+      if msg = transport.last_sent
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{msg["id"].as_i64},"result":{}}))
+      end
+    end
+
+    # The name an agent-initiated extension request would arrive under.
+    client.ext_method("_vendor/ping")
+
+    transport.last_sent.not_nil!["method"].as_s.should eq("_vendor/ping")
+
+    transport.close
+  end
+end

@@ -483,7 +483,14 @@ module ACP
       end
 
       # Adds the extension prefix to a method name.
+      #
+      # Idempotent: a name that is already prefixed is returned unchanged.
+      # Agent-initiated extension requests are handed to `on_agent_request`
+      # under their full wire name, so echoing that name straight back into
+      # `Client#ext_method` is the natural thing to write — and used to put
+      # `__foo` on the wire, which no agent recognizes.
       def self.add_prefix(method : String) : String
+        return method if extension?(method)
         "#{PREFIX}#{method}"
       end
     end
