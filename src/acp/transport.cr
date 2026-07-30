@@ -83,6 +83,12 @@ module ACP
     # The background reader fiber.
     @reader_fiber : Fiber? = nil
 
+    # Serializes outgoing writes. A write to a pipe can block (and therefore
+    # yield to another fiber) part-way through a frame; without this lock a
+    # second fiber's `send` would splice its bytes into the middle of the
+    # first frame and hand the agent unparseable JSON.
+    @write_mutex : Mutex = Mutex.new
+
     # Maximum size of a single incoming JSON-RPC line, in bytes. Clamped at
     # construction so the read loop's `@max_line_bytes + 1` cannot overflow.
     @max_line_bytes : Int32
@@ -112,20 +118,35 @@ module ACP
 
     # Sends a JSON-RPC message over the transport. The message is
     # serialized as a single line of JSON followed by a newline.
+    #
+    # The frame is assembled in memory and written under `@write_mutex` so
+    # that concurrent senders (e.g. a caller issuing a request while the
+    # dispatcher fiber replies to an agent-initiated request) can never
+    # interleave their bytes within a line.
     def send(message : Hash(String, JSON::Any)) : Nil
       raise ConnectionClosedError.new if @closed
 
-      json_line = message.to_json
+      # Build the complete frame — payload *and* delimiter — before touching
+      # the IO, so a single write carries a whole line.
+      frame = String.build do |io|
+        message.to_json(io)
+        io << '\n'
+      end
       Log.debug { ">>> #{redact_frame(message)}" }
 
-      begin
-        @writer.print(json_line)
-        @writer.print('\n')
-        @writer.flush
-      rescue ex : IO::Error
-        Log.error { "Write failed: #{ex.message}" }
-        @closed = true
-        raise ConnectionClosedError.new("Failed to write: #{ex.message}")
+      @write_mutex.synchronize do
+        # Re-check under the lock: the transport may have been closed while
+        # we were queued behind another sender.
+        raise ConnectionClosedError.new if @closed
+
+        begin
+          @writer.print(frame)
+          @writer.flush
+        rescue ex : IO::Error
+          Log.error { "Write failed: #{ex.message}" }
+          @closed = true
+          raise ConnectionClosedError.new("Failed to write: #{ex.message}")
+        end
       end
     end
 
