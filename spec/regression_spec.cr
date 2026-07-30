@@ -120,3 +120,41 @@ describe "ACP::Client session/update fallback" do
     transport.close
   end
 end
+
+# ─── R3: extract_id must not coerce unrepresentable JSON-RPC ids ───────
+describe "ACP::Protocol.extract_id (malformed ids)" do
+  it "accepts a float that is exactly integral" do
+    ACP::Protocol.extract_id(JSON.parse(%({"id": 7.0}))).should eq(7_i64)
+  end
+
+  it "rejects a fractional id instead of truncating it onto another request" do
+    ACP::Protocol.extract_id(JSON.parse(%({"id": 1.9}))).should be_nil
+  end
+
+  it "does not raise OverflowError on an out-of-range numeric id" do
+    ACP::Protocol.extract_id(JSON.parse(%({"id": 1e300}))).should be_nil
+  end
+
+  it "rejects a null id" do
+    ACP::Protocol.extract_id(JSON.parse(%({"id": null}))).should be_nil
+  end
+
+  it "rejects container and boolean ids rather than stringifying them" do
+    ACP::Protocol.extract_id(JSON.parse(%({"id": true}))).should be_nil
+    ACP::Protocol.extract_id(JSON.parse(%({"id": [1]}))).should be_nil
+    ACP::Protocol.extract_id(JSON.parse(%({"id": {"a": 1}}))).should be_nil
+  end
+
+  it "does not tear the dispatcher down when the agent sends such ids" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    # More than MAX_CONSECUTIVE_DISPATCH_ERRORS malformed frames.
+    15.times { transport.inject_raw(%({"jsonrpc": "2.0", "id": 1e300, "result": {}})) }
+    sleep 50.milliseconds
+
+    client.closed?.should be_false
+
+    transport.close
+  end
+end

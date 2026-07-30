@@ -958,7 +958,10 @@ module ACP
     # Finds the corresponding channel by ID and sends the response into it.
     private def handle_response(msg : JSON::Any) : Nil
       id = Protocol.extract_id(msg)
-      return unless id
+      unless id
+        ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
+        return
+      end
 
       id_str = id.to_s
 
@@ -987,7 +990,12 @@ module ACP
     #   3. Method-not-found error
     private def handle_agent_request(msg : JSON::Any) : Nil
       id = Protocol.extract_id(msg)
-      return unless id
+      unless id
+        # We cannot echo an ID we are unable to represent, and a response
+        # carrying the wrong ID is worse than none.
+        ClientLog.warn { "Ignoring agent request with an unusable JSON-RPC id" }
+        return
+      end
 
       method_name = msg["method"]?.try(&.as_s?)
       return unless method_name
