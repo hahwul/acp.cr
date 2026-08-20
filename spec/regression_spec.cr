@@ -281,7 +281,7 @@ describe ACP::Protocol::ExtensionMethod do
     # The name an agent-initiated extension request would arrive under.
     client.ext_method("_vendor/ping")
 
-    transport.last_sent.not_nil!["method"].as_s.should eq("_vendor/ping")
+    transport.last_sent.as(JSON::Any)["method"].as_s.should eq("_vendor/ping")
 
     transport.close
   end
@@ -454,5 +454,309 @@ describe "ACP::Protocol::ResourceLinkContentBlock file:// URIs" do
   it "keeps the display name as the raw, unencoded basename" do
     block = ACP::Protocol::ResourceLinkContentBlock.from_path("/My Docs/report #2.md")
     block.name.should eq("report #2.md")
+  end
+end
+
+# ─── R10: non-object JSON-RPC frames must not raise or kill the link ───
+#
+# JSON-RPC 2.0 messages are always objects, and ACP v1 does not use batch
+# (array) requests. Probing a bare array / number / string / bool / null
+# with `JSON::Any#[]?` raises a bare `Exception`, which the dispatcher
+# counted as a corrupt-stream error — ten such frames tore down an
+# otherwise healthy connection.
+describe "ACP::Protocol.classify_message (non-object frames)" do
+  it "classifies a non-object frame instead of raising" do
+    ["[]", "[1,2,3]", "42", %("hello"), "true", "null"].each do |raw|
+      ACP::Protocol.classify_message(JSON.parse(raw))
+        .should eq(ACP::Protocol::MessageKind::Notification)
+    end
+  end
+end
+
+describe "ACP::Protocol.extract_id (non-object frames)" do
+  it "reports no id for a non-object frame instead of raising" do
+    ["[]", "[1,2,3]", "42", %("hello"), "true", "null"].each do |raw|
+      ACP::Protocol.extract_id(JSON.parse(raw)).should be_nil
+    end
+  end
+end
+
+describe "ACP::Client dispatch (non-object frames)" do
+  it "drops non-object frames without tearing down the connection" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    disconnected = false
+    client.on_disconnect = -> { disconnected = true; nil }
+
+    # Twice the dispatcher's consecutive-error budget.
+    (ACP::Client::MAX_CONSECUTIVE_DISPATCH_ERRORS * 2).times do
+      transport.inject_raw("[]")
+    end
+
+    sleep 100.milliseconds
+
+    client.closed?.should be_false
+    disconnected.should be_false
+    transport.closed?.should be_false
+
+    # The link is still usable for a real message.
+    seen = 0
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { seen += 1; nil }
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_ping","params":{}}))
+    sleep 50.milliseconds
+    seen.should eq(1)
+
+    client.close
+  end
+end
+
+# ─── R11: malformed agent results must raise an ACP error ──────────────
+#
+# JSON-RPC 2.0 §5 requires exactly one of `result` / `error`. A result
+# that is missing, or that does not match the ACP schema, used to escape
+# public `Client` methods as a raw `JSON::SerializableError`, breaking the
+# contract that everything the library raises is an `ACP::Error`.
+describe "ACP::Client typed result decoding" do
+  it "raises ProtocolError when the agent result has the wrong field type" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+
+    spawn do
+      sleep 10.milliseconds
+      transport.inject_raw(%({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"one"}}))
+    end
+
+    ex = expect_raises(ACP::ProtocolError, /malformed result for 'initialize'/) do
+      client.initialize_connection
+    end
+    ex.cause.should be_a(JSON::SerializableError)
+
+    client.close
+  end
+
+  it "raises ProtocolError when the response carries neither result nor error" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+
+    spawn do
+      sleep 10.milliseconds
+      transport.inject_raw(%({"jsonrpc":"2.0","id":1}))
+    end
+
+    expect_raises(ACP::ProtocolError, /malformed result for 'initialize'/) do
+      client.initialize_connection
+    end
+
+    client.close
+  end
+
+  it "raises ProtocolError when session/new omits the sessionId" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+
+    spawn do
+      sleep 10.milliseconds
+      transport.inject_raw(build_init_response(1_i64))
+      sleep 10.milliseconds
+      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"result":{}}))
+    end
+
+    client.initialize_connection
+
+    expect_raises(ACP::ProtocolError, /malformed result for 'session\/new'/) do
+      client.session_new("/tmp")
+    end
+
+    client.close
+  end
+end
+
+# ─── R12: an on_update handler must not be mistaken for a parse failure ──
+#
+# Parsing and invoking used to share one `begin`, so a
+# `JSON::SerializableError` raised by user code inside `on_update` was
+# read as "the update failed to parse" and the same notification was
+# delivered to `on_notification` a second time.
+describe "ACP::Client session/update handler errors" do
+  it "does not re-deliver an update when the handler raises a JSON error" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    raw_calls = 0
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { raw_calls += 1; nil }
+    client.on_update = ->(_u : ACP::Protocol::SessionUpdateParams) do
+      raise JSON::SerializableError.new("handler boom", "Whatever", nil, 1, 1, nil)
+    end
+
+    transport.inject_raw(<<-JSON
+      {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess-r12",
+        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}
+      }
+      }
+      JSON
+    )
+
+    sleep 50.milliseconds
+
+    raw_calls.should eq(0)
+    client.closed?.should be_false
+
+    client.close
+  end
+
+  it "still falls back to on_notification when the update itself is unparseable" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    raw_calls = 0
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { raw_calls += 1; nil }
+    client.on_update = ->(_u : ACP::Protocol::SessionUpdateParams) { nil }
+
+    transport.inject_raw(<<-JSON
+      {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {"sessionId": "sess-r12b", "update": {"sessionUpdate": "no_such_kind"}}
+      }
+      JSON
+    )
+
+    sleep 50.milliseconds
+    raw_calls.should eq(1)
+
+    client.close
+  end
+end
+
+# ─── R13: unusable session/update params must not be dropped silently ──
+describe "ACP::Client session/update with unusable params" do
+  it "hands non-object params to on_notification" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    raw_calls = 0
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { raw_calls += 1; nil }
+    client.on_update = ->(_u : ACP::Protocol::SessionUpdateParams) { nil }
+
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":"not-an-object"}))
+    sleep 50.milliseconds
+    raw_calls.should eq(1)
+
+    client.close
+  end
+
+  it "hands a non-object update payload to on_notification" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    raw_calls = 0
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { raw_calls += 1; nil }
+    client.on_update = ->(_u : ACP::Protocol::SessionUpdateParams) { nil }
+
+    transport.inject_raw(
+      %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":"nope"}})
+    )
+    sleep 50.milliseconds
+    raw_calls.should eq(1)
+
+    client.close
+  end
+end
+
+# ─── R14: JSON-RPC error responses may carry a `data` member ───────────
+describe "ACP::Client#respond_to_agent_error" do
+  it "omits `data` when none is given" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    client.respond_to_agent_error(1_i64, ACP::JsonRpcError::INVALID_PARAMS, "bad")
+
+    error = transport.last_sent.as(JSON::Any)["error"]
+    error["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    error["message"].as_s.should eq("bad")
+    error.as_h.has_key?("data").should be_false
+
+    client.close
+  end
+
+  it "attaches structured `data` when given (JSON-RPC 2.0 §5.1)" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    client.respond_to_agent_error(
+      "req-1", ACP::JsonRpcError::INVALID_PARAMS, "bad",
+      JSON.parse(%({"field":"path"}))
+    )
+
+    sent = transport.last_sent.as(JSON::Any)
+    # The string id must be echoed back as a string, not coerced to a number.
+    sent["id"].as_s.should eq("req-1")
+    sent["error"]["data"]["field"].as_s.should eq("path")
+
+    client.close
+  end
+end
+
+# ─── R15: ACP v1 wire values the library did not know ──────────────────
+describe "ACP v1 wire coverage" do
+  it "parses the `usage_update` session update" do
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.42,"currency":"USD"}})
+    )
+    usage = update.as(ACP::Protocol::UsageUpdate)
+    usage.used.should eq(1200_i64)
+    usage.size.should eq(200_000_i64)
+    usage.cost.try(&.amount).should eq(0.42)
+    usage.cost.try(&.currency).should eq("USD")
+    usage.usage_ratio.should be_close(0.006, 1e-9)
+  end
+
+  it "reports a zero usage ratio rather than dividing by zero" do
+    ACP::Protocol::UsageUpdate.new(used: 0_i64, size: 0_i64).usage_ratio.should eq(0.0)
+  end
+
+  it "parses `usage_update` without a cost" do
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"usage_update","used":10,"size":100})
+    )
+    update.as(ACP::Protocol::UsageUpdate).cost.should be_nil
+  end
+
+  it "keeps `messageId` on streamed message chunks" do
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":"hi"}})
+    )
+    chunk = update.as(ACP::Protocol::AgentMessageChunkUpdate)
+    chunk.message_id.should eq("m1")
+    JSON.parse(chunk.to_json)["messageId"].as_s.should eq("m1")
+  end
+
+  it "leaves `messageId` out of the wire form when unset" do
+    chunk = ACP::Protocol::AgentMessageChunkUpdate.new(JSON.parse(%({"type":"text","text":"hi"})))
+    JSON.parse(chunk.to_json).as_h.has_key?("messageId").should be_false
+  end
+
+  it "knows the `model_config` session config option category" do
+    ACP::Protocol::SessionConfigOptionCategory.parse("model_config")
+      .should eq(ACP::Protocol::SessionConfigOptionCategory::ModelConfig)
+    ACP::Protocol::SessionConfigOptionCategory::ModelConfig.to_s.should eq("model_config")
+  end
+
+  it "knows the -32800 request-cancelled error code" do
+    ACP::JsonRpcError::REQUEST_CANCELLED.should eq(-32800)
+    ACP::Protocol::ErrorCode::REQUEST_CANCELLED.should eq(-32800)
+
+    error = ACP::JsonRpcError.new(-32800, "cancelled")
+    error.request_cancelled?.should be_true
+    error.server_error?.should be_false
+    ACP::JsonRpcError.new(-32000, "auth").request_cancelled?.should be_false
   end
 end

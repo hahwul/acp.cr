@@ -118,6 +118,7 @@ module ACP
         "config_option_update"      => ConfigOptionUpdate,
         "config_options_update"     => ConfigOptionUpdate,
         "session_info_update"       => SessionInfoUpdate,
+        "usage_update"              => UsageUpdate,
         # ── Non-Standard / Backward Compatibility ──
         "agent_message_start" => AgentMessageStartUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
@@ -154,11 +155,19 @@ module ACP
       # with agents that may send varying formats.
       property content : JSON::Any
 
+      # Optional ID correlating every chunk of the same logical message.
+      @[JSON::Field(key: "messageId")]
+      property message_id : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
-      def initialize(@content : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(
+        @content : JSON::Any,
+        @message_id : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
         @session_update = "user_message_chunk"
       end
 
@@ -176,11 +185,19 @@ module ACP
       # with agents that may send varying formats.
       property content : JSON::Any
 
+      # Optional ID correlating every chunk of the same logical message.
+      @[JSON::Field(key: "messageId")]
+      property message_id : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
-      def initialize(@content : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(
+        @content : JSON::Any,
+        @message_id : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
         @session_update = "agent_message_chunk"
       end
 
@@ -198,11 +215,19 @@ module ACP
       # with agents that may send varying formats.
       property content : JSON::Any
 
+      # Optional ID correlating every chunk of the same logical message.
+      @[JSON::Field(key: "messageId")]
+      property message_id : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
-      def initialize(@content : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(
+        @content : JSON::Any,
+        @message_id : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
         @session_update = "agent_thought_chunk"
       end
 
@@ -543,6 +568,68 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "session_info_update"
+      end
+    end
+
+    # ─── Usage Update ────────────────────────────────────────────────
+
+    # The monetary cost accrued by a session so far.
+    # See: https://agentclientprotocol.com/protocol/schema
+    struct Cost
+      include JSON::Serializable
+
+      # The amount spent, in `currency` units (required).
+      property amount : Float64
+
+      # The currency the amount is denominated in (required).
+      property currency : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @amount : Float64,
+        @currency : String,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Notification that the session's context-window usage has changed.
+    # Agents send this so clients can show how much of the window is
+    # consumed, and optionally what the turn has cost.
+    # See: https://agentclientprotocol.com/protocol/schema
+    struct UsageUpdate < SessionUpdate
+      include JSON::Serializable
+
+      # How much of the context window is currently in use (required).
+      property used : Int64
+
+      # The total size of the context window (required).
+      property size : Int64
+
+      # The cost accrued so far, if the agent reports one.
+      property cost : Cost?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @used : Int64,
+        @size : Int64,
+        @cost : Cost? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+        @session_update = "usage_update"
+      end
+
+      # The fraction of the context window in use, in `0.0..1.0`.
+      # Returns 0.0 when `size` is zero so callers never divide by zero.
+      def usage_ratio : Float64
+        return 0.0 if @size <= 0
+        @used.to_f / @size.to_f
       end
     end
 

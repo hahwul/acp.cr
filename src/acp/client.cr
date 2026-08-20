@@ -220,11 +220,6 @@ module ACP
     # counter resets to zero after any successful dispatch.
     MAX_CONSECUTIVE_DISPATCH_ERRORS = 10
 
-    # Channel used to signal the dispatcher to stop.
-    # Buffered with capacity 1 so that `close` never blocks if
-    # nobody is receiving from this channel.
-    @stop_channel : Channel(Nil) = Channel(Nil).new(1)
-
     # Set when the caller invokes `close` explicitly. Used so the dispatcher
     # does NOT fire the `on_disconnect` ("connection lost") callback on an
     # intentional shutdown — that callback is reserved for unexpected loss
@@ -269,7 +264,7 @@ module ACP
       )
 
       raw_result = send_request(Protocol::AgentMethod::INITIALIZE, params)
-      result = Protocol::InitializeResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::InitializeResult, raw_result, Protocol::AgentMethod::INITIALIZE)
 
       # The handshake is a negotiation: the agent returns the version it will
       # use, which may be lower than we requested. Accept any version we still
@@ -334,7 +329,7 @@ module ACP
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers)
       raw_result = send_request(Protocol::AgentMethod::SESSION_NEW, params)
-      result = Protocol::SessionNewResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::SessionNewResult, raw_result, Protocol::AgentMethod::SESSION_NEW)
 
       @session_id = result.session_id
       @session_modes = result.modes
@@ -362,7 +357,7 @@ module ACP
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers)
       raw_result = send_request(Protocol::AgentMethod::SESSION_LOAD, params)
-      result = Protocol::SessionLoadResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::SessionLoadResult, raw_result, Protocol::AgentMethod::SESSION_LOAD)
 
       @session_id = session_id
       @session_modes = result.modes
@@ -394,7 +389,7 @@ module ACP
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor)
       raw_result = send_request(Protocol::AgentMethod::SESSION_LIST, params)
-      Protocol::SessionListResult.from_json(raw_result.to_json)
+      decode_result(Protocol::SessionListResult, raw_result, Protocol::AgentMethod::SESSION_LIST)
     end
 
     # Resumes an existing session by ID without replaying conversation history.
@@ -423,7 +418,7 @@ module ACP
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers)
       raw_result = send_request(Protocol::AgentMethod::SESSION_RESUME, params)
-      result = Protocol::SessionResumeResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::SessionResumeResult, raw_result, Protocol::AgentMethod::SESSION_RESUME)
 
       @session_id = session_id
       @session_modes = result.modes
@@ -458,7 +453,7 @@ module ACP
 
       params = Protocol::SessionCloseParams.new(sid)
       raw_result = send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
-      result = Protocol::SessionCloseResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::SessionCloseResult, raw_result, Protocol::AgentMethod::SESSION_CLOSE)
 
       # If we just closed the active session, drop the cached session
       # state so subsequent prompt/cancel calls fail with the correct
@@ -517,7 +512,7 @@ module ACP
 
       # Use a longer timeout for prompts since they can take a while.
       raw_result = send_request(Protocol::AgentMethod::SESSION_PROMPT, params, timeout: @prompt_timeout)
-      Protocol::SessionPromptResult.from_json(raw_result.to_json)
+      decode_result(Protocol::SessionPromptResult, raw_result, Protocol::AgentMethod::SESSION_PROMPT)
     end
 
     # Convenience: sends a simple text prompt.
@@ -580,7 +575,7 @@ module ACP
 
       params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
       raw_result = send_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params)
-      result = Protocol::SessionSetConfigOptionResult.from_json(raw_result.to_json)
+      result = decode_result(Protocol::SessionSetConfigOptionResult, raw_result, Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION)
 
       @session_config_options = result.config_options
 
@@ -637,14 +632,9 @@ module ACP
       # Cancel all pending requests with a proper JSON-RPC error object.
       drain_pending_requests("Client closed")
 
-      # Stop the dispatcher.
-      begin
-        @stop_channel.send(nil)
-      rescue Channel::ClosedError
-        # Already stopped.
-      end
-
-      # Close the transport.
+      # Close the transport. This is also what stops the dispatcher: the
+      # transport's `receive` returns nil once it is closed, which breaks
+      # the dispatcher loop.
       @transport.close
 
       @dispatcher_running = false
@@ -744,14 +734,17 @@ module ACP
     # - `id` — the request ID from the agent's request.
     # - `code` — the JSON-RPC error code.
     # - `error_message` — human-readable error description.
+    # - `data` — optional structured value carrying additional information
+    #   about the error (JSON-RPC 2.0 §5.1). Omitted from the wire when nil.
     def respond_to_agent_error(
       id : Protocol::RequestId,
       code : Int32,
       error_message : String,
+      data : JSON::Any? = nil,
     ) : Nil
       raise ConnectionClosedError.new if closed?
 
-      message = Protocol.build_error_response(id, code, error_message)
+      message = Protocol.build_error_response(id, code, error_message, data)
       @transport.send(message)
 
       ClientLog.debug { "Sent error response to agent request id=#{id} code=#{code}" }
@@ -835,6 +828,25 @@ module ACP
       raw_response["result"]? || JSON::Any.new(nil)
     end
 
+    # Deserializes an agent `result` payload into the expected protocol type.
+    #
+    # A misbehaving agent can return a result that does not match the ACP
+    # schema — a missing `sessionId`, a number where a string belongs, or no
+    # `result` member at all (JSON-RPC 2.0 §5 requires exactly one of
+    # `result` / `error`). `JSON::Serializable` signals that with a
+    # `JSON::SerializableError`, which would otherwise escape a public
+    # `Client` method and break the library's contract that everything it
+    # raises is an `ACP::Error`. Translate it into `ProtocolError`, keeping
+    # the original as the cause.
+    private def decode_result(type : T.class, raw : JSON::Any, method : String) : T forall T
+      T.from_json(raw.to_json)
+    rescue ex : JSON::ParseException
+      raise ProtocolError.new(
+        "Agent returned a malformed result for '#{method}': #{ex.message}",
+        ex
+      )
+    end
+
     # Sends a JSON-RPC error to all pending request channels and clears
     # the pending map. Used during close and disconnect to unblock callers.
     private def drain_pending_requests(message : String) : Nil
@@ -916,7 +928,6 @@ module ACP
         break unless @dispatcher_running
         break if @transport.closed?
 
-        # Use select to also listen for the stop signal.
         msg = @transport.receive
         break if msg.nil?
 
@@ -962,6 +973,17 @@ module ACP
 
     # Routes a single incoming message to the appropriate handler.
     private def dispatch_message(msg : JSON::Any) : Nil
+      # Every JSON-RPC 2.0 message is an object. ACP does not use batch
+      # (array) requests, so a top-level array — or a bare number, string,
+      # bool, or null — is not routable. Drop it with a warning: probing it
+      # for "id"/"method" would raise, and a run of such frames would burn
+      # through the dispatcher's corruption budget and tear down an
+      # otherwise healthy connection.
+      unless msg.as_h?
+        ClientLog.warn { "Ignoring non-object JSON-RPC frame" }
+        return
+      end
+
       kind = Protocol.classify_message(msg)
 
       case kind
@@ -1181,16 +1203,28 @@ module ACP
     private def handle_session_update(params : JSON::Any?) : Nil
       return unless params
 
+      # Params that aren't a usable object can't be typed, but they are still
+      # a notification the agent sent us: hand them to `on_notification`
+      # rather than dropping them on the floor.
+      raw_h = params.as_h?
+      unless raw_h
+        ClientLog.warn { "session/update params are not an object" }
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        return
+      end
+
       # Compatibility: Ensure 'sessionUpdate' is present for discriminator.
       # The ACP spec uses "sessionUpdate" as the discriminator field.
       # Some legacy agents may send "type" instead, so we normalize
       # "type" → "sessionUpdate" for backward compatibility.
-      raw_h = params.as_h?
-      return unless raw_h
       raw_params = raw_h.dup
       if update = raw_params["update"]?
         update_h = update.as_h?
-        return unless update_h
+        unless update_h
+          ClientLog.warn { "session/update `update` payload is not an object" }
+          deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+          return
+        end
         update_h = update_h.dup
         if !update_h.has_key?("sessionUpdate") && update_h.has_key?("type")
           update_h["sessionUpdate"] = update_h["type"]
@@ -1208,13 +1242,22 @@ module ACP
         return
       end
 
-      begin
-        update_params = Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
-        handler.call(update_params)
-      rescue ex : JSON::SerializableError
+      # Parse and invoke in separate steps. Folding them into one `begin`
+      # would let a `JSON::SerializableError` raised by the *handler* (user
+      # code deserializing something of its own) be mistaken for a failure to
+      # parse the update, re-delivering the same notification to
+      # `on_notification` a second time.
+      update_params = begin
+        Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
+      rescue ex : JSON::ParseException
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
         deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        return
+      end
+
+      begin
+        handler.call(update_params)
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
       end

@@ -329,8 +329,14 @@ module ACP
       self
     end
 
-    # Adds a resource link content block from a file path.
-    def resource_link(path : String, mime_type : String? = nil) : self
+    # Adds a resource link content block from a file path, converting it
+    # to a `file://` URI and using the basename as the display name.
+    #
+    # NOTE: pass `mime_type` by name. A two-positional-argument call such as
+    # `resource_link("/a/b.cr", "text/plain")` resolves to the
+    # `(uri, name, mime_type)` overload below, which would take
+    # `"text/plain"` as the resource *name*.
+    def resource_link(path : String, *, mime_type : String? = nil) : self
       @blocks << Protocol::ResourceLinkContentBlock.from_path(path, mime_type)
       self
     end

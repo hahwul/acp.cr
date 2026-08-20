@@ -69,6 +69,10 @@ module ACP
     SERVER_ERROR_START = -32099
     SERVER_ERROR_END   = -32000
 
+    # The peer stopped processing a request because it was cancelled.
+    # Part of the JSON-RPC implementation-defined range reserved by ACP.
+    REQUEST_CANCELLED = -32800
+
     # ACP-specific error codes (reserved range -32000 to -32099).
     # See: https://agentclientprotocol.com/protocol/schema#errorcode
 
@@ -116,6 +120,11 @@ module ACP
     # Returns true if the error code falls in the server-defined range.
     def server_error? : Bool
       @code >= SERVER_ERROR_START && @code <= SERVER_ERROR_END
+    end
+
+    # Returns true if the peer reported the request as cancelled.
+    def request_cancelled? : Bool
+      @code == REQUEST_CANCELLED
     end
 
     # Returns true if this is an ACP authentication-required error.
