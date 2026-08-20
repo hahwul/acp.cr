@@ -31,11 +31,17 @@ src/
 examples/
 ├── simple_client.cr                # Minimal usage example
 ├── content_blocks.cr               # Rich prompts with multiple content types
+├── claude_code_agent.cr            # Using Claude Code as an ACP agent
 ├── gemini_agent.cr                 # Using Gemini CLI as an ACP agent
+├── codex_agent.cr                  # Using Codex via its ACP adapter
+├── copilot_agent.cr                # Using GitHub Copilot CLI as an ACP agent
 └── interactive_client.cr           # Full interactive CLI client (build target)
 spec/
 ├── spec_helper.cr
-└── acp_spec.cr                     # Comprehensive test suite with TestTransport mock
+├── acp_spec.cr                     # Main test suite with the TestTransport mock
+├── regression_spec.cr              # One section per fixed bug
+├── stability_hardening_spec.cr     # Malformed-input hardening
+└── process_transport_spec.cr       # ProcessTransport against a real child process
 ```
 
 ## Build and Test Commands
@@ -154,7 +160,9 @@ When adding new features:
 2. Add method name constants to `AgentMethod` or `ClientMethod` modules in `client_methods.cr`.
 3. Add client methods to `src/acp/client.cr` (including `send_request_raw`/`send_notification_raw` variants for raw JSON params).
 4. Add convenience wrappers to `src/acp/session.cr` if appropriate.
-5. Add tests to `spec/acp_spec.cr` using `TestTransport`.
+5. Add tests to `spec/acp_spec.cr` using `TestTransport`. When fixing a bug,
+   add the regression example to `spec/regression_spec.cr` instead — one
+   section per fix, written so it fails before the fix and passes after.
 6. Run `crystal tool format` before committing.
 
 ## Environment Variables (Interactive Client)

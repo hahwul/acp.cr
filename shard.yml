@@ -14,6 +14,11 @@ crystal: ">= 1.21.0"
 
 license: MIT
 
+# Build targets
+targets:
+  acp-client:
+    main: examples/interactive_client.cr
+
 # Development Dependencies
 development_dependencies:
   ameba:

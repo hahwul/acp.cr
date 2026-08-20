@@ -1813,6 +1813,231 @@ describe ACP::Client do
     end
   end
 
+  describe "#session_load" do
+    it "sends session/load, adopts the given id, and surfaces returned state" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "modes": {
+              "currentModeId": "code",
+              "availableModes": [{"id": "code", "name": "Code"}]
+            },
+            "configOptions": [
+              {"id": "model", "name": "Model", "type": "select", "currentValue": "fast"}
+            ]
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_load("sess-loaded", "/work", [] of JSON::Any)
+      result.modes.try(&.current_mode_id).should eq("code")
+      result.config_options.try(&.size).should eq(1)
+
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/load")
+      sent["params"].as_h["sessionId"].as_s.should eq("sess-loaded")
+      sent["params"].as_h["cwd"].as_s.should eq("/work")
+      sent["params"].as_h["mcpServers"].as_a.should be_empty
+
+      # session/load carries no sessionId in its result; the client keeps
+      # the id the caller supplied.
+      client.session_id.should eq("sess-loaded")
+      client.session_modes.try(&.current_mode_id).should eq("code")
+      client.session_config_options.try(&.size).should eq(1)
+      client.state.should eq(ACP::ClientState::SessionActive)
+
+      transport.close
+    end
+
+    it "raises InvalidStateError before the handshake" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      expect_raises(ACP::InvalidStateError) do
+        client.session_load("sess-x", "/work")
+      end
+
+      transport.close
+    end
+  end
+
+  describe "#session_set_config_option" do
+    it "sends session/set_config_option and caches the returned option set" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{sent["id"].as_i64},"result":{"sessionId":"sess-cfg"}}))
+      end
+      client.session_new("/tmp")
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "configOptions": [
+              {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "smart",
+                "options": [
+                  {"value": "fast", "name": "Fast"},
+                  {"value": "smart", "name": "Smart"}
+                ]
+              }
+            ]
+          }
+          }
+          JSON
+        )
+      end
+
+      result = client.session_set_config_option("model", "smart")
+
+      sent = transport.sent_messages.last
+      sent["method"].as_s.should eq("session/set_config_option")
+      sent["params"].as_h["sessionId"].as_s.should eq("sess-cfg")
+      sent["params"].as_h["configId"].as_s.should eq("model")
+      sent["params"].as_h["value"].as_s.should eq("smart")
+
+      result.config_options.size.should eq(1)
+      result.config_options[0].current_value.should eq("smart")
+      # The client caches the full option set returned by the agent.
+      client.session_config_options.try(&.[0].current_value).should eq("smart")
+
+      transport.close
+    end
+
+    it "raises NoActiveSessionError without a session" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      expect_raises(ACP::NoActiveSessionError) do
+        client.session_set_config_option("model", "smart")
+      end
+
+      transport.close
+    end
+  end
+
+  describe "#forget_session" do
+    it "drops cached state for the active session and steps back to Initialized" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(<<-JSON
+          {
+          "jsonrpc": "2.0",
+          "id": #{sent["id"].as_i64},
+          "result": {
+            "sessionId": "sess-forget",
+            "modes": {"currentModeId": "chat", "availableModes": [{"id": "chat", "name": "Chat"}]}
+          }
+          }
+          JSON
+        )
+      end
+      client.session_new("/tmp")
+      client.session_active?.should be_true
+
+      client.forget_session("sess-forget").should be_true
+
+      client.session_id.should be_nil
+      client.session_modes.should be_nil
+      client.session_config_options.should be_nil
+      client.state.should eq(ACP::ClientState::Initialized)
+      client.session_active?.should be_false
+
+      # With no active session, an id-less call must raise rather than
+      # silently target the dead session.
+      expect_raises(ACP::NoActiveSessionError) { client.session_cancel }
+
+      transport.close
+    end
+
+    it "is a no-op for a session that is not the active one" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+
+      spawn do
+        sleep 10.milliseconds
+        if msg = transport.last_sent
+          transport.inject_raw(build_init_response(msg["id"].as_i64))
+        end
+      end
+      client.initialize_connection
+
+      spawn do
+        sleep 10.milliseconds
+        sent = transport.sent_messages.last
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{sent["id"].as_i64},"result":{"sessionId":"sess-a"}}))
+      end
+      client.session_new("/tmp")
+
+      client.forget_session("sess-other").should be_false
+      client.session_id.should eq("sess-a")
+      client.state.should eq(ACP::ClientState::SessionActive)
+
+      transport.close
+    end
+
+    it "never resurrects a client the caller already closed" do
+      transport = TestTransport.new
+      client = ACP::Client.new(transport)
+      client.close
+
+      client.forget_session("sess-anything").should be_false
+      client.state.should eq(ACP::ClientState::Closed)
+
+      transport.close
+    end
+  end
+
   describe "#session_close" do
     it "sends session/close, resets active session, and returns to Initialized state" do
       transport = TestTransport.new
@@ -3114,6 +3339,29 @@ describe ACP do
 
   it "has a protocol version constant" do
     ACP::PROTOCOL_VERSION.should eq(1_u16)
+  end
+
+  it "has a minimum protocol version no greater than the latest" do
+    ACP::MIN_PROTOCOL_VERSION.should be <= ACP::PROTOCOL_VERSION
+  end
+
+  describe ".supports_protocol_version?" do
+    it "accepts every version in the negotiable range" do
+      (ACP::MIN_PROTOCOL_VERSION..ACP::PROTOCOL_VERSION).each do |version|
+        ACP.supports_protocol_version?(version).should be_true
+      end
+    end
+
+    it "rejects a version below the minimum" do
+      unless ACP::MIN_PROTOCOL_VERSION.zero?
+        ACP.supports_protocol_version?(ACP::MIN_PROTOCOL_VERSION - 1).should be_false
+      end
+    end
+
+    it "rejects a version newer than this client implements" do
+      ACP.supports_protocol_version?(ACP::PROTOCOL_VERSION + 1).should be_false
+      ACP.supports_protocol_version?(UInt16::MAX).should be_false
+    end
   end
 end
 
@@ -5322,6 +5570,15 @@ describe "Edge Cases" do
       blocks = builder.build
       blocks.size.should eq(1)
       rl = blocks[0].as(ACP::Protocol::ResourceLinkContentBlock)
+      rl.uri.should eq("file:///tmp/test.cr")
+      rl.name.should eq("test.cr")
+      rl.mime_type.should eq("text/x-crystal")
+    end
+
+    it "resource_link from a path takes mime_type as a named argument" do
+      builder = ACP::PromptBuilder.new
+      builder.resource_link("/tmp/test.cr", mime_type: "text/x-crystal")
+      rl = builder.build[0].as(ACP::Protocol::ResourceLinkContentBlock)
       rl.uri.should eq("file:///tmp/test.cr")
       rl.name.should eq("test.cr")
       rl.mime_type.should eq("text/x-crystal")

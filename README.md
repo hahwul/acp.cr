@@ -65,6 +65,7 @@ Several examples are provided in the `examples/` directory:
 - `claude_code_agent.cr` — Claude Code as an ACP agent
 - `gemini_agent.cr` — Gemini CLI as an ACP agent
 - `codex_agent.cr` — Codex via ACP adapter
+- `copilot_agent.cr` — GitHub Copilot CLI via ACP
 - `interactive_client.cr` — Full-featured interactive CLI client
 
 ```sh

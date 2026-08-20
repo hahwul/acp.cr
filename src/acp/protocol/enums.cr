@@ -379,6 +379,9 @@ module ACP
       # Model selector.
       Model
 
+      # Model configuration selector (e.g. a provider-specific sub-setting).
+      ModelConfig
+
       # Thought/reasoning level selector.
       ThoughtLevel
 
@@ -390,6 +393,7 @@ module ACP
         case self
         in Mode         then "mode"
         in Model        then "model"
+        in ModelConfig  then "model_config"
         in ThoughtLevel then "thought_level"
         in Other        then "other"
         end
@@ -401,6 +405,7 @@ module ACP
         case value
         when "mode"          then Mode
         when "model"         then Model
+        when "model_config"  then ModelConfig
         when "thought_level" then ThoughtLevel
         when "other"         then Other
         end
@@ -478,6 +483,9 @@ module ACP
       METHOD_NOT_FOUND = ACP::JsonRpcError::METHOD_NOT_FOUND
       INVALID_PARAMS   = ACP::JsonRpcError::INVALID_PARAMS
       INTERNAL_ERROR   = ACP::JsonRpcError::INTERNAL_ERROR
+
+      # The peer stopped processing a request because it was cancelled.
+      REQUEST_CANCELLED = ACP::JsonRpcError::REQUEST_CANCELLED
 
       # ACP-specific error codes (reserved range -32000 to -32099).
 

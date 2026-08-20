@@ -57,9 +57,19 @@ module ACP
     end
 
     # Utility to classify a raw JSON::Any message into its kind.
+    #
+    # A JSON-RPC 2.0 message is always an object. Anything else — a bare
+    # array (a batch, which ACP does not use), number, string, bool, or
+    # null — carries neither an "id" nor a "method" and is reported as a
+    # `Notification` so callers can drop it. Probing such a value with
+    # `JSON::Any#[]?` would raise a bare `Exception`, so the object check
+    # comes first.
     def self.classify_message(msg : JSON::Any) : MessageKind
-      has_id = msg["id"]? && !msg["id"]?.try(&.raw).nil?
-      has_method = msg["method"]?.try(&.as_s?)
+      obj = msg.as_h?
+      return MessageKind::Notification unless obj
+
+      has_id = obj["id"]? && !obj["id"]?.try(&.raw).nil?
+      has_method = obj["method"]?.try(&.as_s?)
 
       if has_id && has_method
         # Agent is calling a method on the client (e.g., session/request_permission).
@@ -85,8 +95,13 @@ module ACP
     # truncating `1.9` to `1` would correlate a response with the wrong
     # pending request, and stringifying a container produced an ID that could
     # never match anything.
+    #
+    # A message that is not a JSON object has no ID at all; it is reported
+    # as nil rather than raising from `JSON::Any#[]?`.
     def self.extract_id(msg : JSON::Any) : RequestId?
-      raw = msg["id"]?
+      obj = msg.as_h?
+      return unless obj
+      raw = obj["id"]?
       return unless raw
       case v = raw.raw
       when Int64  then v
