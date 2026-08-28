@@ -852,22 +852,20 @@ module ACP
     private def drain_pending_requests(message : String) : Nil
       @pending_mutex.synchronize do
         @pending.each do |_id, channel|
-          begin
-            error_json = JSON.build do |json|
-              json.object do
-                json.field("error") do
-                  json.object do
-                    json.field("code", JsonRpcError::INTERNAL_ERROR)
-                    json.field("message", message)
-                  end
+          error_json = JSON.build do |json|
+            json.object do
+              json.field("error") do
+                json.object do
+                  json.field("code", JsonRpcError::INTERNAL_ERROR)
+                  json.field("message", message)
                 end
               end
             end
-            error_any = JSON.parse(error_json)
-            channel.send(error_any)
-          rescue Channel::ClosedError
-            # Already closed.
           end
+          error_any = JSON.parse(error_json)
+          channel.send(error_any)
+        rescue Channel::ClosedError
+          # Already closed.
         end
         @pending.clear
       end

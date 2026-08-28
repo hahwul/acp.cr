@@ -319,11 +319,9 @@ describe "ACP::ProcessTransport lifecycle" do
     results = Channel(Process::Status | Exception).new(4)
     4.times do
       spawn do
-        begin
-          results.send(transport.wait)
-        rescue ex
-          results.send(ex)
-        end
+        results.send(transport.wait)
+      rescue ex
+        results.send(ex)
       end
     end
 
