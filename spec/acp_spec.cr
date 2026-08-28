@@ -5498,12 +5498,10 @@ describe "Edge Cases" do
       # Start a session_new request that will hang, then close
       done = Channel(Exception?).new(1)
       spawn do
-        begin
-          client.session_new("/tmp")
-          done.send(nil)
-        rescue ex
-          done.send(ex)
-        end
+        client.session_new("/tmp")
+        done.send(nil)
+      rescue ex
+        done.send(ex)
       end
 
       sleep 50.milliseconds
