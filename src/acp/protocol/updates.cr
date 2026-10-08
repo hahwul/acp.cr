@@ -282,6 +282,9 @@ module ACP
       @[JSON::Field(key: "toolName")]
       property tool_name : String?
 
+      # The name of the tool being invoked.
+      property name : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -297,6 +300,7 @@ module ACP
         @raw_output : JSON::Any? = nil,
         @tool_name : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @name : String? = nil,
       )
         @session_update = "tool_call"
       end
@@ -343,6 +347,9 @@ module ACP
       @[JSON::Field(key: "rawOutput")]
       property raw_output : JSON::Any?
 
+      # Update the tool name.
+      property name : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -357,6 +364,7 @@ module ACP
         @raw_input : JSON::Any? = nil,
         @raw_output : JSON::Any? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @name : String? = nil,
       )
         @session_update = "tool_call_update"
       end

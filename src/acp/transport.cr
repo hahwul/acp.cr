@@ -74,6 +74,11 @@ module ACP
     # Mutex-like flag to prevent double-close.
     @close_sent : Bool = false
 
+    # Set once `close` has run. Distinct from `@closed`, which also flips when
+    # the stream ends on its own (EOF, write failure) — `close` must still
+    # release the IOs in that case.
+    @close_called : Bool = false
+
     # The IO we write outgoing messages to (agent's stdin).
     @writer : IO
 
@@ -193,7 +198,8 @@ module ACP
     # Closes the transport, signaling the reader to stop and
     # closing the underlying IO objects.
     def close : Nil
-      return if @closed
+      return if @close_called
+      @close_called = true
       @closed = true
 
       # Mark the EOF sentinel as handled so the reader fiber won't try to push

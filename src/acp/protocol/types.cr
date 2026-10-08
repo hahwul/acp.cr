@@ -1028,6 +1028,20 @@ module ACP
       # The input/arguments to the tool call.
       property input : JSON::Any?
 
+      # The name of the tool being invoked.
+      property name : String?
+
+      # File locations affected by this tool call.
+      property locations : Array(JSON::Any)?
+
+      # Raw input parameters sent to the tool.
+      @[JSON::Field(key: "rawInput")]
+      property raw_input : JSON::Any?
+
+      # Raw output returned by the tool.
+      @[JSON::Field(key: "rawOutput")]
+      property raw_output : JSON::Any?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -1041,6 +1055,10 @@ module ACP
         @tool_name : String? = nil,
         @input : JSON::Any? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @name : String? = nil,
+        @locations : Array(JSON::Any)? = nil,
+        @raw_input : JSON::Any? = nil,
+        @raw_output : JSON::Any? = nil,
       )
       end
     end
@@ -1274,7 +1292,8 @@ module ACP
       msg = new_message
       set_id(msg, id)
       msg["method"] = JSON::Any.new(method)
-      msg["params"] = params
+      # JSON-RPC 2.0 §4.2: `params` MUST be structured if present; null means omit it.
+      msg["params"] = params unless params.raw.nil?
       msg
     end
 
@@ -1290,7 +1309,8 @@ module ACP
     def self.build_notification_raw(method : String, params : JSON::Any) : Hash(String, JSON::Any)
       msg = new_message
       msg["method"] = JSON::Any.new(method)
-      msg["params"] = params
+      # JSON-RPC 2.0 §4.2: `params` MUST be structured if present; null means omit it.
+      msg["params"] = params unless params.raw.nil?
       msg
     end
 

@@ -758,3 +758,108 @@ describe "ACP v1 wire coverage" do
     ACP::JsonRpcError.new(-32000, "auth").request_cancelled?.should be_false
   end
 end
+
+# ─── R16: close must release the IOs even after the stream ended ───────
+describe "ACP::StdioTransport#close after the stream ended" do
+  it "closes both IOs after the reader hit EOF" do
+    reader, agent_out = IO.pipe
+    _agent_in, writer = IO.pipe
+    transport = ACP::StdioTransport.new(reader, writer)
+
+    agent_out.close
+    transport.receive.should be_nil
+    transport.close
+
+    reader.closed?.should be_true
+    writer.closed?.should be_true
+  end
+
+  it "closes both IOs after a write failure" do
+    reader, _agent_out = IO.pipe
+    agent_in, writer = IO.pipe
+    agent_in.close
+    transport = ACP::StdioTransport.new(reader, writer)
+
+    expect_raises(ACP::ConnectionClosedError) do
+      transport.send({"jsonrpc" => JSON::Any.new("2.0")})
+    end
+    transport.close
+
+    reader.closed?.should be_true
+    writer.closed?.should be_true
+  end
+end
+
+# ─── R17: an out-of-range error code must not raise OverflowError ──────
+describe "ACP::JsonRpcError.from_json_any (out-of-range code)" do
+  it "falls back to INTERNAL_ERROR for a code outside int32" do
+    error = ACP::JsonRpcError.from_json_any(JSON.parse(%({"code":99999999999,"message":"boom"})))
+    error.code.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    error.message.should eq("boom")
+  end
+
+  it "surfaces as a JsonRpcError from a request" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    spawn do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":1,"error":{"code":-99999999999,"message":"boom"}}))
+    end
+
+    expect_raises(ACP::JsonRpcError, "boom") { client.initialize_connection }
+
+    client.close
+  end
+end
+
+# ─── R18: a null `params` must be omitted, not sent ────────────────────
+describe "ACP::Client extension messages without params" do
+  it "omits `params` from an ext notification" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+
+    client.ext_notification("vendor/ping")
+
+    transport.last_sent.as(JSON::Any).as_h.has_key?("params").should be_false
+    client.close
+  end
+
+  it "omits `params` from an ext request" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    spawn do
+      sleep 10.milliseconds
+      transport.inject_raw(%({"jsonrpc":"2.0","id":1,"result":{}}))
+    end
+
+    client.ext_method("vendor/ping")
+
+    transport.last_sent.as(JSON::Any).as_h.has_key?("params").should be_false
+    client.close
+  end
+end
+
+# ─── R19: tool call fields the typed structs dropped ───────────────────
+describe "ACP v1 tool call fields" do
+  it "keeps name, locations, rawInput and rawOutput on a permission request's toolCall" do
+    params = ACP::Protocol::RequestPermissionParams.from_json(
+      %({"sessionId":"s","options":[],"toolCall":{"toolCallId":"t","name":"bash","locations":[{"path":"/a"}],"rawInput":{"cmd":"ls"},"rawOutput":"ok"}})
+    )
+    tool_call = params.tool_call
+    tool_call.name.should eq("bash")
+    tool_call.locations.try(&.size).should eq(1)
+    tool_call.raw_input.try(&.["cmd"].as_s).should eq("ls")
+    tool_call.raw_output.try(&.as_s).should eq("ok")
+  end
+
+  it "keeps `name` on tool_call and tool_call_update" do
+    call = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"tool_call","toolCallId":"t","title":"List","name":"bash"})
+    )
+    call.as(ACP::Protocol::ToolCallUpdate).name.should eq("bash")
+
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"tool_call_update","toolCallId":"t","name":"bash"})
+    )
+    update.as(ACP::Protocol::ToolCallStatusUpdate).name.should eq("bash")
+  end
+end
