@@ -149,7 +149,9 @@ module ACP
     # Expects the object to have "code" (int) and "message" (string) keys,
     # with an optional "data" key.
     def self.from_json_any(obj : JSON::Any) : JsonRpcError
-      code = obj["code"]?.try(&.as_i?) || INTERNAL_ERROR
+      # `ErrorCode` is an int32; an out-of-range code falls back like a
+      # missing one instead of raising `OverflowError` from `as_i`.
+      code = obj["code"]?.try(&.as_i64?).try { |c| c.to_i32 if (Int32::MIN..Int32::MAX).includes?(c) } || INTERNAL_ERROR
       message = obj["message"]?.try(&.as_s?) || "Unknown error"
       data = obj["data"]?
       new(code, message, data)
