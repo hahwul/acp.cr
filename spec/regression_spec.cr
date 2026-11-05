@@ -902,6 +902,17 @@ describe "ACP config options with an unrecognized type" do
     ACP::Protocol::SessionSetConfigOptionResult.from_json(json).config_options.size.should eq(1)
   end
 
+  it "skips an unrecognized type even when its fields happen to parse" do
+    text_option = %({"id":"note","name":"Note","type":"text","currentValue":"hi"})
+    json = %({"sessionId":"s1","configOptions":[#{text_option},#{select_option}]})
+    ACP::Protocol::SessionNewResult.from_json(json).config_options.try(&.map(&.id)).should eq(["model"])
+
+    update = ACP::Protocol::SessionUpdate.from_json(
+      %({"sessionUpdate":"config_option_update","configOptions":[#{boolean_option},#{text_option},#{select_option}]})
+    ).as(ACP::Protocol::ConfigOptionUpdate)
+    update.typed_config_options.map(&.id).should eq(["model"])
+  end
+
   it "still round-trips configOptions and accepts null" do
     result = ACP::Protocol::SessionNewResult.from_json(%({"sessionId":"s1","configOptions":[#{select_option}]}))
     JSON.parse(result.to_json)["configOptions"][0]["id"].as_s.should eq("model")
@@ -993,5 +1004,8 @@ describe "ACP::Protocol::SessionInfoUpdate field presence" do
     update = ACP::Protocol::SessionInfoUpdate.new(title: "T")
     update.title_present?.should be_true
     update.updated_at_present?.should be_false
+
+    update.updated_at = nil
+    update.updated_at_present?.should be_true
   end
 end

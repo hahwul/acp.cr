@@ -547,16 +547,19 @@ module ACP
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
 
-      params = Protocol::SessionCancelParams.new(sid)
-      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
-
-      ClientLog.info { "Sent cancel for session: #{sid}" }
-
+      # Claim the pending permissions first so a handler's late answer is
+      # dropped even if sending the notification below fails.
       ids = @pending_mutex.synchronize do
         pending = @pending_permissions.select { |_id, perm_sid| perm_sid == sid }.keys
         pending.each { |id| @pending_permissions.delete(id) }
         pending
       end
+
+      params = Protocol::SessionCancelParams.new(sid)
+      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
+
+      ClientLog.info { "Sent cancel for session: #{sid}" }
+
       return if ids.empty?
 
       cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)

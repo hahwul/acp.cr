@@ -532,20 +532,24 @@ module ACP
     # Backward-compatible alias.
     alias SessionConfigOption = ConfigOption
 
-    # Reads a `configOptions` array, skipping entries that don't deserialize
-    # as a `ConfigOption` — e.g. an option `type` this library doesn't model,
-    # such as `boolean` with a boolean `currentValue`. Per
-    # session-config-options, a Client "SHOULD ignore" an option with an
-    # unrecognized `type`; one such option must not fail the whole result.
+    # Parses raw `configOptions` entries, keeping only well-formed options of
+    # a type this library models (`select`). Per session-config-options a
+    # Client "SHOULD ignore" an option with an unrecognized `type` (such as
+    # `boolean`, whose `currentValue` is a bool), and one such entry must not
+    # fail the whole message.
+    def self.parse_config_options(items : Array(JSON::Any)) : Array(ConfigOption)
+      items.compact_map do |item|
+        option = ConfigOption.from_json(item.to_json)
+        option if option.config_type == "select"
+      rescue JSON::ParseException
+        nil
+      end
+    end
+
+    # JSON converter for `configOptions` result fields; see `parse_config_options`.
     module ConfigOptionsConverter
       def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)
-        Array(JSON::Any).new(pull).compact_map do |item|
-          begin
-            ConfigOption.from_json(item.to_json)
-          rescue JSON::ParseException
-            nil
-          end
-        end
+        Protocol.parse_config_options(Array(JSON::Any).new(pull))
       end
 
       def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
