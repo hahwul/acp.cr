@@ -532,6 +532,31 @@ module ACP
     # Backward-compatible alias.
     alias SessionConfigOption = ConfigOption
 
+    # Parses raw `configOptions` entries, keeping only well-formed options of
+    # a type this library models (`select`). Per session-config-options a
+    # Client "SHOULD ignore" an option with an unrecognized `type` (such as
+    # `boolean`, whose `currentValue` is a bool), and one such entry must not
+    # fail the whole message.
+    def self.parse_config_options(items : Array(JSON::Any)) : Array(ConfigOption)
+      items.compact_map do |item|
+        option = ConfigOption.from_json(item.to_json)
+        option if option.config_type == "select"
+      rescue JSON::ParseException
+        nil
+      end
+    end
+
+    # JSON converter for `configOptions` result fields; see `parse_config_options`.
+    module ConfigOptionsConverter
+      def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)
+        Protocol.parse_config_options(Array(JSON::Any).new(pull))
+      end
+
+      def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
     # ─── Session/New Result ───────────────────────────────────────────
 
     # Result of the `session/new` method (Agent → Client).
@@ -548,7 +573,7 @@ module ACP
 
       # Initial session configuration options if supported by the Agent.
       # See: https://agentclientprotocol.com/protocol/session-config-options
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -693,7 +718,7 @@ module ACP
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -758,7 +783,7 @@ module ACP
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -943,7 +968,7 @@ module ACP
       include JSON::Serializable
 
       # The full set of configuration options and their current values (required).
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption) = [] of ConfigOption
 
       # Extension metadata.

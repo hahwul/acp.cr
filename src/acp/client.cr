@@ -208,6 +208,11 @@ module ACP
     # are cooperative, this protects against unexpected scheduling).
     @pending_mutex : Mutex = Mutex.new
 
+    # `session/request_permission` requests whose handler hasn't returned
+    # yet, keyed by request ID → session ID. `session_cancel` answers these
+    # with `cancelled`; guarded by `@pending_mutex`.
+    @pending_permissions : Hash(Protocol::RequestId, String) = Hash(Protocol::RequestId, String).new
+
     # Whether the dispatcher fiber is running.
     @dispatcher_running : Bool = false
 
@@ -533,14 +538,32 @@ module ACP
     # - `session_id` — optional session ID override.
     #
     # This is a fire-and-forget notification (no response expected).
+    #
+    # Per the spec the Client MUST answer every pending
+    # `session/request_permission` of the session with the `cancelled`
+    # outcome, so any permission handler still running for it has its
+    # request answered here; whatever that handler later returns is dropped.
     def session_cancel(session_id : String? = nil) : Nil
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
+
+      # Claim the pending permissions first so a handler's late answer is
+      # dropped even if sending the notification below fails.
+      ids = @pending_mutex.synchronize do
+        pending = @pending_permissions.select { |_id, perm_sid| perm_sid == sid }.keys
+        pending.each { |id| @pending_permissions.delete(id) }
+        pending
+      end
 
       params = Protocol::SessionCancelParams.new(sid)
       send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
 
       ClientLog.info { "Sent cancel for session: #{sid}" }
+
+      return if ids.empty?
+
+      cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
+      ids.each { |id| respond_to_agent(id, cancelled) }
     end
 
     # Changes the mode for the active session.
@@ -1145,13 +1168,19 @@ module ACP
     # Delegates to the on_agent_request handler or auto-denies.
     private def handle_permission_request(id : Protocol::RequestId, params : JSON::Any?) : Nil
       if handler = @on_agent_request
+        # Track the request so `session_cancel` can answer it while the
+        # handler is still waiting (e.g. on the user).
+        sid = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
+        @pending_mutex.synchronize { @pending_permissions[id] = sid } if sid
         begin
           result = handler.call("session/request_permission", params || JSON::Any.new(nil))
-          respond_to_agent(id, result)
+          respond_to_agent(id, result) if claim_permission_response(id, sid)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
-          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR,
-            "Permission handler error: #{ex.message}")
+          if claim_permission_response(id, sid)
+            respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR,
+              "Permission handler error: #{ex.message}")
+          end
         end
       else
         # No handler — auto-cancel the permission request.
@@ -1167,6 +1196,13 @@ module ACP
         cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
         respond_to_agent(id, cancelled)
       end
+    end
+
+    # Removes a permission request from the pending set. Returns false when
+    # `session_cancel` already answered it, so the caller must not respond.
+    private def claim_permission_response(id : Protocol::RequestId, sid : String?) : Bool
+      return true unless sid
+      @pending_mutex.synchronize { !@pending_permissions.delete(id).nil? }
     end
 
     # Handles an incoming notification from the agent.

@@ -541,11 +541,10 @@ module ACP
       end
 
       # Attempts to parse `config_options` items as typed `ConfigOption` values.
-      # Entries that fail to deserialize are silently skipped.
+      # Entries that fail to deserialize or have an unrecognized `type` are
+      # skipped (see `Protocol.parse_config_options`).
       def typed_config_options : Array(ConfigOption)
-        @config_options.compact_map do |item|
-          ConfigOption.from_json(item.to_json) rescue nil
-        end
+        Protocol.parse_config_options(@config_options)
       end
     end
 
@@ -560,11 +559,23 @@ module ACP
 
       # Human-readable title for the session. May be set by the agent
       # based on conversation content (e.g., a summary of the first prompt).
-      property title : String?
+      # Omitted means unchanged, `null` means cleared: both read as nil
+      # here, so check `title_present?` to tell them apart.
+      @[JSON::Field(presence: true)]
+      getter title : String?
 
-      # ISO 8601 timestamp of last activity.
-      @[JSON::Field(key: "updatedAt")]
-      property updated_at : String?
+      # ISO 8601 timestamp of last activity. Like `title`, `null` clears
+      # it; see `updated_at_present?`.
+      @[JSON::Field(key: "updatedAt", presence: true)]
+      getter updated_at : String?
+
+      # Whether `title` was sent (possibly as `null`, i.e. cleared).
+      @[JSON::Field(ignore: true)]
+      getter? title_present : Bool
+
+      # Whether `updatedAt` was sent (possibly as `null`, i.e. cleared).
+      @[JSON::Field(ignore: true)]
+      getter? updated_at_present : Bool
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -576,6 +587,20 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "session_info_update"
+        @title_present = !@title.nil?
+        @updated_at_present = !@updated_at.nil?
+      end
+
+      # Assigning a field marks it present (assigning nil means "clear").
+      def title=(@title : String?) : String?
+        @title_present = true
+        @title
+      end
+
+      # :ditto:
+      def updated_at=(@updated_at : String?) : String?
+        @updated_at_present = true
+        @updated_at
       end
     end
 
