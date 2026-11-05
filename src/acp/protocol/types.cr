@@ -532,6 +532,27 @@ module ACP
     # Backward-compatible alias.
     alias SessionConfigOption = ConfigOption
 
+    # Reads a `configOptions` array, skipping entries that don't deserialize
+    # as a `ConfigOption` — e.g. an option `type` this library doesn't model,
+    # such as `boolean` with a boolean `currentValue`. Per
+    # session-config-options, a Client "SHOULD ignore" an option with an
+    # unrecognized `type`; one such option must not fail the whole result.
+    module ConfigOptionsConverter
+      def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)
+        Array(JSON::Any).new(pull).compact_map do |item|
+          begin
+            ConfigOption.from_json(item.to_json)
+          rescue JSON::ParseException
+            nil
+          end
+        end
+      end
+
+      def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
     # ─── Session/New Result ───────────────────────────────────────────
 
     # Result of the `session/new` method (Agent → Client).
@@ -548,7 +569,7 @@ module ACP
 
       # Initial session configuration options if supported by the Agent.
       # See: https://agentclientprotocol.com/protocol/session-config-options
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -693,7 +714,7 @@ module ACP
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -758,7 +779,7 @@ module ACP
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
@@ -943,7 +964,7 @@ module ACP
       include JSON::Serializable
 
       # The full set of configuration options and their current values (required).
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption) = [] of ConfigOption
 
       # Extension metadata.

@@ -560,11 +560,23 @@ module ACP
 
       # Human-readable title for the session. May be set by the agent
       # based on conversation content (e.g., a summary of the first prompt).
+      # Omitted means unchanged, `null` means cleared: both read as nil
+      # here, so check `title_present?` to tell them apart.
+      @[JSON::Field(presence: true)]
       property title : String?
 
-      # ISO 8601 timestamp of last activity.
-      @[JSON::Field(key: "updatedAt")]
+      # ISO 8601 timestamp of last activity. Like `title`, `null` clears
+      # it; see `updated_at_present?`.
+      @[JSON::Field(key: "updatedAt", presence: true)]
       property updated_at : String?
+
+      # Whether `title` was sent (possibly as `null`, i.e. cleared).
+      @[JSON::Field(ignore: true)]
+      getter? title_present : Bool
+
+      # Whether `updatedAt` was sent (possibly as `null`, i.e. cleared).
+      @[JSON::Field(ignore: true)]
+      getter? updated_at_present : Bool
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -576,6 +588,8 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "session_info_update"
+        @title_present = !@title.nil?
+        @updated_at_present = !@updated_at.nil?
       end
     end
 

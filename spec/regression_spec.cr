@@ -863,3 +863,135 @@ describe "ACP v1 tool call fields" do
     update.as(ACP::Protocol::ToolCallStatusUpdate).name.should eq("bash")
   end
 end
+
+# ─── R20: one unrecognized config option must not sink the whole result ──
+#
+# session-config-options: "If a Client receives an option with an
+# unrecognized `type`, it SHOULD ignore that option." A `boolean` option
+# (whose `currentValue` is a bool) used to fail the whole session/new
+# result with ProtocolError even though the session was created agent-side.
+describe "ACP config options with an unrecognized type" do
+  boolean_option = %({"id":"auto","name":"Auto","type":"boolean","currentValue":true})
+  select_option = %({"id":"model","name":"Model","type":"select","currentValue":"a","options":[{"value":"a","name":"A"}]})
+
+  it "skips the option in session/new instead of failing the result" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+
+    spawn do
+      sleep 10.milliseconds
+      transport.inject_raw(build_init_response(1_i64))
+      sleep 10.milliseconds
+      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","configOptions":[#{boolean_option},#{select_option}]}}))
+    end
+
+    client.initialize_connection
+    result = client.session_new("/tmp")
+
+    result.session_id.should eq("s1")
+    result.config_options.try(&.map(&.id)).should eq(["model"])
+    client.session_active?.should be_true
+    client.close
+  end
+
+  it "skips it in every result that carries configOptions" do
+    json = %({"sessionId":"s1","configOptions":[#{boolean_option},#{select_option}]})
+    ACP::Protocol::SessionLoadResult.from_json(json).config_options.try(&.size).should eq(1)
+    ACP::Protocol::SessionResumeResult.from_json(json).config_options.try(&.size).should eq(1)
+    ACP::Protocol::SessionSetConfigOptionResult.from_json(json).config_options.size.should eq(1)
+  end
+
+  it "still round-trips configOptions and accepts null" do
+    result = ACP::Protocol::SessionNewResult.from_json(%({"sessionId":"s1","configOptions":[#{select_option}]}))
+    JSON.parse(result.to_json)["configOptions"][0]["id"].as_s.should eq("model")
+    ACP::Protocol::SessionNewResult.from_json(%({"sessionId":"s1","configOptions":null})).config_options.should be_nil
+  end
+end
+
+# ─── R21: session/cancel must answer pending permission requests ─────────
+#
+# prompt-turn#cancellation: "The Client MUST respond to all pending
+# `session/request_permission` requests with the `cancelled` outcome."
+# The permission handler runs on the dispatcher fiber, so while it waits
+# for the user nothing answered the agent; once it returned, its (possibly
+# "selected") answer went out even though the turn had been cancelled.
+describe "ACP::Client#session_cancel with a pending permission request" do
+  it "answers the request with `cancelled` and drops the late handler result" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    release = Channel(Nil).new
+    entered = Channel(Nil).new(1)
+
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t"},"options":[]}}))
+    entered.receive
+
+    client.session_cancel("s1")
+
+    responses = transport.sent_messages.select { |m| m["id"]?.try(&.as_s?) == "perm-1" }
+    responses.size.should eq(1)
+    responses[0]["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
+
+    release.send(nil)
+    sleep 20.milliseconds
+
+    transport.sent_messages.count { |m| m["id"]?.try(&.as_s?) == "perm-1" }.should eq(1)
+    client.close
+  end
+
+  it "leaves permission requests of other sessions alone" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    release = Channel(Nil).new
+    entered = Channel(Nil).new(1)
+
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"other","toolCall":{"toolCallId":"t"},"options":[]}}))
+    entered.receive
+
+    client.session_cancel("s1")
+    transport.sent_messages.any? { |m| m["id"]? == 7 }.should be_false
+
+    release.send(nil)
+    sleep 20.milliseconds
+
+    answer = transport.sent_messages.find! { |m| m["id"]? == 7 }
+    answer["result"]["outcome"]["outcome"].as_s.should eq("selected")
+    client.close
+  end
+end
+
+# ─── R22: session_info_update must distinguish `null` from omitted ───────
+#
+# session-list#updating-session-metadata: "Omitted fields are left
+# unchanged" but `title` / `updatedAt` "Set to `null` to clear". Both used
+# to parse to nil, so a client could not tell a clear from no change.
+describe "ACP::Protocol::SessionInfoUpdate field presence" do
+  it "reports whether title and updatedAt were sent" do
+    cleared = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate":"session_info_update","title":null})).as(ACP::Protocol::SessionInfoUpdate)
+    cleared.title.should be_nil
+    cleared.title_present?.should be_true
+    cleared.updated_at_present?.should be_false
+
+    unchanged = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate":"session_info_update","updatedAt":"2026-01-01T00:00:00Z"})).as(ACP::Protocol::SessionInfoUpdate)
+    unchanged.title_present?.should be_false
+    unchanged.updated_at_present?.should be_true
+  end
+
+  it "treats fields given to the constructor as present" do
+    update = ACP::Protocol::SessionInfoUpdate.new(title: "T")
+    update.title_present?.should be_true
+    update.updated_at_present?.should be_false
+  end
+end
