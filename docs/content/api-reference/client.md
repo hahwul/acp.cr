@@ -197,3 +197,5 @@ Sends a custom extension notification (no response expected).
 | `on_release_terminal` | `ReleaseTerminalParams` | `ReleaseTerminalResult` | Handle `terminal/release` |
 | `on_wait_for_terminal_exit` | `WaitForTerminalExitParams` | `WaitForTerminalExitResult` | Handle `terminal/wait_for_exit` |
 | `on_kill_terminal` | `KillTerminalParams` | `KillTerminalResult` | Handle `terminal/kill` |
+
+Each agent request runs its handler in its own fiber, so a handler may block (e.g. waiting on the user) without holding up responses or notifications, but request handlers may run concurrently with each other and with notification callbacks. `on_update` / `on_notification` still run in arrival order on the dispatcher fiber. A request with no matching handler, including an unknown `_`-prefixed extension method, is answered with `-32601 Method not found`.

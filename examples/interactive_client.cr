@@ -351,11 +351,14 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
 end
 
 # Step 4: Set up the agent request handler (for permission requests, etc.).
+# Each agent request runs in its own fiber, so concurrent permission
+# requests are serialized here to keep one picker on stdin at a time.
+permission_prompt = Mutex.new
 client.on_agent_request = ->(method : String, params : JSON::Any) do
   case method
   when "session/request_permission"
     # Parse the permission request.
-    begin
+    permission_prompt.synchronize do
       perm_params = ACP::Protocol::RequestPermissionParams.from_json(params.to_json)
 
       STDERR.puts ""

@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+### Breaking Changes
+- Schema `uint32`/`uint64` fields are now unsigned: `ReadTextFileParams#line`/`#limit` and `ToolCallLocation#line` are `UInt32?`, `CreateTerminalParams#output_byte_limit` is `UInt64?`, and `UsageUpdate#used`/`#size` are `UInt64`. Valid values above the signed maximum now decode, and negative values are rejected (an `fs/read_text_file` / `terminal/create` request carrying one is answered with `-32602 Invalid params`)
+- An agent request for an unknown `_`-prefixed extension method with no `on_agent_request` handler is answered with `-32601 Method not found` (method name in `data`) instead of a `null` result, per extensibility#custom-requests and matching the Rust SDK
+
 ### Bug Fixes
+- Run agent-to-client request handlers (`on_agent_request`, `on_read_text_file`, ...) in their own fiber, so a blocking handler no longer stalls the dispatcher — e.g. the `cancelled` prompt response sent after `session/cancel` was not read until a still-open permission prompt returned. Notifications stay on the dispatcher, in order; request handlers may now run concurrently with each other and with notification callbacks
 - Serialize outgoing transport writes — concurrent senders could interleave bytes within a JSON-RPC frame and hand the agent an unparseable line
 - Deliver `session/update` to `on_notification` when no `on_update` handler is registered, instead of dropping every session update
 - Reject JSON-RPC ids that cannot be represented exactly in `Protocol.extract_id` — a fractional id was truncated onto an unrelated pending request, and an out-of-range numeric id raised `OverflowError` inside the dispatcher
