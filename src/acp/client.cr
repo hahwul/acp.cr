@@ -16,7 +16,8 @@
 #   and routes messages to the appropriate handler:
 #     - Responses go to pending request channels (keyed by request ID)
 #     - Notifications go to registered callback blocks
-#     - Agent-initiated requests go to registered method handlers
+#     - Agent-initiated requests go to registered method handlers, each
+#       run in its own fiber so a blocking handler can't stall the reader
 #
 # Usage:
 #   ```
@@ -217,12 +218,14 @@ module ACP
     @dispatcher_running : Bool = false
 
     # Tracks consecutive dispatch errors for detecting protocol corruption.
-    @consecutive_dispatch_errors : Int32 = 0
+    # Atomic because agent-request fibers record their outcome too.
+    @consecutive_dispatch_errors : Atomic(Int32) = Atomic(Int32).new(0)
 
     # When this many messages in a row fail to dispatch, the stream is assumed
     # to be corrupt (e.g. desynchronized framing) and the client tears down the
     # connection rather than spinning forever on un-dispatchable input. The
-    # counter resets to zero after any successful dispatch.
+    # counter resets to zero after any successful dispatch. An agent request
+    # counts once its handler fiber has (or has failed to) send the answer.
     MAX_CONSECUTIVE_DISPATCH_ERRORS = 10
 
     # Set when the caller invokes `close` explicitly. Used so the dispatcher
@@ -953,24 +956,10 @@ module ACP
         break if msg.nil?
 
         begin
-          dispatch_message(msg)
-          @consecutive_dispatch_errors = 0
+          # An agent request's outcome is recorded by its handler fiber.
+          @consecutive_dispatch_errors.set(0) unless dispatch_message(msg)
         rescue ex
-          @consecutive_dispatch_errors += 1
-          ClientLog.error { "Error dispatching message (#{@consecutive_dispatch_errors} consecutive): #{ex.message}" }
-          if @consecutive_dispatch_errors >= MAX_CONSECUTIVE_DISPATCH_ERRORS
-            # The input stream looks corrupt — continuing to read it would just
-            # spin. This is an UNEXPECTED loss of the stream, so we tear the
-            # connection down WITHOUT going through the public `close` (which
-            # would mark it as an intentional shutdown): we leave `@user_closed`
-            # false and let the post-loop cleanup drain pending requests and
-            # fire the `on_disconnect` callback.
-            ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
-            @state = ClientState::Closed
-            @dispatcher_running = false
-            @transport.close
-            break
-          end
+          record_dispatch_failure(ex)
         end
       end
 
@@ -992,8 +981,28 @@ module ACP
       end
     end
 
-    # Routes a single incoming message to the appropriate handler.
-    private def dispatch_message(msg : JSON::Any) : Nil
+    # Counts a failed dispatch and tears the connection down once
+    # `MAX_CONSECUTIVE_DISPATCH_ERRORS` failures happened in a row.
+    private def record_dispatch_failure(ex : Exception) : Nil
+      count = @consecutive_dispatch_errors.add(1) + 1
+      ClientLog.error { "Error dispatching message (#{count} consecutive): #{ex.message}" }
+      return if count < MAX_CONSECUTIVE_DISPATCH_ERRORS
+
+      # The input stream looks corrupt — continuing to read it would just
+      # spin. This is an UNEXPECTED loss of the stream, so we tear the
+      # connection down WITHOUT going through the public `close` (which
+      # would mark it as an intentional shutdown): we leave `@user_closed`
+      # false and let the dispatcher's post-loop cleanup drain pending
+      # requests and fire the `on_disconnect` callback.
+      ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
+      @state = ClientState::Closed
+      @dispatcher_running = false
+      @transport.close
+    end
+
+    # Routes a single incoming message to the appropriate handler. Returns
+    # true for an agent request, whose handler fiber records the outcome.
+    private def dispatch_message(msg : JSON::Any) : Bool
       # Every JSON-RPC 2.0 message is an object. ACP does not use batch
       # (array) requests, so a top-level array — or a bare number, string,
       # bool, or null — is not routable. Drop it with a warning: probing it
@@ -1002,19 +1011,20 @@ module ACP
       # otherwise healthy connection.
       unless msg.as_h?
         ClientLog.warn { "Ignoring non-object JSON-RPC frame" }
-        return
+        return false
       end
 
       kind = Protocol.classify_message(msg)
 
       case kind
+      when Protocol::MessageKind::Request
+        return handle_agent_request(msg)
       when Protocol::MessageKind::Response
         handle_response(msg)
-      when Protocol::MessageKind::Request
-        handle_agent_request(msg)
       when Protocol::MessageKind::Notification
         handle_notification(msg)
       end
+      false
     end
 
     # Handles a response to one of our pending requests.
@@ -1047,30 +1057,67 @@ module ACP
     # If we have a registered handler, we invoke it and send the result back.
     # Otherwise, we respond with a method-not-found error.
     #
+    # The handler runs in its own fiber: a handler that blocks (on the user,
+    # on I/O) must not stall the dispatcher, or responses and notifications
+    # behind it — such as the `cancelled` prompt response that follows a
+    # `session/cancel` — are not read until it returns. Each response goes
+    # back through the transport's serialized `send`. Notifications stay on
+    # the dispatcher so `session/update` order is preserved.
+    #
     # Dispatch order:
     #   1. Well-known methods with typed handlers (permission, fs/*, terminal/*)
     #   2. Generic `on_agent_request` callback
     #   3. Method-not-found error
-    private def handle_agent_request(msg : JSON::Any) : Nil
+    #
+    # Returns true when a handler fiber was started (it records the outcome).
+    private def handle_agent_request(msg : JSON::Any) : Bool
       id = Protocol.extract_id(msg)
       unless id
         # We cannot echo an ID we are unable to represent, and a response
         # carrying the wrong ID is worse than none.
         ClientLog.warn { "Ignoring agent request with an unusable JSON-RPC id" }
-        return
+        return false
       end
 
       method_name = msg["method"]?.try(&.as_s?)
-      return unless method_name
+      return false unless method_name
 
       params = msg["params"]?
 
       ClientLog.debug { "Agent request: method=#{method_name} id=#{id}" }
 
-      # Special handling for well-known agent methods.
+      # Track a permission request before handing it off, so a
+      # `session_cancel` issued right after it was read still answers it.
+      perm_sid = nil
+      if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+        perm_sid = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
+        @pending_mutex.synchronize { @pending_permissions[id] = perm_sid } if perm_sid
+      end
+
+      spawn(name: "acp-agent-request") do
+        route_agent_request(id, method_name, params, perm_sid)
+        @consecutive_dispatch_errors.set(0)
+      rescue ex
+        # Only the response write itself lands here (handler errors are
+        # answered as JSON-RPC errors).
+        if closed?
+          ClientLog.debug { "Dropping answer to agent request id=#{id}: client closed" }
+        else
+          record_dispatch_failure(ex)
+        end
+      end
+      true
+    end
+
+    private def route_agent_request(
+      id : Protocol::RequestId,
+      method_name : String,
+      params : JSON::Any?,
+      perm_sid : String?,
+    ) : Nil
       case method_name
       when Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-        handle_permission_request(id, params)
+        handle_permission_request(id, params, perm_sid)
       when Protocol::ClientMethod::FS_READ_TEXT_FILE
         handle_typed_client_method(id, params, @on_read_text_file, Protocol::ReadTextFileParams, method_name)
       when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
@@ -1090,17 +1137,19 @@ module ACP
       end
     end
 
-    # Delegates an unrecognized agent request to the generic handler,
-    # or responds with a method-not-found error if no handler is set.
+    # Delegates an unrecognized agent request to the generic handler, or
+    # responds with -32601 Method not found if no handler is set.
+    #
+    # Extension methods (`_`-prefixed) reach `on_agent_request` under their
+    # full wire name. Without a handler they get -32601 like any other
+    # unknown method (extensibility#custom-requests: "If the receiving end
+    # doesn't recognize the custom method name, it should respond with the
+    # standard 'Method not found' error"), with the method name as `data`.
     private def handle_unknown_agent_request(
       id : Protocol::RequestId,
       method_name : String,
       params : JSON::Any?,
     ) : Nil
-      # Check if this is an extension method (prefixed with `_`).
-      # Extension methods are dispatched to `on_agent_request` with the
-      # full wire name (including the `_` prefix), allowing handlers to
-      # distinguish extension methods from standard ones.
       if handler = @on_agent_request
         begin
           result = handler.call(method_name, params || JSON::Any.new(nil))
@@ -1110,17 +1159,12 @@ module ACP
           respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
         end
       else
-        if Protocol::ExtensionMethod.extension?(method_name)
-          # Extension methods without a handler get a null response.
-          respond_to_agent(id, JSON::Any.new(nil))
-        else
-          # No handler registered — respond with method not found.
-          respond_to_agent_error(
-            id,
-            JsonRpcError::METHOD_NOT_FOUND,
-            "Client does not handle method: #{method_name}"
-          )
-        end
+        respond_to_agent_error(
+          id,
+          JsonRpcError::METHOD_NOT_FOUND,
+          "Client does not handle method: #{method_name}",
+          JSON::Any.new(method_name)
+        )
       end
     end
 
@@ -1166,12 +1210,11 @@ module ACP
 
     # Handles a `session/request_permission` request from the agent.
     # Delegates to the on_agent_request handler or auto-denies.
-    private def handle_permission_request(id : Protocol::RequestId, params : JSON::Any?) : Nil
+    #
+    # `sid` is set when the request was registered in `@pending_permissions`;
+    # the answer is then sent only if `session_cancel` hasn't already sent one.
+    private def handle_permission_request(id : Protocol::RequestId, params : JSON::Any?, sid : String?) : Nil
       if handler = @on_agent_request
-        # Track the request so `session_cancel` can answer it while the
-        # handler is still waiting (e.g. on the user).
-        sid = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
-        @pending_mutex.synchronize { @pending_permissions[id] = sid } if sid
         begin
           result = handler.call("session/request_permission", params || JSON::Any.new(nil))
           respond_to_agent(id, result) if claim_permission_response(id, sid)
@@ -1194,7 +1237,7 @@ module ACP
         # stays consistent with `Protocol::RequestPermissionResult.cancelled`.
         ClientLog.warn { "No handler for permission request; auto-cancelling" }
         cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
-        respond_to_agent(id, cancelled)
+        respond_to_agent(id, cancelled) if claim_permission_response(id, sid)
       end
     end
 

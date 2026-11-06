@@ -3965,7 +3965,7 @@ describe ACP::Protocol::CreateTerminalParams do
       command: "npm",
       args: ["test", "--coverage"],
       cwd: "/home/user/project",
-      output_byte_limit: 1048576_i64
+      output_byte_limit: 1048576_u64
     )
     parsed = JSON.parse(params.to_json)
     parsed["sessionId"].as_s.should eq("sess-003")
@@ -4549,7 +4549,7 @@ describe "Extension Methods" do
       client.close
     end
 
-    it "returns null response for extension requests without handler" do
+    it "returns method not found for extension requests without handler" do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
 
@@ -4561,15 +4561,16 @@ describe "Extension Methods" do
       end
       client.initialize_connection
 
-      # No on_agent_request handler set — extension methods get null response
+      # No on_agent_request handler set — an unrecognized extension request
+      # gets -32601 (extensibility#custom-requests), like any unknown method.
       transport.inject_raw(%({"jsonrpc": "2.0", "id": "ext-2", "method": "_unknown_ext", "params": {}}))
       sleep 50.milliseconds
 
       response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "ext-2" }
       response.should_not be_nil
-      # Extension methods without handler get a null result, not method_not_found error
-      response.as(JSON::Any)["result"]?.should_not be_nil
-      response.as(JSON::Any)["error"]?.should be_nil
+      response.as(JSON::Any)["result"]?.should be_nil
+      response.as(JSON::Any)["error"]["code"].as_i.should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+      response.as(JSON::Any)["error"]["data"].as_s.should eq("_unknown_ext")
 
       client.close
     end

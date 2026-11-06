@@ -718,7 +718,7 @@ describe "ACP v1 wire coverage" do
   end
 
   it "reports a zero usage ratio rather than dividing by zero" do
-    ACP::Protocol::UsageUpdate.new(used: 0_i64, size: 0_i64).usage_ratio.should eq(0.0)
+    ACP::Protocol::UsageUpdate.new(used: 0_u64, size: 0_u64).usage_ratio.should eq(0.0)
   end
 
   it "parses `usage_update` without a cost" do
@@ -1007,5 +1007,134 @@ describe "ACP::Protocol::SessionInfoUpdate field presence" do
 
     update.updated_at = nil
     update.updated_at_present?.should be_true
+  end
+end
+
+# ─── R23: a blocked agent-request handler must not stall the dispatcher ──
+#
+# prompt-turn#cancellation: after `session/cancel` the Agent answers the
+# prompt with `cancelled`. Handlers ran on the dispatcher fiber, so one
+# still blocked (here: a permission prompt the user never answers, already
+# answered `cancelled` by `session_cancel`) kept that response unread until
+# `prompt_timeout`.
+
+# Signals every frame the client writes, so the "agent" side can react to
+# it without sleeping.
+class SignalingTransport < TestTransport
+  getter written : Channel(JSON::Any) = Channel(JSON::Any).new(64)
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    super
+    @written.send(sent_messages.last)
+  end
+end
+
+describe "ACP::Client agent request handlers" do
+  it "keeps reading responses while a handler is blocked" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.prompt_timeout = 2.0 # bounds the failure mode; never waited on when passing
+    release = Channel(Nil).new
+    entered = Channel(Nil).new(1)
+
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+
+    spawn do
+      prompt_id = transport.written.receive["id"].as_i64
+      transport.inject_raw(%({"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t"},"options":[]}}))
+      entered.receive
+      client.session_cancel("s1")
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{prompt_id},"result":{"stopReason":"cancelled"}}))
+    end
+
+    begin
+      result = client.session_prompt_text("hi", "s1")
+      result.stop_reason.should eq("cancelled")
+    ensure
+      release.send(nil)
+    end
+
+    answers = transport.sent_messages.select { |m| m["id"]?.try(&.as_s?) == "perm-1" }
+    answers.size.should eq(1)
+    answers[0]["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
+    client.close
+  end
+
+  it "still answers a raising handler with a JSON-RPC error" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) : JSON::Any { raise "boom" }
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":5,"method":"_x/y","params":{}}))
+    answer = transport.written.receive
+    answer["id"].as_i.should eq(5)
+    answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    client.close
+  end
+
+  it "drops the answer of a handler that returns after close" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    release = Channel(Nil).new
+    entered = Channel(Nil).new(1)
+    done = Channel(Nil).new(1)
+
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      done.send(nil)
+      JSON::Any.new(nil)
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":9,"method":"_x/y","params":{}}))
+    entered.receive
+    client.close
+    release.send(nil)
+    done.receive
+    Fiber.yield # let the handler fiber try (and fail) to answer
+
+    transport.sent_messages.any? { |m| m["id"]? == 9 }.should be_false
+  end
+end
+
+# ─── R24: uint32 / uint64 schema fields must decode their full range ────
+#
+# schema.json: ReadTextFileRequest.line/limit and ToolCallLocation.line are
+# `uint32`, CreateTerminalRequest.outputByteLimit and UsageUpdate.used/size
+# are `uint64`. They were Int32/Int64, so valid values above the signed
+# maximum failed to parse and negative values were accepted.
+describe "ACP unsigned protocol integers" do
+  it "decodes values above the signed maximum" do
+    params = ACP::Protocol::ReadTextFileParams.from_json(%({"sessionId":"s","path":"/a","line":4294967295,"limit":2147483648}))
+    params.line.should eq(UInt32::MAX)
+    params.limit.should eq(2147483648_u32)
+
+    ACP::Protocol::ToolCallLocation.from_json(%({"path":"/a","line":4294967295})).line.should eq(UInt32::MAX)
+    ACP::Protocol::CreateTerminalParams.from_json(%({"sessionId":"s","command":"c","outputByteLimit":18446744073709551615})).output_byte_limit.should eq(UInt64::MAX)
+
+    usage = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate":"usage_update","used":9223372036854775808,"size":18446744073709551615})).as(ACP::Protocol::UsageUpdate)
+    usage.used.should eq(9223372036854775808_u64)
+    usage.size.should eq(UInt64::MAX)
+  end
+
+  it "rejects a negative fs/read_text_file line with INVALID_PARAMS" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    called = false
+    client.on_read_text_file = ->(_p : ACP::Protocol::ReadTextFileParams) do
+      called = true
+      ACP::Protocol::ReadTextFileResult.new(content: "")
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":3,"method":"fs/read_text_file","params":{"sessionId":"s","path":"/a","line":-1}}))
+    answer = transport.written.receive
+    answer["id"].as_i.should eq(3)
+    answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    called.should be_false
+    client.close
   end
 end

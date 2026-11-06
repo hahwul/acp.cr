@@ -636,11 +636,11 @@ module ACP
     struct UsageUpdate < SessionUpdate
       include JSON::Serializable
 
-      # How much of the context window is currently in use (required).
-      property used : Int64
+      # How much of the context window is currently in use (required). Schema `uint64`.
+      property used : UInt64
 
-      # The total size of the context window (required).
-      property size : Int64
+      # The total size of the context window (required). Schema `uint64`.
+      property size : UInt64
 
       # The cost accrued so far, if the agent reports one.
       property cost : Cost?
@@ -650,8 +650,8 @@ module ACP
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
-        @used : Int64,
-        @size : Int64,
+        @used : UInt64,
+        @size : UInt64,
         @cost : Cost? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
@@ -661,7 +661,7 @@ module ACP
       # The fraction of the context window in use, in `0.0..1.0`.
       # Returns 0.0 when `size` is zero so callers never divide by zero.
       def usage_ratio : Float64
-        return 0.0 if @size <= 0
+        return 0.0 if @size == 0
         @used.to_f / @size.to_f
       end
     end

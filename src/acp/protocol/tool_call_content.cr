@@ -180,8 +180,8 @@ module ACP
       # The absolute file path being accessed or modified (required).
       property path : String
 
-      # Optional line number within the file (1-based).
-      property line : Int32?
+      # Optional line number within the file (1-based). Schema `uint32`.
+      property line : UInt32?
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -189,7 +189,7 @@ module ACP
 
       def initialize(
         @path : String,
-        @line : Int32? = nil,
+        @line : UInt32? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end

@@ -49,11 +49,11 @@ module ACP
       # Absolute path to the file to read (required).
       property path : String
 
-      # Optional line number to start reading from (1-based).
-      property line : Int32?
+      # Optional line number to start reading from (1-based). Schema `uint32`.
+      property line : UInt32?
 
-      # Optional maximum number of lines to read.
-      property limit : Int32?
+      # Optional maximum number of lines to read. Schema `uint32`.
+      property limit : UInt32?
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -62,8 +62,8 @@ module ACP
       def initialize(
         @session_id : String,
         @path : String,
-        @line : Int32? = nil,
-        @limit : Int32? = nil,
+        @line : UInt32? = nil,
+        @limit : UInt32? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end
@@ -172,8 +172,9 @@ module ACP
       # Maximum number of output bytes to retain. Once exceeded,
       # earlier output is truncated to stay within this limit.
       # The Client MUST ensure truncation happens at a character boundary.
+      # Schema `uint64`.
       @[JSON::Field(key: "outputByteLimit")]
-      property output_byte_limit : Int64?
+      property output_byte_limit : UInt64?
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -185,7 +186,7 @@ module ACP
         @args : Array(String)? = nil,
         @env : Array(JSON::Any)? = nil,
         @cwd : String? = nil,
-        @output_byte_limit : Int64? = nil,
+        @output_byte_limit : UInt64? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end
