@@ -1100,8 +1100,10 @@ module ACP
       rescue ex
         # Only the response write itself lands here (handler errors are
         # answered as JSON-RPC errors).
-        if closed?
-          ClientLog.debug { "Dropping answer to agent request id=#{id}: client closed" }
+        # Once the connection is gone (closed, or the dispatcher stopped on
+        # EOF) a failed write is expected, not a sign of a corrupt stream.
+        if closed? || !@dispatcher_running
+          ClientLog.debug { "Dropping answer to agent request id=#{id}: connection closed" }
         else
           record_dispatch_failure(ex)
         end
@@ -1151,13 +1153,15 @@ module ACP
       params : JSON::Any?,
     ) : Nil
       if handler = @on_agent_request
-        begin
-          result = handler.call(method_name, params || JSON::Any.new(nil))
-          respond_to_agent(id, result)
+        # Only the handler's own failure becomes a JSON-RPC error; a failed
+        # write of the answer propagates to the request fiber.
+        result = begin
+          handler.call(method_name, params || JSON::Any.new(nil))
         rescue ex
-          ClientLog.error { "Error in agent request handler: #{ex.message}" }
-          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
+          ClientLog.error { "Error in agent request handler for #{method_name}: #{ex.message}" }
+          return respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
         end
+        respond_to_agent(id, result)
       else
         respond_to_agent_error(
           id,
@@ -1169,7 +1173,8 @@ module ACP
     end
 
     # Generic typed dispatch for client methods. Tries the typed handler
-    # first, then falls back to `on_agent_request`, then returns an error.
+    # first, then falls back like an unknown method (`on_agent_request`,
+    # else -32601).
     private def handle_typed_client_method(
       id : Protocol::RequestId,
       params : JSON::Any?,
@@ -1177,35 +1182,21 @@ module ACP
       params_type,
       method_name : String,
     ) : Nil
-      if h = handler
-        begin
-          typed_params = params_type.from_json((params || JSON::Any.new(nil)).to_json)
-          result = h.call(typed_params)
-          # Convert JSON::Serializable result to JSON::Any via round-trip;
-          # Crystal has no direct JSON::Serializable → JSON::Any conversion.
-          respond_to_agent(id, JSON.parse(result.to_json))
-        rescue ex : JSON::SerializableError
-          ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
-          respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
-        rescue ex
-          ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
-          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
-        end
-      elsif fallback = @on_agent_request
-        begin
-          result = fallback.call(method_name, params || JSON::Any.new(nil))
-          respond_to_agent(id, result)
-        rescue ex
-          ClientLog.error { "Error in agent request handler for #{method_name}: #{ex.message}" }
-          respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
-        end
-      else
-        respond_to_agent_error(
-          id,
-          JsonRpcError::METHOD_NOT_FOUND,
-          "Client does not handle method: #{method_name}"
-        )
+      return handle_unknown_agent_request(id, method_name, params) unless h = handler
+
+      result = begin
+        typed_params = params_type.from_json((params || JSON::Any.new(nil)).to_json)
+        # Convert JSON::Serializable result to JSON::Any via round-trip;
+        # Crystal has no direct JSON::Serializable → JSON::Any conversion.
+        JSON.parse(h.call(typed_params).to_json)
+      rescue ex : JSON::SerializableError
+        ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
+        return respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
+      rescue ex
+        ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
+        return respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
       end
+      respond_to_agent(id, result)
     end
 
     # Handles a `session/request_permission` request from the agent.
@@ -1215,16 +1206,17 @@ module ACP
     # the answer is then sent only if `session_cancel` hasn't already sent one.
     private def handle_permission_request(id : Protocol::RequestId, params : JSON::Any?, sid : String?) : Nil
       if handler = @on_agent_request
-        begin
-          result = handler.call("session/request_permission", params || JSON::Any.new(nil))
-          respond_to_agent(id, result) if claim_permission_response(id, sid)
+        result = begin
+          handler.call("session/request_permission", params || JSON::Any.new(nil))
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
           if claim_permission_response(id, sid)
             respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR,
               "Permission handler error: #{ex.message}")
           end
+          return
         end
+        respond_to_agent(id, result) if claim_permission_response(id, sid)
       else
         # No handler — auto-cancel the permission request.
         #

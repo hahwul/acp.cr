@@ -1,4 +1,5 @@
 require "./spec_helper"
+require "log/spec"
 
 # ═══════════════════════════════════════════════════════════════════════
 # Regression Specs
@@ -1033,8 +1034,8 @@ describe "ACP::Client agent request handlers" do
   it "keeps reading responses while a handler is blocked" do
     transport = SignalingTransport.new
     client = ACP::Client.new(transport)
-    client.prompt_timeout = 2.0 # bounds the failure mode; never waited on when passing
-    release = Channel(Nil).new
+    client.prompt_timeout = 2.0   # bounds the failure mode; never waited on when passing
+    release = Channel(Nil).new(1) # buffered: the ensure must not block if the handler never ran
     entered = Channel(Nil).new(1)
 
     client.on_agent_request = ->(_method : String, _params : JSON::Any) do
@@ -1076,12 +1077,14 @@ describe "ACP::Client agent request handlers" do
     client.close
   end
 
-  it "drops the answer of a handler that returns after close" do
+  it "drops, without counting a dispatch error, the answer of a handler that outlives the connection" do
     transport = SignalingTransport.new
     client = ACP::Client.new(transport)
-    release = Channel(Nil).new
+    release = Channel(Nil).new(1)
     entered = Channel(Nil).new(1)
-    done = Channel(Nil).new(1)
+    done = Channel(Nil).new
+    disconnected = Channel(Nil).new(1)
+    client.on_disconnect = -> { disconnected.send(nil); nil }
 
     client.on_agent_request = ->(_method : String, _params : JSON::Any) do
       entered.send(nil)
@@ -1090,13 +1093,16 @@ describe "ACP::Client agent request handlers" do
       JSON::Any.new(nil)
     end
 
-    transport.inject_raw(%({"jsonrpc":"2.0","id":9,"method":"_x/y","params":{}}))
-    entered.receive
-    client.close
-    release.send(nil)
-    done.receive
-    Fiber.yield # let the handler fiber try (and fail) to answer
+    Log.capture("acp.client", level: :warn) do |logs|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":9,"method":"_x/y","params":{}}))
+      entered.receive
+      transport.close # the agent went away (EOF), not a user close
+      disconnected.receive
+      release.send(nil)
+      done.receive # the handler fiber runs on to its failed write before we resume
 
+      logs.empty # the failed write is dropped quietly, not reported as stream corruption
+    end
     transport.sent_messages.any? { |m| m["id"]? == 9 }.should be_false
   end
 end
