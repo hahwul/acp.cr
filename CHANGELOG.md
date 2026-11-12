@@ -12,6 +12,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Answer both requests when the agent reuses the ID of a request still in flight and the newer one finishes first; the older one was taken for cancelled and never answered
 - Deliver each response to its request once: a response repeated three times in one burst blocked the dispatcher fiber forever, so no later response or notification arrived
 - Run agent-to-client request handlers (`on_agent_request`, `on_read_text_file`, ...) in their own fiber, so a blocking handler no longer stalls the dispatcher — e.g. the `cancelled` prompt response sent after `session/cancel` was not read until a still-open permission prompt returned. Notifications stay on the dispatcher, in order; request handlers may now run concurrently with each other and with notification callbacks
 - Serialize outgoing transport writes — concurrent senders could interleave bytes within a JSON-RPC frame and hand the agent an unparseable line

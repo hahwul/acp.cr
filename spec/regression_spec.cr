@@ -1450,6 +1450,19 @@ describe "ACP::Client requests pending at disconnect" do
     client.close
   end
 
+  it "refuse a request made after the connection was lost, even if the transport still accepts writes" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    transport.inject_message(nil) # EOF; TestTransport#send keeps working
+    sleep 20.milliseconds
+    expect_raises(ACP::ConnectionClosedError) do
+      client.send_request_raw("_a", JSON::Any.new(nil))
+    end
+    transport.sent_messages.should be_empty
+    client.close
+  end
+
   it "raise ConnectionClosedError when the client is closed, with or without a timeout" do
     [2.0, nil].each do |timeout|
       transport = SignalingTransport.new

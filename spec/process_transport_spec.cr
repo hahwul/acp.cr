@@ -94,7 +94,7 @@ end
 # not an ACP::Error; the error guide rescues `ACP::TransportError` here.
 describe "ACP::ProcessTransport spawn failures" do
   it "raises TransportError for a missing command" do
-    ex = expect_raises(ACP::TransportError, /Failed to start agent 'acp-no-such-agent-r31'/) do
+    ex = expect_raises(ACP::TransportError, /Failed to start agent: .*acp-no-such-agent-r31/) do
       ACP::ProcessTransport.new("acp-no-such-agent-r31")
     end
     ex.cause.should be_a(File::NotFoundError)
@@ -104,6 +104,10 @@ describe "ACP::ProcessTransport spawn failures" do
     expect_raises(ACP::TransportError) do
       ACP::ProcessTransport.new("cat", chdir: "/nonexistent-acp-r31-dir")
     end
+  end
+
+  it "raises TransportError for an argument with a NUL byte" do
+    expect_raises(ACP::TransportError) { ACP::ProcessTransport.new("cat", ["a\0b"]) }
   end
 
   it "raises TransportError from ACP.connect" do

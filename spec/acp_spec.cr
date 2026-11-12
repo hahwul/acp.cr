@@ -23,9 +23,14 @@ class TestTransport < ACP::Transport
     @incoming = Channel(JSON::Any?).new(64)
   end
 
+  # Handler fibers send concurrently; under -Dpreview_mt an unguarded
+  # Array#<< can lose a frame.
+  @send_mutex = Mutex.new
+
   def send(message : Hash(String, JSON::Any)) : Nil
     raise ACP::ConnectionClosedError.new if @closed
-    @sent_messages << JSON.parse(message.to_json)
+    frame = JSON.parse(message.to_json)
+    @send_mutex.synchronize { @sent_messages << frame }
   end
 
   def receive : JSON::Any?

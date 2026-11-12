@@ -426,10 +426,11 @@ module ACP
           output: Process::Redirect::Pipe,
           error: stderr
         )
-      rescue ex : IO::Error
-        # A missing or non-executable command, or a bad `chdir`, raises
-        # `File::Error`; keep the library's contract of raising `ACP::Error`.
-        raise TransportError.new("Failed to start agent '#{command}': #{ex.message}", ex)
+      rescue ex
+        # A missing or non-executable command or a bad `chdir` raises
+        # `File::Error`, a NUL byte in an argument `ArgumentError`; keep the
+        # library's contract of raising `ACP::Error`.
+        raise TransportError.new("Failed to start agent: #{ex.message}", ex)
       end
 
       super(@process.output, @process.input, buffer_size, max_line_bytes)
