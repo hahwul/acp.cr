@@ -77,8 +77,9 @@ module ACP
       if has_id && has_method
         # Agent is calling a method on the client (e.g., session/request_permission).
         MessageKind::Request
-      elsif has_id
-        # Response to one of our outgoing requests.
+      elsif has_id && !obj.has_key?("method")
+        # Response to one of our outgoing requests. A frame with an id and a
+        # non-string `method` is neither, and must not resolve a request.
         MessageKind::Response
       elsif has_method
         # Notification from the agent (e.g., session/update).
@@ -114,7 +115,8 @@ module ACP
         # JSON numbers without decimals may parse as float; coerce to Int64
         # only when the value is integral and inside Int64's range.
         return unless v.finite? && v == v.trunc
-        return unless v >= Int64::MIN.to_f64 && v <= Int64::MAX.to_f64
+        # `Int64::MAX.to_f64` rounds up to 2^63, which is out of range.
+        return unless v >= Int64::MIN.to_f64 && v < Int64::MAX.to_f64
         v.to_i64
       end
     end

@@ -14,6 +14,8 @@
 
 require "json"
 require "log"
+require "./errors"
+require "./protocol/types"
 
 module ACP
   # Logger for transport-level diagnostics.
@@ -87,6 +89,9 @@ module ACP
 
     # The background reader fiber.
     @reader_fiber : Fiber? = nil
+
+    # Set while a -32700 answer is being written; see `send_parse_error`.
+    @parse_error_pending : Atomic(Bool) = Atomic(Bool).new(false)
 
     # Serializes outgoing writes. A write to a pipe can block (and therefore
     # yield to another fiber) part-way through a frame; without this lock a
@@ -274,17 +279,20 @@ module ACP
     # (JSON-RPC 2.0 §5: the id MUST be null when a parse error kept it from
     # being detected), so a peer whose request was garbled gets an answer
     # instead of waiting forever. The raw line is not echoed back.
+    #
+    # Written from its own fiber so a peer that isn't draining its stdin can
+    # never stall the reader; while one answer is still being written,
+    # further unparseable lines are not answered.
     private def send_parse_error : Nil
-      send({
-        "jsonrpc" => JSON::Any.new("2.0"),
-        "id"      => JSON::Any.new(nil),
-        "error"   => JSON::Any.new({
-          "code"    => JSON::Any.new(-32700_i64),
-          "message" => JSON::Any.new("Parse error"),
-        }),
-      })
-    rescue ex : TransportError
-      Log.debug { "Could not send parse error: #{ex.message}" }
+      return unless @parse_error_pending.compare_and_set(false, true)[1]
+
+      spawn(name: "acp-transport-parse-error") do
+        send(Protocol.build_error_response(nil, JsonRpcError::PARSE_ERROR, "Parse error"))
+      rescue ex : TransportError
+        Log.debug { "Could not send parse error: #{ex.message}" }
+      ensure
+        @parse_error_pending.set(false)
+      end
     end
 
     private def start_reader

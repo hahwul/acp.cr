@@ -1028,7 +1028,14 @@ module ACP
 
       case kind
       when Protocol::MessageKind::Request
-        return handle_agent_request(msg)
+        # `session/update` is only ever a notification in ACP; some JSON-RPC
+        # serializers write `"id": null` on notifications, so don't turn
+        # those into a -32601 answer and lose the update.
+        if obj["id"].raw.nil? && obj["method"].as_s == Protocol::AgentMethod::SESSION_UPDATE
+          handle_notification(msg)
+        else
+          return handle_agent_request(msg)
+        end
       when Protocol::MessageKind::Response
         handle_response(msg)
       when Protocol::MessageKind::Notification
@@ -1052,6 +1059,9 @@ module ACP
     private def reject_invalid_request(detail : String? = nil) : Nil
       respond_to_agent_error(nil, JsonRpcError::INVALID_REQUEST, "Invalid request",
         detail.try { |d| JSON::Any.new(d) })
+    rescue ex : TransportError
+      # The link is going away; the dispatcher notices on its next read.
+      ClientLog.debug { "Could not answer an invalid frame: #{ex.message}" }
     end
 
     # Handles a response to one of our pending requests.
@@ -1119,8 +1129,10 @@ module ACP
 
       # Track a permission request before handing it off, so a
       # `session_cancel` issued right after it was read still answers it.
+      # A null-id request isn't tracked: every such request would share the
+      # one `nil` key, and all but one would go unanswered.
       perm_sid = nil
-      if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+      if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION && !id.nil?
         perm_sid = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
         @pending_mutex.synchronize { @pending_permissions[id] = perm_sid } if perm_sid
       end
@@ -1274,7 +1286,9 @@ module ACP
     # (cancellation) — so its code, message and data are sent as-is. Any
     # other exception becomes -32603 with `fallback` as the message.
     private def respond_handler_error(id : Protocol::RequestId?, ex : Exception, fallback : String) : Nil
-      if ex.is_a?(JsonRpcError)
+      # An error the agent returned to a request the handler made itself
+      # describes that other request, not this one: don't echo it back.
+      if ex.is_a?(JsonRpcError) && !ex.received?
         respond_to_agent_error(id, ex.code, ex.message || fallback, ex.data)
       else
         respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, fallback)

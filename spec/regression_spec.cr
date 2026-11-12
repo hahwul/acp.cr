@@ -1185,6 +1185,30 @@ describe "ACP::Client agent request with a null id" do
     answer["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
     client.close
   end
+
+  it "answers every one of several null-id permission requests" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_agent_request = ->(_m : String, _p : JSON::Any) { JSON.parse(ACP::Protocol::RequestPermissionResult.selected("ok").to_json) }
+
+    2.times do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}))
+    end
+    2.times { next_answer(transport)["result"]["outcome"]["optionId"].as_s.should eq("ok") }
+    client.close
+  end
+
+  it "still delivers a session/update that carries \"id\": null, without answering it" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    got = Channel(String).new(1)
+    client.on_update = ->(p : ACP::Protocol::SessionUpdateParams) { got.send(p.session_id); nil }
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}))
+    got.receive.should eq("s1")
+    transport.sent_messages.should be_empty
+    client.close
+  end
 end
 
 # ─── R26: unreadable frames get a JSON-RPC error with `"id": null` ──────
@@ -1201,7 +1225,7 @@ describe "ACP::Client invalid JSON-RPC frames" do
     called = false
     client.on_agent_request = ->(_m : String, _p : JSON::Any) { called = true; JSON::Any.new(nil) }
 
-    [%(1.5), %(true), %([1]), %(1e300)].each do |id|
+    [%(1.5), %(true), %([1]), %(1e300), %(9223372036854775807.0)].each do |id|
       transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"_x/y","params":{}}))
       answer = next_answer(transport)
       answer["id"].raw.should be_nil
@@ -1215,7 +1239,7 @@ describe "ACP::Client invalid JSON-RPC frames" do
     transport = SignalingTransport.new
     client = ACP::Client.new(transport)
 
-    ["[]", %([{"jsonrpc":"2.0","id":1,"method":"_x"}]), "17", "null", "{}", %({"jsonrpc":"2.0","method":5})].each do |raw|
+    ["[]", %([{"jsonrpc":"2.0","id":1,"method":"_x"}]), "17", "null", "{}", %({"jsonrpc":"2.0","method":5}), %({"jsonrpc":"2.0","id":3,"method":5})].each do |raw|
       transport.inject_raw(raw)
       answer = next_answer(transport)
       answer["id"].raw.should be_nil
@@ -1301,6 +1325,18 @@ describe "ACP::Client handler JSON-RPC errors" do
 
     transport.inject_raw(%({"jsonrpc":"2.0","id":6,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}))
     next_answer(transport)["error"]["code"].as_i.should eq(ACP::JsonRpcError::REQUEST_CANCELLED)
+    client.close
+  end
+
+  it "does not echo an error the agent returned to the handler's own request" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_agent_request = ->(_m : String, _p : JSON::Any) : JSON::Any do
+      raise ACP::JsonRpcError.from_json_any(JSON.parse(%({"code":-32601,"message":"Method not found"})))
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":8,"method":"_x/y","params":{}}))
+    next_answer(transport)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
     client.close
   end
 
