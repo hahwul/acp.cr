@@ -13,21 +13,22 @@ acp.cr provides real-time streaming of agent responses through the `on_update` c
 Register an update handler before sending prompts:
 
 ```crystal
-client.on_update = ->(update : ACP::Protocol::SessionUpdate) {
-  case update
+client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) {
+  case update = params.update
   when ACP::Protocol::AgentMessageChunkUpdate
-    print update.delta
+    print update.text
   when ACP::Protocol::AgentThoughtChunkUpdate
-    puts "[Thought] #{update.delta}"
+    puts "[Thought] #{update.text}"
   when ACP::Protocol::ToolCallUpdate
-    puts "\n=> Tool: #{update.tool_name}"
+    puts "\n=> Tool: #{update.title}"
   when ACP::Protocol::ToolCallStatusUpdate
     puts "   Status: #{update.status}"
   when ACP::Protocol::PlanUpdate
     update.entries.each do |entry|
-      puts "  [#{entry.status}] #{entry.title}"
+      puts "  [#{entry.status}] #{entry.content}"
     end
   end
+  nil
 }
 
 result = session.prompt("Refactor this function")

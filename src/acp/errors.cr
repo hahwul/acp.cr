@@ -88,7 +88,11 @@ module ACP
     # Optional structured data attached to the error.
     getter data : JSON::Any?
 
-    def initialize(@code : Int32, message : String, @data : JSON::Any? = nil)
+    # True when this error was decoded from a peer's error response (see
+    # `from_json_any`) rather than raised by local code.
+    getter? received : Bool
+
+    def initialize(@code : Int32, message : String, @data : JSON::Any? = nil, @received : Bool = false)
       super(message)
     end
 
@@ -154,7 +158,7 @@ module ACP
       code = obj["code"]?.try(&.as_i64?).try { |c| c.to_i32 if (Int32::MIN..Int32::MAX).includes?(c) } || INTERNAL_ERROR
       message = obj["message"]?.try(&.as_s?) || "Unknown error"
       data = obj["data"]?
-      new(code, message, data)
+      new(code, message, data, received: true)
     end
   end
 

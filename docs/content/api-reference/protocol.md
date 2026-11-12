@@ -131,15 +131,15 @@ Session updates are received via the `on_update` callback. They form a discrimin
 
 | Type | Key Fields |
 |------|------------|
-| `AgentMessageChunkUpdate` | `delta : String` |
-| `AgentThoughtChunkUpdate` | `delta : String` |
-| `ToolCallUpdate` | `tool_name : String`, `tool_call_id : String` |
-| `ToolCallStatusUpdate` | `status : ToolCallStatus`, `tool_call_id : String` |
+| `AgentMessageChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
+| `AgentThoughtChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
+| `ToolCallUpdate` | `tool_call_id : String`, `title : String`, `kind : String?`, `status : String?` |
+| `ToolCallStatusUpdate` | `tool_call_id : String`, `status : String?`, `title : String?` |
 | `PlanUpdate` | `entries : Array(PlanEntry)` |
-| `UserMessageChunkUpdate` | `delta : String` |
-| `AvailableCommandsUpdate` | `commands : Array(Command)` |
-| `CurrentModeUpdate` | `mode_id : String` |
-| `ConfigOptionUpdate` | `config_id : String`, `value : JSON::Any` |
+| `UserMessageChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
+| `AvailableCommandsUpdate` | `available_commands : Array(AvailableCommand)` |
+| `CurrentModeUpdate` | `current_mode_id : String` |
+| `ConfigOptionUpdate` | `config_options : Array(JSON::Any)`, `typed_config_options : Array(ConfigOption)` |
 
 ## Capabilities
 
@@ -148,21 +148,21 @@ Session updates are received via the `on_update` callback. They form a discrimin
 ```crystal
 ACP::Protocol::ClientCapabilities.new(
   fs : FsCapabilities? = nil,
-  terminal : Bool? = nil
+  terminal : Bool = false
 )
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `fs` | `FsCapabilities?` | File system capabilities |
-| `terminal` | `Bool?` | Terminal support |
+| `terminal?` | `Bool` | Terminal support |
 
 ### FsCapabilities
 
 ```crystal
 ACP::Protocol::FsCapabilities.new(
-  read_text_file : Bool? = nil,
-  write_text_file : Bool? = nil
+  read_text_file : Bool = false,
+  write_text_file : Bool = false
 )
 ```
 
