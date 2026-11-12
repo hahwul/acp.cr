@@ -61,10 +61,13 @@ end
 
 ### Session Errors
 
+An agent answers an unknown session ID with `-32002`:
+
 ```crystal
 begin
   session = ACP::Session.load(client, "invalid-id", Dir.current)
-rescue ex : ACP::SessionNotFoundError
+rescue ex : ACP::JsonRpcError
+  raise ex unless ex.resource_not_found?
   puts "Session not found, creating new one"
   session = ACP::Session.create(client, Dir.current)
 end
@@ -99,6 +102,8 @@ end
 ```
 
 ## Disconnect Recovery
+
+A request still waiting when the agent exits or the client is closed raises `ACP::ConnectionClosedError`.
 
 ```crystal
 client.on_disconnect = -> {

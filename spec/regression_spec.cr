@@ -1391,3 +1391,101 @@ describe "ACP::Client#session_close with -32002" do
     client.close
   end
 end
+
+# ─── R29: a repeated response must not stall the dispatcher ─────────────
+#
+# JSON-RPC 2.0 §5: the Server replies to a request with exactly one
+# Response. The dispatcher pushed every response for a still-registered id
+# into that request's one-slot channel, so a third copy read in the same
+# burst blocked the dispatcher fiber forever: no later response or
+# notification was ever delivered.
+describe "ACP::Client repeated responses" do
+  it "keeps dispatching after the agent answers one request three times" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    pings = Channel(Nil).new(1)
+    client.on_notification = ->(_m : String, _p : JSON::Any?) { pings.send(nil) }
+
+    first = Channel(JSON::Any).new(1)
+    spawn { first.send(client.send_request_raw("_a", JSON::Any.new(nil))) }
+    transport.written.receive
+    3.times { transport.inject_raw(%({"jsonrpc":"2.0","id":1,"result":{"n":1}})) }
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_ping"}))
+
+    select
+    when pings.receive
+    when timeout(1.second) then fail "the dispatcher stopped after a repeated response"
+    end
+    first.receive["n"].as_i.should eq(1)
+
+    spawn do
+      transport.written.receive
+      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"result":{"n":2}}))
+    end
+    client.send_request_raw("_b", JSON::Any.new(nil))["n"].as_i.should eq(2)
+    client.close
+  end
+end
+
+# ─── R30: losing the connection mid-request raises ConnectionClosedError ─
+#
+# `Client#send_request` documents "Raises `ConnectionClosedError` if the
+# transport is closed", and the error guide rescues it as "Connection
+# lost". A request still waiting when the agent died (or `close` ran) got a
+# made-up `JsonRpcError` -32603 instead, flagged `received?` as if the agent
+# had sent it.
+describe "ACP::Client requests pending at disconnect" do
+  it "raise ConnectionClosedError when the agent's stdout ends" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    spawn do
+      transport.written.receive
+      transport.inject_message(nil) # EOF
+    end
+    expect_raises(ACP::ConnectionClosedError, /Connection lost/) do
+      client.send_request_raw("_a", JSON::Any.new(nil))
+    end
+    client.close
+  end
+
+  it "refuse a request made after the connection was lost, even if the transport still accepts writes" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    transport.inject_message(nil) # EOF; TestTransport#send keeps working
+    sleep 20.milliseconds
+    expect_raises(ACP::ConnectionClosedError) do
+      client.send_request_raw("_a", JSON::Any.new(nil))
+    end
+    transport.sent_messages.should be_empty
+    client.close
+  end
+
+  it "raise ConnectionClosedError when the client is closed, with or without a timeout" do
+    [2.0, nil].each do |timeout|
+      transport = SignalingTransport.new
+      client = ACP::Client.new(transport)
+      client.request_timeout = timeout
+      spawn do
+        transport.written.receive
+        client.close
+      end
+      expect_raises(ACP::ConnectionClosedError, /Client closed/) do
+        client.send_request_raw("_a", JSON::Any.new(nil))
+      end
+    end
+  end
+
+  it "does so for a real agent process that exits mid-request" do
+    transport = ACP::ProcessTransport.new("sh", ["-c", "read line; exit 3"])
+    client = ACP::Client.new(transport)
+    client.request_timeout = 5.0
+    expect_raises(ACP::ConnectionClosedError) do
+      client.send_request_raw("_a", JSON::Any.new(nil))
+    end
+    client.close
+    transport.wait.exit_code.should eq(3)
+  end
+end

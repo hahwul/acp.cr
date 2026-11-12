@@ -225,11 +225,19 @@ module ACP
     # are cooperative, this protects against unexpected scheduling).
     @pending_mutex : Mutex = Mutex.new
 
+    # Set by `drain_pending_requests`: the connection is gone, so a new
+    # request must not register (nothing would ever answer or drain it).
+    # Guarded by `@pending_mutex`.
+    @disconnected : Bool = false
+
     # An agent request whose handler hasn't answered yet. Compared by
     # identity, so a duplicate ID can't claim another request's answer.
     private class InFlightRequest
       getter method : String
       getter session_id : String?
+
+      # Set (under `@pending_mutex`) when a cancel answered the request.
+      property? answered : Bool = false
 
       def initialize(@method : String, @session_id : String?)
       end
@@ -674,7 +682,7 @@ module ACP
         pending = @in_flight.select do |_id, req|
           req.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION && req.session_id == sid
         end.keys
-        pending.each { |id| @in_flight.delete(id) }
+        pending.each { |id| @in_flight.delete(id).try(&.answered = true) }
         pending
       end
 
@@ -775,8 +783,8 @@ module ACP
 
       ClientLog.info { "Closing client" }
 
-      # Cancel all pending requests with a proper JSON-RPC error object.
-      drain_pending_requests("Client closed")
+      # Cut off all pending requests; their callers raise ConnectionClosedError.
+      drain_pending_requests
 
       # Close the transport. This is also what stops the dispatcher: the
       # transport's `receive` returns nil once it is closed, which breaks
@@ -936,6 +944,7 @@ module ACP
       response_channel = Channel(JSON::Any).new(1)
 
       id = @pending_mutex.synchronize do
+        raise ConnectionClosedError.new if @disconnected
         current_id = @next_id
         @next_id += 1
         @pending[current_id.to_s] = response_channel
@@ -957,19 +966,15 @@ module ACP
       ClientLog.debug { "Sent request id=#{id} method=#{method}" }
 
       # Wait for the response with optional timeout.
-      raw_response = if timeout
-                       receive_with_timeout(response_channel, timeout, id)
-                     else
-                       begin
-                         response_channel.receive
-                       rescue Channel::ClosedError
-                         raise ConnectionClosedError.new("Channel closed while waiting for response to #{method}")
-                       end
-                     end
-
-      # Clean up the pending entry.
-      @pending_mutex.synchronize do
-        @pending.delete(id_str)
+      raw_response = begin
+        if timeout
+          receive_with_timeout(response_channel, timeout, id)
+        else
+          response_channel.receive
+        end
+      rescue Channel::ClosedError
+        # `drain_pending_requests` closed it: the connection is gone.
+        raise ConnectionClosedError.new("#{@user_closed ? "Client closed" : "Connection lost"} while waiting for response to #{method}")
       end
 
       # Check for errors in the response.
@@ -1007,26 +1012,15 @@ module ACP
       )
     end
 
-    # Sends a JSON-RPC error to all pending request channels and clears
-    # the pending map. Used during close and disconnect to unblock callers.
-    private def drain_pending_requests(message : String) : Nil
+    # Closes every pending request channel and clears the pending map, so
+    # each waiting caller raises `ConnectionClosedError`, and refuses new
+    # requests from then on. Used during close and disconnect to unblock
+    # callers. (A fake JSON-RPC error here would pose as an answer from the
+    # agent.)
+    private def drain_pending_requests : Nil
       @pending_mutex.synchronize do
-        @pending.each do |_id, channel|
-          error_json = JSON.build do |json|
-            json.object do
-              json.field("error") do
-                json.object do
-                  json.field("code", JsonRpcError::INTERNAL_ERROR)
-                  json.field("message", message)
-                end
-              end
-            end
-          end
-          error_any = JSON.parse(error_json)
-          channel.send(error_any)
-        rescue Channel::ClosedError
-          # Already closed.
-        end
+        @disconnected = true
+        @pending.each_value(&.close)
         @pending.clear
       end
     end
@@ -1058,10 +1052,12 @@ module ACP
       when response = channel.receive
         response
       when timeout(timeout_span)
-        # Clean up the pending entry.
-        @pending_mutex.synchronize do
+        # Clean up the pending entry. If it is already gone, the response was
+        # delivered (or the channel closed) after the timer fired: use that.
+        removed = @pending_mutex.synchronize do
           @pending.delete(request_id.to_s)
         end
+        return channel.receive unless removed
         # Nobody waits for the answer any more: tell the agent it can stop.
         begin
           cancel_request(request_id)
@@ -1106,7 +1102,7 @@ module ACP
       @dispatcher_running = false
 
       # Notify pending requests that the connection is lost.
-      drain_pending_requests("Connection lost")
+      drain_pending_requests
 
       # Invoke the disconnect callback if set — but only for an UNEXPECTED loss
       # of the transport. When the caller asked for `close`, the dispatcher
@@ -1205,19 +1201,17 @@ module ACP
 
       id_str = id.to_s
 
-      channel = @pending_mutex.synchronize do
-        @pending[id_str]?
-      end
-
-      if channel
-        begin
+      # Take the entry out as the response is delivered: a request gets one
+      # response (JSON-RPC 2.0 §5), and the channel holds exactly one, so a
+      # repeated response must not reach it — sending a second or third copy
+      # into the full channel would block the dispatcher for good.
+      delivered = @pending_mutex.synchronize do
+        if channel = @pending.delete(id_str)
           channel.send(msg)
-        rescue Channel::ClosedError
-          ClientLog.warn { "Response channel already closed for id=#{id_str}" }
+          true
         end
-      else
-        ClientLog.warn { "Received response for unknown request id=#{id_str}" }
       end
+      ClientLog.warn { "Received response for unknown request id=#{id_str}" } unless delivered
     end
 
     # Handles a method call from the agent (e.g., session/request_permission).
@@ -1436,11 +1430,11 @@ module ACP
     private def claim_agent_request(id : Protocol::RequestId?, entry : InFlightRequest?) : Bool
       return true unless id && entry
       @pending_mutex.synchronize do
-        current = @in_flight[id]?
-        # Gone: a cancel answered it. Replaced: the agent reused the ID of a
-        # request still in flight; this one is still ours to answer.
-        return false unless current
-        @in_flight.delete(id) if current.same?(entry)
+        # Ask the entry, not the map: when the agent reused the ID of a request
+        # still in flight, the map holds only the newer one, and whichever of
+        # the two finishes first must not make the other look cancelled.
+        return false if entry.answered?
+        @in_flight.delete(id) if @in_flight[id]?.try(&.same?(entry))
         true
       end
     end
@@ -1457,7 +1451,10 @@ module ACP
       if id
         entry = @pending_mutex.synchronize do
           req = @in_flight[id]?
-          @in_flight.delete(id) if req && CANCEL_ANSWERED_EARLY.includes?(req.method)
+          if req && CANCEL_ANSWERED_EARLY.includes?(req.method)
+            req.answered = true
+            @in_flight.delete(id)
+          end
         end
       end
 

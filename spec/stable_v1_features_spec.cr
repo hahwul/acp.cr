@@ -456,6 +456,29 @@ describe "ACP $/cancel_request" do
     answers_to(transport, 9).size.should eq(2)
     client.close
   end
+
+  it "answers the older of two same-ID requests when the newer one finishes first" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    releases = [Channel(Nil).new(1), Channel(Nil).new(1)]
+    entered = Channel(Nil).new(2)
+    calls = Atomic(Int32).new(0)
+    client.on_read_text_file = ->(p : ACP::Protocol::ReadTextFileParams) do
+      release = releases[calls.add(1)]
+      entered.send(nil)
+      release.receive
+      ACP::Protocol::ReadTextFileResult.new(p.path)
+    end
+
+    2.times { transport.inject_raw(%({"jsonrpc":"2.0","id":9,"method":"fs/read_text_file","params":{"sessionId":"s","path":"/f"}})) }
+    2.times { entered.receive }
+    releases[1].send(nil)
+    sleep 20.milliseconds
+    releases[0].send(nil)
+    sleep 20.milliseconds
+    answers_to(transport, 9).size.should eq(2)
+    client.close
+  end
 end
 
 describe "ACP terminal exit codes (schema uint32)" do
