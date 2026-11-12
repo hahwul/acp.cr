@@ -1144,3 +1144,214 @@ describe "ACP unsigned protocol integers" do
     client.close
   end
 end
+
+# The next frame the client writes, or a failure instead of a hang.
+private def next_answer(transport : SignalingTransport) : JSON::Any
+  select
+  when frame = transport.written.receive
+    frame
+  when timeout(2.seconds)
+    fail "the client sent no answer"
+  end
+end
+
+# ─── R25: a request with `"id": null` must be answered, not dropped ─────
+#
+# JSON-RPC 2.0 §4.1: "A Notification is a Request object without an "id"
+# member." ACP's `RequestId` includes `null`, and the Rust SDK echoes it.
+# The client treated `"id": null` like a missing id, so the request was
+# never answered and the agent waited forever.
+describe "ACP::Client agent request with a null id" do
+  it "answers it with \"id\": null" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) { JSON.parse(%({"ok":true})) }
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"_x/echo","params":{}}))
+    answer = next_answer(transport)
+    answer.as_h.has_key?("id").should be_true
+    answer["id"].raw.should be_nil
+    answer["result"]["ok"].as_bool.should be_true
+    client.close
+  end
+
+  it "auto-cancels a null-id permission request when no handler is set" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}))
+    answer = next_answer(transport)
+    answer["id"].raw.should be_nil
+    answer["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
+    client.close
+  end
+end
+
+# ─── R26: unreadable frames get a JSON-RPC error with `"id": null` ──────
+#
+# JSON-RPC 2.0 §5: when the id of a request can't be detected (Invalid
+# Request), the error response's id MUST be null; §6: a batch the server
+# doesn't accept gets a single error. The client dropped all of these, so a
+# peer that sent one never got an answer. Matches the Rust SDK, which
+# answers -32600 unless the value is shaped like a response.
+describe "ACP::Client invalid JSON-RPC frames" do
+  it "answers a request whose id can't be represented with -32600" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    called = false
+    client.on_agent_request = ->(_m : String, _p : JSON::Any) { called = true; JSON::Any.new(nil) }
+
+    [%(1.5), %(true), %([1]), %(1e300)].each do |id|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"_x/y","params":{}}))
+      answer = next_answer(transport)
+      answer["id"].raw.should be_nil
+      answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+    end
+    called.should be_false
+    client.close
+  end
+
+  it "answers batches, scalars and envelope-less objects with -32600" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+
+    ["[]", %([{"jsonrpc":"2.0","id":1,"method":"_x"}]), "17", "null", "{}", %({"jsonrpc":"2.0","method":5})].each do |raw|
+      transport.inject_raw(raw)
+      answer = next_answer(transport)
+      answer["id"].raw.should be_nil
+      answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+    end
+    client.close
+  end
+
+  it "does not answer a response, even one without a usable id" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","result":{}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_ping"})) # a notification, to sync on
+    sleep 50.milliseconds
+    transport.sent_messages.should be_empty
+    client.close
+  end
+end
+
+describe "ACP::StdioTransport unparseable input" do
+  it "answers a line that is not JSON with -32700 and \"id\": null" do
+    agent_out_r, agent_out_w = IO.pipe # agent stdout → client
+    agent_in_r, agent_in_w = IO.pipe   # client → agent stdin
+    transport = ACP::StdioTransport.new(agent_out_r, agent_in_w)
+
+    agent_out_w.puts %({"jsonrpc":"2.0","id":1,"method":"x", INVALID})
+    lines = Channel(String).new(1)
+    spawn { lines.send(agent_in_r.gets || "") }
+    line = select
+    when l = lines.receive then l
+    when timeout(2.seconds) then fail "no parse error was sent"
+    end
+    answer = JSON.parse(line)
+    answer["id"].raw.should be_nil
+    answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::PARSE_ERROR)
+    line.includes?("INVALID").should be_false # the raw line is not echoed
+
+    # The stream stays usable.
+    agent_out_w.puts %({"jsonrpc":"2.0","method":"_ping"})
+    transport.receive.try(&.["method"].as_s).should eq("_ping")
+
+    transport.close
+    agent_out_w.close
+    agent_in_r.close
+  end
+end
+
+# ─── R27: a handler's JsonRpcError must reach the agent unchanged ───────
+#
+# error#unknown-sessions: "Clients SHOULD respond with -32002 when
+# fs/read_text_file names a file that does not exist, or a terminal/* method
+# names an unknown terminal." cancellation: a cancelled request MUST get a
+# valid response or -32800. Every handler exception became -32603, so a
+# handler had no way to send either.
+describe "ACP::Client handler JSON-RPC errors" do
+  it "sends the code, message and data of a JsonRpcError raised by a typed handler" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_read_text_file = ->(p : ACP::Protocol::ReadTextFileParams) : ACP::Protocol::ReadTextFileResult do
+      raise ACP::JsonRpcError.new(ACP::JsonRpcError::RESOURCE_NOT_FOUND, "Resource not found", JSON.parse(%({"uri":"#{p.path}"})))
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":4,"method":"fs/read_text_file","params":{"sessionId":"s","path":"/nope"}}))
+    answer = next_answer(transport)
+    answer["id"].as_i.should eq(4)
+    answer["error"]["code"].as_i.should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    answer["error"]["message"].as_s.should eq("Resource not found")
+    answer["error"]["data"]["uri"].as_s.should eq("/nope")
+    client.close
+  end
+
+  it "does so for on_agent_request and permission handlers too" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_agent_request = ->(_m : String, _p : JSON::Any) : JSON::Any do
+      raise ACP::JsonRpcError.new(ACP::JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":5,"method":"_x/y","params":{}}))
+    next_answer(transport)["error"]["code"].as_i.should eq(ACP::JsonRpcError::REQUEST_CANCELLED)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":6,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}))
+    next_answer(transport)["error"]["code"].as_i.should eq(ACP::JsonRpcError::REQUEST_CANCELLED)
+    client.close
+  end
+
+  it "reports a JSON error from the handler's own code as -32603, not invalid params" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.on_read_text_file = ->(_p : ACP::Protocol::ReadTextFileParams) do
+      ACP::Protocol::ReadTextFileResult.from_json(%({"wrong":1}))
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"sessionId":"s","path":"/a"}}))
+    next_answer(transport)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    client.close
+  end
+end
+
+# ─── R28: -32002 to session/close is a successful close ─────────────────
+#
+# session-setup#closing-active-sessions: "Clients SHOULD treat a -32002
+# response to session/close as a successful close." It raised instead, and
+# the client kept reporting the gone session as active.
+private def r28_close_with_error(code : Int32) : {ACP::Client, Exception?}
+  transport, client, _session = r8_client_with_session
+  spawn do
+    sleep 10.milliseconds
+    if msg = transport.last_sent
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{msg["id"].as_i64},"error":{"code":#{code},"message":"Resource not found","data":{"sessionId":"sess-r8"}}}))
+    end
+  end
+  error = begin
+    client.session_close
+    nil
+  rescue ex
+    ex
+  end
+  {client, error}
+end
+
+describe "ACP::Client#session_close with -32002" do
+  it "treats -32002 as a successful close" do
+    client, error = r28_close_with_error(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    error.should be_nil
+    client.session_id.should be_nil
+    client.state.should eq(ACP::ClientState::Initialized)
+    client.close
+  end
+
+  it "still raises other errors" do
+    client, error = r28_close_with_error(ACP::JsonRpcError::INTERNAL_ERROR)
+    error.should be_a(ACP::JsonRpcError)
+    client.session_id.should eq("sess-r8")
+    client.close
+  end
+end

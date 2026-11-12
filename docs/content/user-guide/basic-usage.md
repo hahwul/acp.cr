@@ -123,18 +123,20 @@ session.set_config_option("model", "claude-sonnet")
 Set up handlers on the client to process streaming updates and agent requests:
 
 ```crystal
-client.on_update = ->(update : ACP::Protocol::SessionUpdate) {
-  case update
+client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) {
+  case update = params.update
   when ACP::Protocol::AgentMessageChunkUpdate
-    print update.delta
+    print update.text
   when ACP::Protocol::ToolCallUpdate
-    puts "Tool: #{update.tool_name}"
+    puts "Tool: #{update.title}"
   end
+  nil
 }
 
-client.on_agent_request = ->(method : String, params : JSON::Any?) {
-  # Handle permission requests, fs operations, etc.
-  nil
+client.on_agent_request = ->(method : String, params : JSON::Any) {
+  # Handle permission requests and any method without a typed handler.
+  # Return the JSON-RPC result; raise ACP::JsonRpcError to send an error.
+  JSON::Any.new(nil)
 }
 ```
 
@@ -144,15 +146,20 @@ For specific agent-initiated requests, use typed handlers:
 
 ```crystal
 client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) {
-  content = File.read(params.path)
-  ACP::Protocol::ReadTextFileResult.new(content: content)
+  unless File.exists?(params.path)
+    # Sent to the agent as-is: -32002 is the error ACP recommends here.
+    raise ACP::JsonRpcError.new(ACP::JsonRpcError::RESOURCE_NOT_FOUND, "Resource not found")
+  end
+  ACP::Protocol::ReadTextFileResult.new(content: File.read(params.path))
 }
 
 client.on_write_text_file = ->(params : ACP::Protocol::WriteTextFileParams) {
   File.write(params.path, params.content)
-  ACP::Protocol::WriteTextFileResult.new(success: true)
+  ACP::Protocol::WriteTextFileResult.new
 }
 ```
+
+A handler that raises `ACP::JsonRpcError` answers the agent with that error's code, message and data. Any other exception is answered with `-32603 Internal error`.
 
 ## Error Handling
 

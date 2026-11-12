@@ -61,14 +61,17 @@ module ACP
     # A JSON-RPC 2.0 message is always an object. Anything else — a bare
     # array (a batch, which ACP does not use), number, string, bool, or
     # null — carries neither an "id" nor a "method" and is reported as a
-    # `Notification` so callers can drop it. Probing such a value with
+    # `Notification` so callers can reject it. Probing such a value with
     # `JSON::Any#[]?` would raise a bare `Exception`, so the object check
     # comes first.
     def self.classify_message(msg : JSON::Any) : MessageKind
       obj = msg.as_h?
       return MessageKind::Notification unless obj
 
-      has_id = obj["id"]? && !obj["id"]?.try(&.raw).nil?
+      # JSON-RPC 2.0 §4.1: only a message WITHOUT an "id" member is a
+      # notification. `"id": null` is still a request (ACP's `RequestId`
+      # allows null) and must be answered, with `"id": null`.
+      has_id = obj.has_key?("id")
       has_method = obj["method"]?.try(&.as_s?)
 
       if has_id && has_method
@@ -1293,14 +1296,10 @@ module ACP
     end
 
     # Sets the "id" field on a JSON-RPC message hash from a RequestId
-    # (which may be Int64 or String).
-    private def self.set_id(msg : Hash(String, JSON::Any), id : RequestId) : Nil
-      case id
-      when Int64
-        msg["id"] = JSON::Any.new(id)
-      when String
-        msg["id"] = JSON::Any.new(id)
-      end
+    # (Int64 or String). Nil writes `"id": null`, which a response uses to
+    # answer a request whose ID was null or could not be read (JSON-RPC 2.0 §5).
+    private def self.set_id(msg : Hash(String, JSON::Any), id : RequestId?) : Nil
+      msg["id"] = JSON::Any.new(id)
     end
 
     # Builds a JSON-RPC 2.0 request object as a Hash for serialization.
@@ -1340,7 +1339,7 @@ module ACP
     end
 
     # Builds a JSON-RPC 2.0 success response.
-    def self.build_response(id : RequestId, result : JSON::Serializable) : Hash(String, JSON::Any)
+    def self.build_response(id : RequestId?, result : JSON::Serializable) : Hash(String, JSON::Any)
       msg = new_message
       set_id(msg, id)
       msg["result"] = JSON.parse(result.to_json)
@@ -1348,7 +1347,7 @@ module ACP
     end
 
     # Builds a JSON-RPC 2.0 success response with raw JSON::Any result.
-    def self.build_response_raw(id : RequestId, result : JSON::Any) : Hash(String, JSON::Any)
+    def self.build_response_raw(id : RequestId?, result : JSON::Any) : Hash(String, JSON::Any)
       msg = new_message
       set_id(msg, id)
       msg["result"] = result
@@ -1356,7 +1355,7 @@ module ACP
     end
 
     # Builds a JSON-RPC 2.0 error response.
-    def self.build_error_response(id : RequestId, code : Int32, message : String, data : JSON::Any? = nil) : Hash(String, JSON::Any)
+    def self.build_error_response(id : RequestId?, code : Int32, message : String, data : JSON::Any? = nil) : Hash(String, JSON::Any)
       error_obj = Hash(String, JSON::Any).new
       error_obj["code"] = JSON::Any.new(code.to_i64)
       error_obj["message"] = JSON::Any.new(message)

@@ -212,7 +212,7 @@ module ACP
     # `session/request_permission` requests whose handler hasn't returned
     # yet, keyed by request ID → session ID. `session_cancel` answers these
     # with `cancelled`; guarded by `@pending_mutex`.
-    @pending_permissions : Hash(Protocol::RequestId, String) = Hash(Protocol::RequestId, String).new
+    @pending_permissions : Hash(Protocol::RequestId?, String) = Hash(Protocol::RequestId?, String).new
 
     # Whether the dispatcher fiber is running.
     @dispatcher_running : Bool = false
@@ -460,7 +460,14 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionCloseParams.new(sid)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
+      raw_result = begin
+        send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
+      rescue ex : JsonRpcError
+        # session-setup#closing-active-sessions: "Clients SHOULD treat a
+        # -32002 response to `session/close` as a successful close."
+        raise ex unless ex.resource_not_found?
+        JSON::Any.new({} of String => JSON::Any)
+      end
       result = decode_result(Protocol::SessionCloseResult, raw_result, Protocol::AgentMethod::SESSION_CLOSE)
 
       # If we just closed the active session, drop the cached session
@@ -744,9 +751,10 @@ module ACP
 
     # Responds to an agent-initiated request.
     #
-    # - `id` — the request ID from the agent's request.
+    # - `id` — the request ID from the agent's request; nil answers a request
+    #   whose ID was null (`"id": null` on the wire).
     # - `result` — the result to send back.
-    def respond_to_agent(id : Protocol::RequestId, result : JSON::Any) : Nil
+    def respond_to_agent(id : Protocol::RequestId?, result : JSON::Any) : Nil
       raise ConnectionClosedError.new if closed?
 
       message = Protocol.build_response_raw(id, result)
@@ -757,13 +765,15 @@ module ACP
 
     # Responds to an agent-initiated request with an error.
     #
-    # - `id` — the request ID from the agent's request.
+    # - `id` — the request ID from the agent's request; nil sends
+    #   `"id": null`, as JSON-RPC 2.0 §5 requires when the request's ID was
+    #   null or could not be read.
     # - `code` — the JSON-RPC error code.
     # - `error_message` — human-readable error description.
     # - `data` — optional structured value carrying additional information
     #   about the error (JSON-RPC 2.0 §5.1). Omitted from the wire when nil.
     def respond_to_agent_error(
-      id : Protocol::RequestId,
+      id : Protocol::RequestId?,
       code : Int32,
       error_message : String,
       data : JSON::Any? = nil,
@@ -1005,12 +1015,12 @@ module ACP
     private def dispatch_message(msg : JSON::Any) : Bool
       # Every JSON-RPC 2.0 message is an object. ACP does not use batch
       # (array) requests, so a top-level array — or a bare number, string,
-      # bool, or null — is not routable. Drop it with a warning: probing it
-      # for "id"/"method" would raise, and a run of such frames would burn
-      # through the dispatcher's corruption budget and tear down an
-      # otherwise healthy connection.
-      unless msg.as_h?
-        ClientLog.warn { "Ignoring non-object JSON-RPC frame" }
+      # bool, or null — is not routable. Probing it for "id"/"method" would
+      # raise, so answer it with a single -32600 (JSON-RPC 2.0 §5/§6, as the
+      # ACP Rust SDK does) and move on without counting it as corruption.
+      unless obj = msg.as_h?
+        ClientLog.warn { "Rejecting non-object JSON-RPC frame" }
+        reject_invalid_request
         return false
       end
 
@@ -1022,9 +1032,26 @@ module ACP
       when Protocol::MessageKind::Response
         handle_response(msg)
       when Protocol::MessageKind::Notification
-        handle_notification(msg)
+        if obj["method"]?.try(&.as_s?)
+          handle_notification(msg)
+        elsif obj.has_key?("method") || !(obj.has_key?("result") || obj.has_key?("error"))
+          # Neither a call nor a response (`{}`, a non-string method): an
+          # Invalid Request. An id-less response has nothing to answer.
+          ClientLog.warn { "Rejecting JSON-RPC object that is neither a request nor a response" }
+          reject_invalid_request
+        else
+          ClientLog.warn { "Ignoring response without a JSON-RPC id" }
+        end
       end
       false
+    end
+
+    # Answers an incoming value we could not read as a JSON-RPC message with
+    # -32600, `"id": null` (JSON-RPC 2.0 §5: the id MUST be null when it
+    # could not be detected).
+    private def reject_invalid_request(detail : String? = nil) : Nil
+      respond_to_agent_error(nil, JsonRpcError::INVALID_REQUEST, "Invalid request",
+        detail.try { |d| JSON::Any.new(d) })
     end
 
     # Handles a response to one of our pending requests.
@@ -1071,11 +1098,15 @@ module ACP
     #
     # Returns true when a handler fiber was started (it records the outcome).
     private def handle_agent_request(msg : JSON::Any) : Bool
+      # A nil `id` here is either `"id": null` — a valid, if discouraged,
+      # request ID that we echo back — or a value we cannot represent
+      # (fractional, out of range, bool, container). Echoing a coerced ID
+      # would answer the wrong request, so the latter gets -32600 with
+      # `"id": null`, as JSON-RPC 2.0 §5 requires.
       id = Protocol.extract_id(msg)
-      unless id
-        # We cannot echo an ID we are unable to represent, and a response
-        # carrying the wrong ID is worse than none.
-        ClientLog.warn { "Ignoring agent request with an unusable JSON-RPC id" }
+      unless id || msg["id"]?.try(&.raw).nil?
+        ClientLog.warn { "Rejecting agent request with an unusable JSON-RPC id" }
+        reject_invalid_request("request id must be a string, an integer, or null")
         return false
       end
 
@@ -1112,7 +1143,7 @@ module ACP
     end
 
     private def route_agent_request(
-      id : Protocol::RequestId,
+      id : Protocol::RequestId?,
       method_name : String,
       params : JSON::Any?,
       perm_sid : String?,
@@ -1148,7 +1179,7 @@ module ACP
     # doesn't recognize the custom method name, it should respond with the
     # standard 'Method not found' error"), with the method name as `data`.
     private def handle_unknown_agent_request(
-      id : Protocol::RequestId,
+      id : Protocol::RequestId?,
       method_name : String,
       params : JSON::Any?,
     ) : Nil
@@ -1159,7 +1190,7 @@ module ACP
           handler.call(method_name, params || JSON::Any.new(nil))
         rescue ex
           ClientLog.error { "Error in agent request handler for #{method_name}: #{ex.message}" }
-          return respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
+          return respond_handler_error(id, ex, ex.message || "Handler error")
         end
         respond_to_agent(id, result)
       else
@@ -1176,7 +1207,7 @@ module ACP
     # first, then falls back like an unknown method (`on_agent_request`,
     # else -32601).
     private def handle_typed_client_method(
-      id : Protocol::RequestId,
+      id : Protocol::RequestId?,
       params : JSON::Any?,
       handler,
       params_type,
@@ -1184,17 +1215,22 @@ module ACP
     ) : Nil
       return handle_unknown_agent_request(id, method_name, params) unless h = handler
 
+      typed_params = begin
+        params_type.from_json((params || JSON::Any.new(nil)).to_json)
+      rescue ex
+        ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
+        return respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
+      end
+
+      # Separate from the parse above: a JSON error raised by the handler's
+      # own code is a handler failure, not invalid params.
       result = begin
-        typed_params = params_type.from_json((params || JSON::Any.new(nil)).to_json)
         # Convert JSON::Serializable result to JSON::Any via round-trip;
         # Crystal has no direct JSON::Serializable → JSON::Any conversion.
         JSON.parse(h.call(typed_params).to_json)
-      rescue ex : JSON::SerializableError
-        ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
-        return respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
       rescue ex
         ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
-        return respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, ex.message || "Handler error")
+        return respond_handler_error(id, ex, ex.message || "Handler error")
       end
       respond_to_agent(id, result)
     end
@@ -1204,15 +1240,14 @@ module ACP
     #
     # `sid` is set when the request was registered in `@pending_permissions`;
     # the answer is then sent only if `session_cancel` hasn't already sent one.
-    private def handle_permission_request(id : Protocol::RequestId, params : JSON::Any?, sid : String?) : Nil
+    private def handle_permission_request(id : Protocol::RequestId?, params : JSON::Any?, sid : String?) : Nil
       if handler = @on_agent_request
         result = begin
           handler.call("session/request_permission", params || JSON::Any.new(nil))
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
           if claim_permission_response(id, sid)
-            respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR,
-              "Permission handler error: #{ex.message}")
+            respond_handler_error(id, ex, "Permission handler error: #{ex.message}")
           end
           return
         end
@@ -1233,9 +1268,22 @@ module ACP
       end
     end
 
+    # Answers an agent request whose handler raised. A handler that raises
+    # `JsonRpcError` chooses the error the agent sees — e.g. -32002 for a
+    # missing file (error#unknown-sessions) or -32800 for a cancelled request
+    # (cancellation) — so its code, message and data are sent as-is. Any
+    # other exception becomes -32603 with `fallback` as the message.
+    private def respond_handler_error(id : Protocol::RequestId?, ex : Exception, fallback : String) : Nil
+      if ex.is_a?(JsonRpcError)
+        respond_to_agent_error(id, ex.code, ex.message || fallback, ex.data)
+      else
+        respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, fallback)
+      end
+    end
+
     # Removes a permission request from the pending set. Returns false when
     # `session_cancel` already answered it, so the caller must not respond.
-    private def claim_permission_response(id : Protocol::RequestId, sid : String?) : Bool
+    private def claim_permission_response(id : Protocol::RequestId?, sid : String?) : Bool
       return true unless sid
       @pending_mutex.synchronize { !@pending_permissions.delete(id).nil? }
     end

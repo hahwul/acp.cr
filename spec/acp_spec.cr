@@ -5444,14 +5444,14 @@ describe "Edge Cases" do
       ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
     end
 
-    it "treats message with null id as notification if method present" do
+    it "treats message with null id as a request if method present (JSON-RPC 2.0 §4.1)" do
       msg = JSON.parse(%({"id": null, "method": "test"}))
-      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
+      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Request)
     end
 
-    it "treats message with null id and no method as notification" do
+    it "treats message with null id and no method as a response" do
       msg = JSON.parse(%({"id": null}))
-      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Notification)
+      ACP::Protocol.classify_message(msg).should eq(ACP::Protocol::MessageKind::Response)
     end
   end
 

@@ -270,6 +270,23 @@ module ACP
       drained
     end
 
+    # Answers an unparseable line with JSON-RPC -32700 and `"id": null`
+    # (JSON-RPC 2.0 §5: the id MUST be null when a parse error kept it from
+    # being detected), so a peer whose request was garbled gets an answer
+    # instead of waiting forever. The raw line is not echoed back.
+    private def send_parse_error : Nil
+      send({
+        "jsonrpc" => JSON::Any.new("2.0"),
+        "id"      => JSON::Any.new(nil),
+        "error"   => JSON::Any.new({
+          "code"    => JSON::Any.new(-32700_i64),
+          "message" => JSON::Any.new("Parse error"),
+        }),
+      })
+    rescue ex : TransportError
+      Log.debug { "Could not send parse error: #{ex.message}" }
+    end
+
     private def start_reader
       @reader_fiber = spawn(name: "acp-transport-reader") do
         read_loop
@@ -330,6 +347,7 @@ module ACP
           Log.warn { "Failed to parse incoming JSON: #{ex.message}" }
           # Don't log the raw line at any level — it may be a partially
           # received frame that contains sensitive data.
+          send_parse_error
           next
         rescue Channel::ClosedError
           # Channel was closed (transport shutting down).
