@@ -685,8 +685,7 @@ module ACP
 
       return if ids.empty?
 
-      cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
-      ids.each { |id| respond_to_agent(id, cancelled) }
+      ids.each { |id| respond_to_agent(id, cancelled_permission) }
     end
 
     # Changes the mode for the active session.
@@ -1407,8 +1406,13 @@ module ACP
         # prompt turn until it times out. Reuse the typed builder so this path
         # stays consistent with `Protocol::RequestPermissionResult.cancelled`.
         ClientLog.warn { "No handler for permission request; auto-cancelling" }
-        JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
+        cancelled_permission
       end
+    end
+
+    # The `cancelled` outcome for a `session/request_permission` request.
+    private def cancelled_permission : JSON::Any
+      JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
     end
 
     # The answer to an agent request whose handler raised. A handler that
@@ -1461,7 +1465,7 @@ module ACP
         ClientLog.info { "Agent cancelled request id=#{id} (#{entry.method})" }
         begin
           if entry.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-            respond_to_agent(id, JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json))
+            respond_to_agent(id, cancelled_permission)
           else
             respond_to_agent_error(id, JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
           end

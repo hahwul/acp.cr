@@ -465,3 +465,13 @@ describe "ACP terminal exit codes (schema uint32)" do
     expect_raises(JSON::ParseException) { ACP::Protocol::TerminalExitStatus.from_json(%({"exitCode":-1})) }
   end
 end
+
+describe "ACP::Protocol::SessionSetConfigOptionParams#value=" do
+  it "keeps type: boolean in step with the value" do
+    params = ACP::Protocol::SessionSetConfigOptionParams.new("s", "c", "x")
+    params.value = true
+    JSON.parse(params.to_json)["type"].as_s.should eq("boolean")
+    params.value = "y"
+    JSON.parse(params.to_json).as_h.has_key?("type").should be_false
+  end
+end

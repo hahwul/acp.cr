@@ -5,7 +5,7 @@
 ### Breaking Changes
 - Schema `uint32`/`uint64` fields are now unsigned: `ReadTextFileParams#line`/`#limit` and `ToolCallLocation#line` are `UInt32?`, `CreateTerminalParams#output_byte_limit` is `UInt64?`, and `UsageUpdate#used`/`#size` are `UInt64`. Valid values above the signed maximum now decode, and negative values are rejected (an `fs/read_text_file` / `terminal/create` request carrying one is answered with `-32602 Invalid params`)
 - An agent request for an unknown `_`-prefixed extension method with no `on_agent_request` handler is answered with `-32601 Method not found` (method name in `data`) instead of a `null` result, per extensibility#custom-requests and matching the Rust SDK
-- `WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`). Pass `status.exit_code.to_u32` instead of an `Int32`
+- `WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`). Convert a `Process::Status` with `status.exit_code?.try(&.to_u32!)`. That is nil for a signal, and `to_u32!` keeps a Windows NTSTATUS such as `0xC0000005` instead of raising
 - `SessionSetConfigOptionParams#value` is `String | Bool`, and `ConfigOption`'s constructor takes `current_value : String | Bool | Nil`. `type: "boolean"` config options are now parsed instead of skipped, so they show up in `config_options` (they have a nil `current_value`; read `boolean_value`). Agents only send them to clients that advertise `session.configOptions.boolean`
 - A request that times out now also sends `$/cancel_request` for its ID
 

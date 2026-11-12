@@ -1124,7 +1124,7 @@ module ACP
 
       # The new value to set (required): one of the option's value IDs for a
       # `select` option, a Bool for a `boolean` option.
-      property value : String | Bool
+      getter value : String | Bool
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -1138,6 +1138,12 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
         @config_type = "boolean" if @value.is_a?(Bool)
+      end
+
+      # Sets the value and keeps `config_type` in step with it.
+      def value=(@value : String | Bool) : String | Bool
+        @config_type = @value.is_a?(Bool) ? "boolean" : nil
+        @value
       end
     end
 
