@@ -28,15 +28,156 @@ module ACP
       @[JSON::Field(key: "writeTextFile")]
       property? write_text_file : Bool = false
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @read_text_file : Bool = false,
         @write_text_file : Bool = false,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
+      end
+    end
+
+    # Presence (`{}`) advertises that the client handles `compaction_update`
+    # and `compaction_summary_chunk` session updates (`CompactionUpdate`,
+    # `CompactionSummaryChunkUpdate`).
+    # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction
+    struct CompactionCapabilities
+      include JSON::Serializable
+
+      def initialize
+      end
+    end
+
+    # Presence (`{}`) advertises that the client handles `notice` session
+    # updates (`NoticeUpdate`).
+    # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-notices
+    struct NoticeCapabilities
+      include JSON::Serializable
+
+      def initialize
+      end
+    end
+
+    # Presence (`{}`) advertises that the client understands `type: "boolean"`
+    # config options.
+    # See: https://agentclientprotocol.com/protocol/v1/session-config-options#boolean-config-options
+    struct BooleanConfigOptionCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Config option types the client supports beyond the baseline `select`.
+    struct SessionConfigOptionsCapabilities
+      include JSON::Serializable
+
+      # When present, the agent may send `type: "boolean"` config options.
+      property boolean : BooleanConfigOptionCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @boolean : BooleanConfigOptionCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Session-related client capabilities (`clientCapabilities.session`).
+    # Each field is opt-in: omitted or null means unsupported, and the agent
+    # MUST NOT send the corresponding updates or option types.
+    struct ClientSessionCapabilities
+      include JSON::Serializable
+
+      # Context compaction updates.
+      property compaction : CompactionCapabilities?
+
+      # Config option types beyond `select`.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : SessionConfigOptionsCapabilities?
+
+      # Live user-facing notices.
+      property notices : NoticeCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @compaction : CompactionCapabilities? = nil,
+        @config_options : SessionConfigOptionsCapabilities? = nil,
+        @notices : NoticeCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Presence (`{}`) of `form` / `url` in `ElicitationCapabilities`
+    # advertises that elicitation mode.
+    struct ElicitationModeCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Schema names for the two mode capability objects.
+    alias ElicitationFormCapabilities = ElicitationModeCapabilities
+    alias ElicitationUrlCapabilities = ElicitationModeCapabilities
+
+    # The `elicitation/create` modes the client supports. Unlike MCP, an
+    # empty object advertises no mode: each mode must be present and non-null.
+    # See: https://agentclientprotocol.com/protocol/v1/elicitation#checking-support
+    struct ElicitationCapabilities
+      include JSON::Serializable
+
+      # Form mode support.
+      property form : ElicitationFormCapabilities?
+
+      # URL mode support.
+      property url : ElicitationUrlCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @form : ElicitationFormCapabilities? = nil,
+        @url : ElicitationUrlCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Returns true if the given `mode` ("form" or "url") is advertised.
+      def supports?(mode : String?) : Bool
+        case mode
+        when "form" then !@form.nil?
+        when "url"  then !@url.nil?
+        else             false
+        end
       end
     end
 
     # The full set of capabilities the client advertises to the agent
     # during the `initialize` handshake.
+    #
+    # Everything defaults to unsupported. Only advertise a capability once
+    # the client actually handles it, e.g. set `elicitation` together with
+    # `Client#on_create_elicitation`.
     # See: https://agentclientprotocol.com/protocol/initialization#client-capabilities
     struct ClientCapabilities
       include JSON::Serializable
@@ -49,6 +190,14 @@ module ACP
       @[JSON::Field(key: "terminal")]
       property? terminal : Bool = false
 
+      # Session-related capabilities (compaction, notices, boolean config
+      # options). Nil means none.
+      property session : ClientSessionCapabilities?
+
+      # Supported `elicitation/create` modes. Nil means elicitation is
+      # unsupported.
+      property elicitation : ElicitationCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -57,6 +206,8 @@ module ACP
         @fs : FsCapabilities? = nil,
         @terminal : Bool = false,
         @meta : Hash(String, JSON::Any)? = nil,
+        @session : ClientSessionCapabilities? = nil,
+        @elicitation : ElicitationCapabilities? = nil,
       )
       end
     end
@@ -171,6 +322,92 @@ module ACP
       end
     end
 
+    # Capabilities for the session/delete method.
+    # Presence of this object (even empty) indicates the agent supports
+    # removing sessions from `session/list` via `session/delete`.
+    # See: https://agentclientprotocol.com/protocol/v1/session-delete
+    struct SessionDeleteCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Presence of this object (even empty) indicates the agent accepts
+    # `additionalDirectories` on `session/new`, `session/load` and
+    # `session/resume`.
+    # See: https://agentclientprotocol.com/protocol/v1/session-setup#additional-workspace-roots
+    struct SessionAdditionalDirectoriesCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Presence advertises the `override` system prompt mode.
+    struct SessionSystemPromptOverrideCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # System prompt modes the agent supports beyond the baseline `append`.
+    struct SessionSystemPromptModeCapabilities
+      include JSON::Serializable
+
+      # When present, the agent accepts `mode: "override"`.
+      property override : SessionSystemPromptOverrideCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @override : SessionSystemPromptOverrideCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # Presence of this object (even empty) indicates the agent accepts a
+    # `systemPrompt` (mode `append`) on `session/new`, `session/load` and
+    # `session/resume`.
+    # See: https://agentclientprotocol.com/protocol/v1/session-setup#system-prompt
+    struct SessionSystemPromptCapabilities
+      include JSON::Serializable
+
+      # Additional modes the agent supports.
+      property mode : SessionSystemPromptModeCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @mode : SessionSystemPromptModeCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Returns true if the agent accepts `mode: "override"`.
+      def override? : Bool
+        !@mode.try(&.override).nil?
+      end
+    end
+
     # Session capabilities supported by the agent.
     # As a baseline, all Agents MUST support session/new, session/prompt,
     # session/cancel, and session/update.
@@ -188,6 +425,17 @@ module ACP
       # When present (non-null), indicates the agent supports `session/close`.
       property close : SessionCloseCapabilities?
 
+      # When present (non-null), indicates the agent supports `session/delete`.
+      property delete : SessionDeleteCapabilities?
+
+      # When present (non-null), the agent accepts `additionalDirectories`.
+      @[JSON::Field(key: "additionalDirectories")]
+      property additional_directories : SessionAdditionalDirectoriesCapabilities?
+
+      # When present (non-null), the agent accepts a `systemPrompt`.
+      @[JSON::Field(key: "systemPrompt")]
+      property system_prompt : SessionSystemPromptCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -197,7 +445,25 @@ module ACP
         @resume : SessionResumeCapabilities? = nil,
         @close : SessionCloseCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @delete : SessionDeleteCapabilities? = nil,
+        @additional_directories : SessionAdditionalDirectoriesCapabilities? = nil,
+        @system_prompt : SessionSystemPromptCapabilities? = nil,
       )
+      end
+
+      # Returns true if the agent supports deleting sessions.
+      def delete? : Bool
+        !@delete.nil?
+      end
+
+      # Returns true if the agent accepts `additionalDirectories`.
+      def additional_directories? : Bool
+        !@additional_directories.nil?
+      end
+
+      # Returns true if the agent accepts a `systemPrompt`.
+      def system_prompt? : Bool
+        !@system_prompt.nil?
       end
 
       # Returns true if the agent supports session listing.
@@ -213,6 +479,43 @@ module ACP
       # Returns true if the agent supports closing sessions.
       def close? : Bool
         !@close.nil?
+      end
+    end
+
+    # Presence of this object (even empty) indicates the agent supports
+    # the `logout` method.
+    # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
+    struct LogoutCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Authentication-related agent capabilities (`agentCapabilities.auth`).
+    struct AgentAuthCapabilities
+      include JSON::Serializable
+
+      # When present (non-null), the agent supports `logout`.
+      property logout : LogoutCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @logout : LogoutCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Returns true if the agent supports `logout`.
+      def logout? : Bool
+        !@logout.nil?
       end
     end
 
@@ -238,6 +541,9 @@ module ACP
       @[JSON::Field(key: "sessionCapabilities")]
       property session_capabilities : SessionCapabilities?
 
+      # Authentication capabilities (e.g. `logout`).
+      property auth : AgentAuthCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -248,6 +554,7 @@ module ACP
         @mcp_capabilities : McpCapabilities? = nil,
         @session_capabilities : SessionCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @auth : AgentAuthCapabilities? = nil,
       )
       end
     end

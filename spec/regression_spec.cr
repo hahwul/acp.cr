@@ -868,11 +868,11 @@ end
 # ─── R20: one unrecognized config option must not sink the whole result ──
 #
 # session-config-options: "If a Client receives an option with an
-# unrecognized `type`, it SHOULD ignore that option." A `boolean` option
-# (whose `currentValue` is a bool) used to fail the whole session/new
+# unrecognized `type`, it SHOULD ignore that option." Such an option (here
+# one whose `currentValue` is a number) used to fail the whole session/new
 # result with ProtocolError even though the session was created agent-side.
 describe "ACP config options with an unrecognized type" do
-  boolean_option = %({"id":"auto","name":"Auto","type":"boolean","currentValue":true})
+  unknown_option = %({"id":"temp","name":"Temperature","type":"slider","currentValue":0.5})
   select_option = %({"id":"model","name":"Model","type":"select","currentValue":"a","options":[{"value":"a","name":"A"}]})
 
   it "skips the option in session/new instead of failing the result" do
@@ -884,7 +884,7 @@ describe "ACP config options with an unrecognized type" do
       sleep 10.milliseconds
       transport.inject_raw(build_init_response(1_i64))
       sleep 10.milliseconds
-      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","configOptions":[#{boolean_option},#{select_option}]}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","configOptions":[#{unknown_option},#{select_option}]}}))
     end
 
     client.initialize_connection
@@ -897,7 +897,7 @@ describe "ACP config options with an unrecognized type" do
   end
 
   it "skips it in every result that carries configOptions" do
-    json = %({"sessionId":"s1","configOptions":[#{boolean_option},#{select_option}]})
+    json = %({"sessionId":"s1","configOptions":[#{unknown_option},#{select_option}]})
     ACP::Protocol::SessionLoadResult.from_json(json).config_options.try(&.size).should eq(1)
     ACP::Protocol::SessionResumeResult.from_json(json).config_options.try(&.size).should eq(1)
     ACP::Protocol::SessionSetConfigOptionResult.from_json(json).config_options.size.should eq(1)
@@ -909,7 +909,7 @@ describe "ACP config options with an unrecognized type" do
     ACP::Protocol::SessionNewResult.from_json(json).config_options.try(&.map(&.id)).should eq(["model"])
 
     update = ACP::Protocol::SessionUpdate.from_json(
-      %({"sessionUpdate":"config_option_update","configOptions":[#{boolean_option},#{text_option},#{select_option}]})
+      %({"sessionUpdate":"config_option_update","configOptions":[#{unknown_option},#{text_option},#{select_option}]})
     ).as(ACP::Protocol::ConfigOptionUpdate)
     update.typed_config_options.map(&.id).should eq(["model"])
   end

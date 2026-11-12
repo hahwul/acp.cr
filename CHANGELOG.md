@@ -5,6 +5,9 @@
 ### Breaking Changes
 - Schema `uint32`/`uint64` fields are now unsigned: `ReadTextFileParams#line`/`#limit` and `ToolCallLocation#line` are `UInt32?`, `CreateTerminalParams#output_byte_limit` is `UInt64?`, and `UsageUpdate#used`/`#size` are `UInt64`. Valid values above the signed maximum now decode, and negative values are rejected (an `fs/read_text_file` / `terminal/create` request carrying one is answered with `-32602 Invalid params`)
 - An agent request for an unknown `_`-prefixed extension method with no `on_agent_request` handler is answered with `-32601 Method not found` (method name in `data`) instead of a `null` result, per extensibility#custom-requests and matching the Rust SDK
+- `WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`). Convert a `Process::Status` with `status.exit_code?.try(&.to_u32!)`. That is nil for a signal, and `to_u32!` keeps a Windows NTSTATUS such as `0xC0000005` instead of raising
+- `SessionSetConfigOptionParams#value` is `String | Bool`, and `ConfigOption`'s constructor takes `current_value : String | Bool | Nil`. `type: "boolean"` config options are now parsed instead of skipped, so they show up in `config_options` (they have a nil `current_value`; read `boolean_value`). Agents only send them to clients that advertise `session.configOptions.boolean`
+- A request that times out now also sends `$/cancel_request` for its ID
 
 ### Bug Fixes
 - Run agent-to-client request handlers (`on_agent_request`, `on_read_text_file`, ...) in their own fiber, so a blocking handler no longer stalls the dispatcher — e.g. the `cancelled` prompt response sent after `session/cancel` was not read until a still-open permission prompt returned. Notifications stay on the dispatcher, in order; request handlers may now run concurrently with each other and with notification callbacks
@@ -19,6 +22,17 @@
 - Clear the client's cached active session on every `Session#close` path, so an id-less `session_prompt` raises `NoActiveSessionError` rather than targeting a closed session
 - Percent-encode and decode `file://` URIs in `ResourceLinkContentBlock`, fixing paths containing spaces, `#`, `?`, or `%`
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
+
+### Features
+- Support the stable ACP v1 features of schema 1.31. Each new client capability is opt-in and off by default:
+  - `session/delete`: `Client#session_delete` (treats `-32002` as success), `SessionDeleteParams`/`SessionDeleteResult`, and `SessionCapabilities#delete?`
+  - `logout`: `Client#logout`, `LogoutParams`/`LogoutResult`, and `AgentCapabilities#auth` with `AgentAuthCapabilities#logout?`
+  - Elicitation: the `Client#on_create_elicitation` and `#on_elicitation_complete` handlers, `ClientCapabilities#elicitation` (`form` / `url`), `CreateElicitationParams`, `CreateElicitationResult` (`.accept` / `.decline` / `.cancel`), `CompleteElicitationParams` and `ElicitationSchema`/`ElicitationPropertySchema`. A request for a mode the client did not advertise is answered with `-32602`
+  - `systemPrompt` and `additionalDirectories` on `session/new`, `session/load` and `session/resume` (keyword arguments on the `Client` and `Session` methods), `Protocol::SystemPrompt`, `SessionInfo#additional_directories`, and `SessionCapabilities#system_prompt?` / `#additional_directories?`
+  - Session notices and compaction: `ClientCapabilities#session` (`ClientSessionCapabilities` with `notices`, `compaction`, `config_options.boolean`), plus the `NoticeUpdate`, `CompactionUpdate` (patch fields keep "omitted" apart from "cleared") and `CompactionSummaryChunkUpdate` session updates
+  - Boolean config options: `ConfigOption#boolean?` / `#boolean_value`, and `session_set_config_option(id, true)`
+  - `$/cancel_request`: `Client#cancel_request` and `Protocol::CancelRequestParams`. When the agent cancels a pending request that only reads or waits (permission, elicitation, `fs/read_text_file`, `terminal/output`, `terminal/wait_for_exit`), the client answers it at once and drops the handler's late answer. The notification is also passed to `on_notification`
+- Add `FsCapabilities#meta`
 
 ### Improvements
 - Add `Client#forget_session` for releasing cached session state locally

@@ -140,6 +140,11 @@ Session updates are received via the `on_update` callback. They form a discrimin
 | `AvailableCommandsUpdate` | `available_commands : Array(AvailableCommand)` |
 | `CurrentModeUpdate` | `current_mode_id : String` |
 | `ConfigOptionUpdate` | `config_options : Array(JSON::Any)`, `typed_config_options : Array(ConfigOption)` |
+| `NoticeUpdate` | `severity : String`, `title : String`, `description : String?` (needs `session.notices`) |
+| `CompactionUpdate` | `compaction_id : String`, `status : String`, `summary : Array(JSON::Any)?`, `error : String?`, `summary_present?`, `error_present?`, `typed_summary` (needs `session.compaction`) |
+| `CompactionSummaryChunkUpdate` | `compaction_id : String`, `content : JSON::Any`, `text : String` (needs `session.compaction`) |
+
+`CompactionUpdate`'s `summary`, `error` and `_meta` are patches. If a field is omitted, the stored value stays as it is. If it is `null`, the value is cleared. Both cases read as nil, so use `summary_present?` / `error_present?` / `meta_present?` to tell them apart.
 
 ## Capabilities
 
@@ -148,7 +153,9 @@ Session updates are received via the `on_update` callback. They form a discrimin
 ```crystal
 ACP::Protocol::ClientCapabilities.new(
   fs : FsCapabilities? = nil,
-  terminal : Bool = false
+  terminal : Bool = false,
+  session : ClientSessionCapabilities? = nil,
+  elicitation : ElicitationCapabilities? = nil
 )
 ```
 
@@ -156,6 +163,10 @@ ACP::Protocol::ClientCapabilities.new(
 |-------|------|-------------|
 | `fs` | `FsCapabilities?` | File system capabilities |
 | `terminal?` | `Bool` | Terminal support |
+| `session` | `ClientSessionCapabilities?` | `compaction`, `notices` and `config_options.boolean`; each one is opt-in |
+| `elicitation` | `ElicitationCapabilities?` | Supported `elicitation/create` modes (`form`, `url`) |
+
+Nothing is advertised by default. Only set a capability once the client handles it.
 
 ### FsCapabilities
 
@@ -173,7 +184,8 @@ ACP::Protocol::FsCapabilities.new(
 | `load_session` | `Bool?` | Session loading support |
 | `prompt_capabilities` | `PromptCapabilities?` | Prompt format support |
 | `mcp_capabilities` | `McpCapabilities?` | MCP support |
-| `session_capabilities` | `SessionCapabilities?` | Session features |
+| `session_capabilities` | `SessionCapabilities?` | Session features: `list?`, `resume?`, `close?`, `delete?`, `additional_directories?`, `system_prompt?` (and `system_prompt.override?`) |
+| `auth` | `AgentAuthCapabilities?` | `logout?` |
 
 ### PromptCapabilities
 
@@ -203,6 +215,17 @@ Types for agent-initiated requests:
 | `terminal/release` | `ReleaseTerminalParams` | `ReleaseTerminalResult` |
 | `terminal/wait_for_exit` | `WaitForTerminalExitParams` | `WaitForTerminalExitResult` |
 | `terminal/kill` | `KillTerminalParams` | `KillTerminalResult` |
+
+`WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`).
+
+### Elicitation
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `elicitation/create` | `CreateElicitationParams` | `CreateElicitationResult` (`.accept(content)`, `.decline`, `.cancel`) |
+| `elicitation/complete` (notification) | `CompleteElicitationParams` | -- |
+
+`CreateElicitationParams` flattens the schema's mode and scope variants. A form request has `requested_schema : ElicitationSchema`, and a URL request has `elicitation_id` and `url`. A session-scoped request has `session_id` and may have `tool_call_id`; a request-scoped one has `request_id`. Each `ElicitationSchema` property is an `ElicitationPropertySchema` whose `property_type` is `string`, `number`, `integer`, `boolean` or `array`.
 
 ## Error Codes
 

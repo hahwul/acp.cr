@@ -16,11 +16,14 @@ weight = 2
 ACP::Session.create(
   client : ACP::Client,
   cwd : String,
-  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+  mcp_servers : Array(JSON::Any)? = nil,
+  *,
+  additional_directories : Array(String)? = nil,
+  system_prompt : ACP::Protocol::SystemPrompt? = nil
 ) : ACP::Session
 ```
 
-Creates a new session and returns a `Session` instance.
+Creates a new session and returns a `Session` instance. See `Client#session_new` for `additional_directories` and `system_prompt`.
 
 ### `.load`
 
@@ -29,7 +32,10 @@ ACP::Session.load(
   client : ACP::Client,
   session_id : String,
   cwd : String,
-  mcp_servers : Array(ACP::Protocol::McpServerConfig)? = nil
+  mcp_servers : Array(JSON::Any)? = nil,
+  *,
+  additional_directories : Array(String)? = nil,
+  system_prompt : ACP::Protocol::SystemPrompt? = nil
 ) : ACP::Session
 ```
 
@@ -111,11 +117,11 @@ Returns the list of available mode IDs for the session.
 ```crystal
 session.set_config_option(
   config_id : String,
-  value : JSON::Any::Type
+  value : String | Bool
 ) : ACP::Protocol::SessionSetConfigOptionResult
 ```
 
-Changes a configuration option.
+Changes a configuration option: a value ID for a `select` option, a `Bool` for a `boolean` option.
 
 ### `#close`
 

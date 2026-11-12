@@ -224,6 +224,73 @@ module ACP
       end
     end
 
+    # ─── Logout Method ────────────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
+
+    # Params for the `logout` method (Client → Agent).
+    struct LogoutParams
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Result of the `logout` method (an empty object on success).
+    struct LogoutResult
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # ─── System Prompt ────────────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/v1/session-setup#system-prompt
+
+    # Client-supplied system-level instructions for `session/new`,
+    # `session/load` and `session/resume`. Only send it when the agent
+    # advertises `sessionCapabilities.systemPrompt`, and use `override` only
+    # when it also advertises `sessionCapabilities.systemPrompt.mode.override`.
+    struct SystemPrompt
+      include JSON::Serializable
+
+      # How the agent combines `content` with its own instructions:
+      # "append", "override", or a future/`_`-prefixed mode (required).
+      property mode : String
+
+      # The instructions (required, non-empty). Only `text` blocks are
+      # allowed for now.
+      property content : Array(ContentBlock)
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @mode : String,
+        @content : Array(ContentBlock),
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # A `mode: "append"` prompt made of one text block.
+      def self.append(text : String) : SystemPrompt
+        new("append", [TextContentBlock.new(text).as(ContentBlock)])
+      end
+
+      # A `mode: "override"` prompt made of one text block.
+      def self.override(text : String) : SystemPrompt
+        new("override", [TextContentBlock.new(text).as(ContentBlock)])
+      end
+    end
+
     # ─── Session/New Method ───────────────────────────────────────────
     # See: https://agentclientprotocol.com/protocol/session-setup#creating-a-session
 
@@ -239,6 +306,16 @@ module ACP
       @[JSON::Field(key: "mcpServers")]
       property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
+      # Extra absolute workspace roots. Only send when the agent advertises
+      # `sessionCapabilities.additionalDirectories`; nil omits the field.
+      @[JSON::Field(key: "additionalDirectories")]
+      property additional_directories : Array(String)?
+
+      # System-level instructions. Only send when the agent advertises
+      # `sessionCapabilities.systemPrompt`; nil omits the field.
+      @[JSON::Field(key: "systemPrompt")]
+      property system_prompt : SystemPrompt?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -247,11 +324,14 @@ module ACP
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         @meta : Hash(String, JSON::Any)? = nil,
+        @additional_directories : Array(String)? = nil,
+        @system_prompt : SystemPrompt? = nil,
       )
       end
 
       # Convenience constructor that accepts typed McpServer values.
-      def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil)
+      def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil,
+                   additional_directories : Array(String)? = nil, system_prompt : SystemPrompt? = nil)
         json_servers = mcp_servers.map do |server|
           case server
           when McpServerStdio
@@ -265,7 +345,8 @@ module ACP
           end
         end
         inst = allocate
-        inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta)
+        inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta,
+          additional_directories: additional_directories, system_prompt: system_prompt)
         inst
       end
     end
@@ -403,7 +484,10 @@ module ACP
     alias SessionConfigSelectGroup = ConfigOptionGroup
 
     # A single session configuration option and its current state.
-    # Matches the Rust SDK's `SessionConfigOption` + `SessionConfigSelect`.
+    # Matches the Rust SDK's `SessionConfigOption` + `SessionConfigSelect` /
+    # `SessionConfigBoolean`. A `boolean` option (only sent to clients that
+    # advertise `session.configOptions.boolean`) carries a Bool
+    # `currentValue`, read through `boolean_value`; it has no `options`.
     # See: https://agentclientprotocol.com/protocol/session-config-options#configoption
     struct ConfigOption
       include JSON::Serializable
@@ -424,15 +508,15 @@ module ACP
       # See: https://agentclientprotocol.com/protocol/session-config-options#option-categories
       property category : String?
 
-      # The type of input control (required). Currently only "select" is supported.
+      # The type of input control (required): "select" or "boolean".
       # Maps to the Rust SDK's `SessionConfigKind`.
       @[JSON::Field(key: "type")]
       property config_type : String = "select"
 
-      # The currently selected value (required).
-      # Maps to the Rust SDK's `SessionConfigSelect.current_value`.
+      # The current value (required): a value ID for `select`, a Bool for
+      # `boolean`. Read it through `current_value` / `boolean_value`.
       @[JSON::Field(key: "currentValue")]
-      property current_value : String?
+      @current_value : String | Bool?
 
       # Raw wire form of the selectable values. Per the ACP schema
       # (`SessionConfigSelect.options` -> `SessionConfigSelectOptions`) this is
@@ -465,7 +549,7 @@ module ACP
         @id : String,
         @name : String,
         @config_type : String = "select",
-        @current_value : String? = nil,
+        @current_value : String | Bool? = nil,
         @options : Array(ConfigOptionValue)? = nil,
         @groups : Array(ConfigOptionGroup)? = nil,
         @description : String? = nil,
@@ -500,9 +584,30 @@ module ACP
         @name
       end
 
+      # The selected value ID of a `select` option (nil for `boolean`).
+      # Maps to the Rust SDK's `SessionConfigSelect.current_value`.
+      def current_value : String?
+        @current_value.as?(String)
+      end
+
+      # Sets the current value: a value ID (`select`) or a Bool (`boolean`).
+      def current_value=(@current_value : String | Bool?)
+      end
+
+      # The current value of a `boolean` option (nil for `select`).
+      # Maps to the Rust SDK's `SessionConfigBoolean.current_value`.
+      def boolean_value : Bool?
+        @current_value.as?(Bool)
+      end
+
+      # Returns true for a `type: "boolean"` option.
+      def boolean? : Bool
+        @config_type == "boolean"
+      end
+
       # Backward-compatible alias for `current_value`.
       def value : String?
-        @current_value
+        current_value
       end
 
       # Returns true if this option uses grouped values.
@@ -538,14 +643,17 @@ module ACP
     alias SessionConfigOption = ConfigOption
 
     # Parses raw `configOptions` entries, keeping only well-formed options of
-    # a type this library models (`select`). Per session-config-options a
-    # Client "SHOULD ignore" an option with an unrecognized `type` (such as
-    # `boolean`, whose `currentValue` is a bool), and one such entry must not
-    # fail the whole message.
+    # a type this library models (`select` with a string `currentValue`,
+    # `boolean` with a Bool one). Per session-config-options a Client
+    # "SHOULD ignore" an option with an unrecognized `type`, and one such
+    # entry must not fail the whole message.
     def self.parse_config_options(items : Array(JSON::Any)) : Array(ConfigOption)
       items.compact_map do |item|
         option = ConfigOption.from_json(item.to_json)
-        option if option.config_type == "select"
+        case option.config_type
+        when "select"  then option if option.boolean_value.nil?
+        when "boolean" then option unless option.boolean_value.nil?
+        end
       rescue JSON::ParseException
         nil
       end
@@ -608,6 +716,10 @@ module ACP
       # Absolute path to the working directory (required).
       property cwd : String
 
+      # Additional workspace roots of the session, if the agent reports them.
+      @[JSON::Field(key: "additionalDirectories")]
+      property additional_directories : Array(String)?
+
       # Human-readable session title.
       property title : String?
 
@@ -625,6 +737,7 @@ module ACP
         @title : String? = nil,
         @updated_at : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @additional_directories : Array(String)? = nil,
       )
       end
     end
@@ -701,6 +814,16 @@ module ACP
       @[JSON::Field(key: "mcpServers")]
       property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
+      # The full intended list of extra absolute workspace roots. Only send
+      # when the agent advertises `sessionCapabilities.additionalDirectories`.
+      @[JSON::Field(key: "additionalDirectories")]
+      property additional_directories : Array(String)?
+
+      # System-level instructions; send the one the session was created
+      # with. Only send when the agent advertises `sessionCapabilities.systemPrompt`.
+      @[JSON::Field(key: "systemPrompt")]
+      property system_prompt : SystemPrompt?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -710,6 +833,8 @@ module ACP
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         @meta : Hash(String, JSON::Any)? = nil,
+        @additional_directories : Array(String)? = nil,
+        @system_prompt : SystemPrompt? = nil,
       )
       end
     end
@@ -764,6 +889,16 @@ module ACP
       @[JSON::Field(key: "mcpServers")]
       property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
+      # The full intended list of extra absolute workspace roots. Only send
+      # when the agent advertises `sessionCapabilities.additionalDirectories`.
+      @[JSON::Field(key: "additionalDirectories")]
+      property additional_directories : Array(String)?
+
+      # System-level instructions; send the one the session was created
+      # with. Only send when the agent advertises `sessionCapabilities.systemPrompt`.
+      @[JSON::Field(key: "systemPrompt")]
+      property system_prompt : SystemPrompt?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -773,6 +908,8 @@ module ACP
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         @meta : Hash(String, JSON::Any)? = nil,
+        @additional_directories : Array(String)? = nil,
+        @system_prompt : SystemPrompt? = nil,
       )
       end
     end
@@ -827,6 +964,37 @@ module ACP
 
     # Result of the `session/close` method (an empty object on success).
     struct SessionCloseResult
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # ─── Session/Delete Method ────────────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/v1/session-delete
+
+    # Params for the `session/delete` method (Client → Agent).
+    struct SessionDeleteParams
+      include JSON::Serializable
+
+      # The session to remove from session history (required).
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Result of the `session/delete` method (an empty object on success).
+    struct SessionDeleteResult
       include JSON::Serializable
 
       # Extension metadata.
@@ -950,20 +1118,32 @@ module ACP
       @[JSON::Field(key: "configId")]
       property config_id : String
 
-      # The new value to set (required). Must be one of the values
-      # listed in the option's options array.
-      property value : String
+      # Set to "boolean" for a boolean option; omitted for a `select` value ID.
+      @[JSON::Field(key: "type")]
+      property config_type : String?
+
+      # The new value to set (required): one of the option's value IDs for a
+      # `select` option, a Bool for a `boolean` option.
+      getter value : String | Bool
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
+      # A Bool `value` sets `type: "boolean"`, as the schema requires.
       def initialize(
         @session_id : String,
         @config_id : String,
-        @value : String,
+        @value : String | Bool,
         @meta : Hash(String, JSON::Any)? = nil,
       )
+        @config_type = "boolean" if @value.is_a?(Bool)
+      end
+
+      # Sets the value and keeps `config_type` in step with it.
+      def value=(@value : String | Bool) : String | Bool
+        @config_type = @value.is_a?(Bool) ? "boolean" : nil
+        @value
       end
     end
 
@@ -1211,6 +1391,27 @@ module ACP
       # Backward-compatible: returns the selected option ID as a string.
       def selected : String?
         selected_option_id
+      end
+    end
+
+    # ─── $/cancel_request Notification ────────────────────────────────
+    # See: https://agentclientprotocol.com/protocol/v1/cancellation
+
+    # Params for the `$/cancel_request` notification (either direction).
+    # The receiver MAY stop the work, but MUST still answer the original
+    # request: with a normal result or with `-32800` (Request cancelled).
+    struct CancelRequestParams
+      include JSON::Serializable
+
+      # The ID of the request to cancel (required; may be null on the wire).
+      @[JSON::Field(key: "requestId", emit_null: true)]
+      property request_id : RequestId?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@request_id : RequestId?, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
