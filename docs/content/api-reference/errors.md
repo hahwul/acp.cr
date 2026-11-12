@@ -33,7 +33,7 @@ rescue ex : ACP::TransportError
 
 ### ACP::ConnectionClosedError
 
-The connection was closed unexpectedly.
+The connection is closed: raised by a call made after it closed, and by a request still waiting when the agent exits or `close` runs.
 
 ```crystal
 rescue ex : ACP::ConnectionClosedError
@@ -42,7 +42,7 @@ rescue ex : ACP::ConnectionClosedError
 
 ### ACP::TransportTimeoutError
 
-A transport-level operation timed out.
+A transport-level operation timed out. The built-in transports never raise it; a request that times out raises `RequestTimeoutError`.
 
 ```crystal
 rescue ex : ACP::TransportTimeoutError
@@ -88,7 +88,7 @@ rescue ex : ACP::JsonRpcError
 
 ### ACP::SessionNotFoundError
 
-The referenced session does not exist.
+The referenced session does not exist. The client never raises it itself: an agent reports an unknown session as a `JsonRpcError` with code `-32002` (`resource_not_found?`).
 
 ```crystal
 rescue ex : ACP::SessionNotFoundError
@@ -106,7 +106,7 @@ rescue ex : ACP::NoActiveSessionError
 
 ### ACP::AuthenticationError
 
-Authentication with the agent failed.
+Authentication with the agent failed. The client never raises it itself: `authenticate` raises the agent's `JsonRpcError`, and a request that needs authentication fails with `-32000` (`auth_required?`).
 
 ```crystal
 rescue ex : ACP::AuthenticationError
@@ -124,7 +124,7 @@ rescue ex : ACP::RequestTimeoutError
 
 ### ACP::RequestCancelledError
 
-A request was cancelled before completion.
+A request was cancelled before completion. The client never raises it itself: an agent answers a cancelled request with a `JsonRpcError` with code `-32800` (`request_cancelled?`).
 
 ```crystal
 rescue ex : ACP::RequestCancelledError

@@ -405,6 +405,8 @@ module ACP
     # - `buffer_size` — channel buffer size (default: 256).
     # - `max_line_bytes` — abort and log a warning if a single incoming
     #   line exceeds this many bytes. Default 16 MiB.
+    #
+    # Raises `TransportError` if the process cannot be started.
     def initialize(
       command : String,
       args : Array(String) = [] of String,
@@ -414,15 +416,21 @@ module ACP
       buffer_size : Int32 = 256,
       max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
     )
-      @process = Process.new(
-        command,
-        args: args,
-        env: env,
-        chdir: chdir,
-        input: Process::Redirect::Pipe,
-        output: Process::Redirect::Pipe,
-        error: stderr
-      )
+      @process = begin
+        Process.new(
+          command,
+          args: args,
+          env: env,
+          chdir: chdir,
+          input: Process::Redirect::Pipe,
+          output: Process::Redirect::Pipe,
+          error: stderr
+        )
+      rescue ex : IO::Error
+        # A missing or non-executable command, or a bad `chdir`, raises
+        # `File::Error`; keep the library's contract of raising `ACP::Error`.
+        raise TransportError.new("Failed to start agent '#{command}': #{ex.message}", ex)
+      end
 
       super(@process.output, @process.input, buffer_size, max_line_bytes)
     end

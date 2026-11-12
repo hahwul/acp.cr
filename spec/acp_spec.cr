@@ -5483,8 +5483,8 @@ describe "Edge Cases" do
     end
   end
 
-  describe "Client close cancels pending requests with proper error" do
-    it "raises JsonRpcError for pending requests when client is closed" do
+  describe "Client close cancels pending requests" do
+    it "raises ConnectionClosedError for pending requests when client is closed" do
       transport = TestTransport.new
       client = ACP::Client.new(transport)
 
@@ -5510,7 +5510,7 @@ describe "Edge Cases" do
 
       result = done.receive
       result.should_not be_nil
-      result.should be_a(ACP::JsonRpcError | ACP::ConnectionClosedError)
+      result.should be_a(ACP::ConnectionClosedError)
     end
   end
 

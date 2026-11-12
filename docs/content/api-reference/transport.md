@@ -52,7 +52,8 @@ Communicates over existing IO pairs using newline-delimited JSON.
 ACP::StdioTransport.new(
   reader : IO,
   writer : IO,
-  buffer_size : Int32 = 256
+  buffer_size : Int32 = 256,
+  max_line_bytes : Int32 = 16 * 1024 * 1024
 )
 ```
 
@@ -61,6 +62,7 @@ ACP::StdioTransport.new(
 | `reader` | `IO` | -- | IO to read agent messages from |
 | `writer` | `IO` | -- | IO to write client messages to |
 | `buffer_size` | `Int32` | `256` | Internal channel buffer size |
+| `max_line_bytes` | `Int32` | 16 MiB | Longer incoming lines are dropped with a warning |
 
 ### `#receive(timeout)`
 
@@ -84,8 +86,9 @@ ACP::ProcessTransport.new(
   args : Array(String) = [] of String,
   env : Hash(String, String)? = nil,
   chdir : String? = nil,
-  stderr : IO? = nil,
-  buffer_size : Int32 = 256
+  stderr : IO = STDERR,
+  buffer_size : Int32 = 256,
+  max_line_bytes : Int32 = 16 * 1024 * 1024
 )
 ```
 
@@ -95,8 +98,11 @@ ACP::ProcessTransport.new(
 | `args` | `Array(String)` | `[]` | Command arguments |
 | `env` | `Hash(String, String)?` | `nil` | Environment variables |
 | `chdir` | `String?` | `nil` | Working directory for the process |
-| `stderr` | `IO?` | `nil` | IO for stderr output (e.g., `STDERR`) |
+| `stderr` | `IO` | `STDERR` | Where the agent's stderr goes |
 | `buffer_size` | `Int32` | `256` | Internal channel buffer size |
+| `max_line_bytes` | `Int32` | 16 MiB | Longer incoming lines are dropped with a warning |
+
+Raises `ACP::TransportError` if the agent can't be started (missing command, bad `chdir`).
 
 ### Process Management
 

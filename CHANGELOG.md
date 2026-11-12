@@ -8,8 +8,11 @@
 - `WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`). Convert a `Process::Status` with `status.exit_code?.try(&.to_u32!)`. That is nil for a signal, and `to_u32!` keeps a Windows NTSTATUS such as `0xC0000005` instead of raising
 - `SessionSetConfigOptionParams#value` is `String | Bool`, and `ConfigOption`'s constructor takes `current_value : String | Bool | Nil`. `type: "boolean"` config options are now parsed instead of skipped, so they show up in `config_options` (they have a nil `current_value`; read `boolean_value`). Agents only send them to clients that advertise `session.configOptions.boolean`
 - A request that times out now also sends `$/cancel_request` for its ID
+- A request still waiting when the connection drops (agent exit, EOF, `Client#close`) raises `ConnectionClosedError` ("Connection lost" / "Client closed" in the message), as `send_request` documents, instead of a locally made-up `JsonRpcError` -32603 that reported `received?` as if the agent had sent it
+- `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Deliver each response to its request once: a response repeated three times in one burst blocked the dispatcher fiber forever, so no later response or notification arrived
 - Run agent-to-client request handlers (`on_agent_request`, `on_read_text_file`, ...) in their own fiber, so a blocking handler no longer stalls the dispatcher — e.g. the `cancelled` prompt response sent after `session/cancel` was not read until a still-open permission prompt returned. Notifications stay on the dispatcher, in order; request handlers may now run concurrently with each other and with notification callbacks
 - Serialize outgoing transport writes — concurrent senders could interleave bytes within a JSON-RPC frame and hand the agent an unparseable line
 - Deliver `session/update` to `on_notification` when no `on_update` handler is registered, instead of dropping every session update
