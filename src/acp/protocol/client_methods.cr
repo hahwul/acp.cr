@@ -16,11 +16,15 @@
 #   - `terminal/release`     — Release a terminal
 #   - `terminal/wait_for_exit` — Wait for terminal command to exit
 #   - `terminal/kill`        — Kill terminal command without releasing
+#   - `elicitation/create`   — Ask the user for input (requires elicitation)
+#   - `elicitation/complete` — URL elicitation finished (notification)
 #
 # Reference: https://agentclientprotocol.com/protocol/file-system
 # Reference: https://agentclientprotocol.com/protocol/terminals
+# Reference: https://agentclientprotocol.com/protocol/v1/elicitation
 
 require "json"
+require "./types"
 require "./tool_call_content"
 
 module ACP
@@ -346,9 +350,9 @@ module ACP
     struct WaitForTerminalExitResult
       include JSON::Serializable
 
-      # The process exit code (may be nil if terminated by signal).
+      # The process exit code (may be nil if terminated by signal). Schema `uint32`.
       @[JSON::Field(key: "exitCode")]
-      property exit_code : Int32?
+      property exit_code : UInt32?
 
       # The signal that terminated the process (may be nil if exited normally).
       property signal : String?
@@ -358,7 +362,7 @@ module ACP
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
-        @exit_code : Int32? = nil,
+        @exit_code : UInt32? = nil,
         @signal : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
       )
@@ -418,6 +422,331 @@ module ACP
       end
     end
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Elicitation Methods
+    # ═══════════════════════════════════════════════════════════════════
+    # See: https://agentclientprotocol.com/protocol/v1/elicitation
+
+    # One choice of an enum-valued elicitation property (`EnumOption`).
+    struct EnumOption
+      include JSON::Serializable
+
+      # The value submitted when this option is chosen (required).
+      @[JSON::Field(key: "const")]
+      property const_value : String
+
+      # Display label (required).
+      property title : String
+
+      # Optional longer description.
+      property description : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @const_value : String,
+        @title : String,
+        @description : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # The `items` of an `array` (multi-select) elicitation property: either
+    # untitled (`type: "string"` + `enum`) or titled (`anyOf` options).
+    struct MultiSelectItems
+      include JSON::Serializable
+
+      # "string" for untitled items; absent for titled ones.
+      @[JSON::Field(key: "type")]
+      property items_type : String?
+
+      # Allowed values of untitled items.
+      @[JSON::Field(key: "enum")]
+      property enum_values : Array(String)?
+
+      # Allowed values of titled items.
+      @[JSON::Field(key: "anyOf")]
+      property any_of : Array(EnumOption)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @items_type : String? = nil,
+        @enum_values : Array(String)? = nil,
+        @any_of : Array(EnumOption)? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # One property of a form elicitation's `requestedSchema`
+    # (`ElicitationPropertySchema`). The schema's variants
+    # (`StringPropertySchema`, `NumberPropertySchema`,
+    # `IntegerPropertySchema`, `BooleanPropertySchema`,
+    # `MultiSelectPropertySchema`) are flattened into one struct keyed by
+    # `property_type`; fields that don't apply to a variant are nil.
+    struct ElicitationPropertySchema
+      include JSON::Serializable
+
+      # "string", "number", "integer", "boolean", "array", or a future type
+      # (required).
+      @[JSON::Field(key: "type")]
+      property property_type : String
+
+      # Display label.
+      property title : String?
+
+      # Longer description.
+      property description : String?
+
+      # Default value (a string, number, boolean or string array, matching
+      # the type).
+      property default : JSON::Any?
+
+      # `string`: length bounds. Schema `uint32`.
+      @[JSON::Field(key: "minLength")]
+      property min_length : UInt32?
+
+      # :ditto:
+      @[JSON::Field(key: "maxLength")]
+      property max_length : UInt32?
+
+      # `string`: regular expression the value must match.
+      property pattern : String?
+
+      # `string`: "email", "uri", "date" or "date-time".
+      property format : String?
+
+      # `string`: allowed values (untitled enum).
+      @[JSON::Field(key: "enum")]
+      property enum_values : Array(String)?
+
+      # `string`: allowed values with display titles (titled enum).
+      @[JSON::Field(key: "oneOf")]
+      property one_of : Array(EnumOption)?
+
+      # `number` / `integer`: inclusive bounds. Integers stay `Int64`.
+      property minimum : Int64 | Float64?
+
+      # :ditto:
+      property maximum : Int64 | Float64?
+
+      # `array`: selection count bounds. Schema `uint64`.
+      @[JSON::Field(key: "minItems")]
+      property min_items : UInt64?
+
+      # :ditto:
+      @[JSON::Field(key: "maxItems")]
+      property max_items : UInt64?
+
+      # `array`: the selectable values (required for `array`).
+      property items : MultiSelectItems?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @property_type : String,
+        @title : String? = nil,
+        @description : String? = nil,
+        @default : JSON::Any? = nil,
+        @min_length : UInt32? = nil,
+        @max_length : UInt32? = nil,
+        @pattern : String? = nil,
+        @format : String? = nil,
+        @enum_values : Array(String)? = nil,
+        @one_of : Array(EnumOption)? = nil,
+        @minimum : Int64 | Float64? = nil,
+        @maximum : Int64 | Float64? = nil,
+        @min_items : UInt64? = nil,
+        @max_items : UInt64? = nil,
+        @items : MultiSelectItems? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # The restricted JSON Schema of a form elicitation: a flat object of
+    # primitive and enum properties.
+    struct ElicitationSchema
+      include JSON::Serializable
+
+      # Always "object".
+      @[JSON::Field(key: "type")]
+      property schema_type : String = "object"
+
+      # Optional form title.
+      property title : String?
+
+      # Optional form description.
+      property description : String?
+
+      # The form fields, keyed by property name.
+      property properties : Hash(String, ElicitationPropertySchema) = {} of String => ElicitationPropertySchema
+
+      # Names of the properties the user must fill in.
+      property required : Array(String)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @properties : Hash(String, ElicitationPropertySchema) = {} of String => ElicitationPropertySchema,
+        @required : Array(String)? = nil,
+        @title : String? = nil,
+        @description : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+        @schema_type = "object"
+      end
+    end
+
+    # ─── elicitation/create ───────────────────────────────────────────
+    # Asks the user for structured input (form mode) or for consent to open
+    # an out-of-band URL (URL mode). Only sent for a mode the client
+    # advertised in `clientCapabilities.elicitation`; the client answers any
+    # other mode with -32602.
+
+    # Request parameters for `elicitation/create` (`CreateElicitationRequest`).
+    # Mode- and scope-specific fields are flattened: `requested_schema` is
+    # set for form mode, `elicitation_id` / `url` for URL mode; `session_id`
+    # (plus optional `tool_call_id`) for a session-scoped request,
+    # `request_id` for a request-scoped one.
+    struct CreateElicitationParams
+      include JSON::Serializable
+
+      # "form", "url", or a future mode (required).
+      property mode : String
+
+      # What is being asked and why (required).
+      property message : String
+
+      # Session scope: the session this elicitation belongs to.
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String?
+
+      # Session scope: the tool call this elicitation belongs to.
+      @[JSON::Field(key: "toolCallId")]
+      property tool_call_id : String?
+
+      # Request scope: the JSON-RPC request this elicitation belongs to.
+      @[JSON::Field(key: "requestId")]
+      property request_id : RequestId?
+
+      # Form mode: the fields to collect (required for form mode).
+      @[JSON::Field(key: "requestedSchema")]
+      property requested_schema : ElicitationSchema?
+
+      # URL mode: opaque ID echoed by `elicitation/complete` (required for URL mode).
+      @[JSON::Field(key: "elicitationId")]
+      property elicitation_id : String?
+
+      # URL mode: the URL to open after user consent (required for URL mode).
+      property url : String?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @mode : String,
+        @message : String,
+        @session_id : String? = nil,
+        @tool_call_id : String? = nil,
+        @request_id : RequestId? = nil,
+        @requested_schema : ElicitationSchema? = nil,
+        @elicitation_id : String? = nil,
+        @url : String? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # Both scopes missing can only mean `"requestId": null` (a request
+      # scope with a null ID), so write that back instead of no scope at all.
+      protected def on_to_json(json : ::JSON::Builder)
+        json.field("requestId", nil) if @session_id.nil? && @request_id.nil?
+      end
+
+      # Returns true for a form-mode request.
+      def form? : Bool
+        @mode == "form"
+      end
+
+      # Returns true for a URL-mode request.
+      def url? : Bool
+        @mode == "url"
+      end
+    end
+
+    # A submitted form value (`ElicitationContentValue`).
+    alias ElicitationContentValue = String | Int64 | Float64 | Bool | Array(String)
+
+    # Response for `elicitation/create` (`CreateElicitationResponse`).
+    struct CreateElicitationResult
+      include JSON::Serializable
+
+      # "accept", "decline" or "cancel" (required).
+      property action : String
+
+      # The submitted values; only meaningful for an accepted form
+      # elicitation, normally omitted for URL mode.
+      property content : Hash(String, ElicitationContentValue)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(
+        @action : String,
+        @content : Hash(String, ElicitationContentValue)? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # The user submitted the form or consented to open the URL.
+      def self.accept(content : Hash(String, ElicitationContentValue)? = nil) : CreateElicitationResult
+        new("accept", content)
+      end
+
+      # The user explicitly declined.
+      def self.decline : CreateElicitationResult
+        new("decline")
+      end
+
+      # The user dismissed the request without choosing.
+      def self.cancel : CreateElicitationResult
+        new("cancel")
+      end
+    end
+
+    # ─── elicitation/complete ─────────────────────────────────────────
+    # Notification that the out-of-band interaction of a URL elicitation
+    # finished. Clients MUST ignore unknown or already-completed IDs.
+
+    # Params for the `elicitation/complete` notification
+    # (`CompleteElicitationNotification`).
+    struct CompleteElicitationParams
+      include JSON::Serializable
+
+      # The `elicitationId` of the original URL-mode request (required).
+      @[JSON::Field(key: "elicitationId")]
+      property elicitation_id : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@elicitation_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # ─── Agent Method Names ───────────────────────────────────────────
     # Constants for all agent method names (client → agent requests),
     # matching the Rust SDK's `AGENT_METHOD_NAMES`.
@@ -427,6 +756,7 @@ module ACP
       # Connection lifecycle.
       INITIALIZE   = "initialize"
       AUTHENTICATE = "authenticate"
+      LOGOUT       = "logout"
 
       # Session management.
       SESSION_NEW               = "session/new"
@@ -434,6 +764,7 @@ module ACP
       SESSION_LIST              = "session/list"
       SESSION_RESUME            = "session/resume"
       SESSION_CLOSE             = "session/close"
+      SESSION_DELETE            = "session/delete"
       SESSION_PROMPT            = "session/prompt"
       SESSION_CANCEL            = "session/cancel"
       SESSION_SET_MODE          = "session/set_mode"
@@ -446,13 +777,13 @@ module ACP
       # `session_method?` cannot drift apart as methods are added.
       SESSION_METHODS = {
         SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_RESUME,
-        SESSION_CLOSE, SESSION_PROMPT, SESSION_CANCEL, SESSION_SET_MODE,
-        SESSION_SET_CONFIG_OPTION, SESSION_UPDATE,
+        SESSION_CLOSE, SESSION_DELETE, SESSION_PROMPT, SESSION_CANCEL,
+        SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE,
       }
 
       # Returns true if the given method name is a known agent method.
       def self.known?(method : String) : Bool
-        method == INITIALIZE || method == AUTHENTICATE || session_method?(method)
+        method == INITIALIZE || method == AUTHENTICATE || method == LOGOUT || session_method?(method)
       end
 
       # Returns true if the given method name is a session method.
@@ -515,13 +846,18 @@ module ACP
       # Permission request method.
       SESSION_REQUEST_PERMISSION = "session/request_permission"
 
+      # Elicitation request and its completion notification.
+      ELICITATION_CREATE   = "elicitation/create"
+      ELICITATION_COMPLETE = "elicitation/complete"
+
       # Returns true if the given method name is a known client method.
       def self.known?(method : String) : Bool
         case method
         when FS_READ_TEXT_FILE, FS_WRITE_TEXT_FILE,
              TERMINAL_CREATE, TERMINAL_OUTPUT, TERMINAL_RELEASE,
              TERMINAL_WAIT_FOR_EXIT, TERMINAL_KILL,
-             SESSION_REQUEST_PERMISSION
+             SESSION_REQUEST_PERMISSION,
+             ELICITATION_CREATE, ELICITATION_COMPLETE
           true
         else
           false
@@ -543,6 +879,15 @@ module ACP
           false
         end
       end
+    end
+
+    # ─── Protocol Method Names ────────────────────────────────────────
+    # Protocol-level methods either side may send (`$/`-prefixed).
+
+    module ProtocolMethod
+      # Asks the peer to cancel one of our requests.
+      # See: https://agentclientprotocol.com/protocol/v1/cancellation
+      CANCEL_REQUEST = "$/cancel_request"
     end
   end
 end

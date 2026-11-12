@@ -44,6 +44,7 @@ module ACP
     # - `client` — an initialized ACP::Client.
     # - `cwd` — the absolute path to the working directory.
     # - `mcp_servers` — optional MCP server references (as JSON::Any).
+    # - `additional_directories` / `system_prompt` — see `Client#session_new`.
     #
     # The client must be in the Initialized (or SessionActive) state.
     # Returns a new `Session` instance bound to the created session.
@@ -51,8 +52,12 @@ module ACP
       client : Client,
       cwd : String,
       mcp_servers : Array(JSON::Any)? = nil,
+      *,
+      additional_directories : Array(String)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
     ) : Session
-      result = client.session_new(cwd, mcp_servers || [] of JSON::Any)
+      result = client.session_new(cwd, mcp_servers || [] of JSON::Any,
+        additional_directories: additional_directories, system_prompt: system_prompt)
       new(client, result.session_id, result.modes, result.config_options)
     end
 
@@ -62,6 +67,7 @@ module ACP
     # - `session_id` — the ID of the session to resume.
     # - `cwd` — the absolute path to the working directory.
     # - `mcp_servers` — optional MCP server references (as JSON::Any).
+    # - `additional_directories` / `system_prompt` — see `Client#session_load`.
     #
     # Returns a `Session` instance bound to the loaded session.
     def self.load(
@@ -69,8 +75,12 @@ module ACP
       session_id : String,
       cwd : String,
       mcp_servers : Array(JSON::Any)? = nil,
+      *,
+      additional_directories : Array(String)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
     ) : Session
-      result = client.session_load(session_id, cwd, mcp_servers || [] of JSON::Any)
+      result = client.session_load(session_id, cwd, mcp_servers || [] of JSON::Any,
+        additional_directories: additional_directories, system_prompt: system_prompt)
       new(client, session_id, result.modes, result.config_options)
     end
 
@@ -182,11 +192,11 @@ module ACP
     # Changes a session configuration option.
     #
     # - `config_id` — the ID of the config option to change.
-    # - `value` — the new value to set.
+    # - `value` — the new value: a value ID (`select`) or a Bool (`boolean`).
     #
     # Returns the full set of config options and their current values.
     # See: https://agentclientprotocol.com/protocol/session-config-options
-    def set_config_option(config_id : String, value : String) : Protocol::SessionSetConfigOptionResult
+    def set_config_option(config_id : String, value : String | Bool) : Protocol::SessionSetConfigOptionResult
       ensure_open!
       result = @client.session_set_config_option(config_id, value, @id)
       @config_options = result.config_options

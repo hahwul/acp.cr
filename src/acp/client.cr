@@ -78,6 +78,12 @@ module ACP
   # Handler for `terminal/kill` requests from the agent.
   alias KillTerminalHandler = Protocol::KillTerminalParams -> Protocol::KillTerminalResult
 
+  # Handler for `elicitation/create` requests from the agent.
+  alias CreateElicitationHandler = Protocol::CreateElicitationParams -> Protocol::CreateElicitationResult
+
+  # Handler for `elicitation/complete` notifications from the agent.
+  alias ElicitationCompleteHandler = Protocol::CompleteElicitationParams -> Nil
+
   # The state of the client through its lifecycle.
   enum ClientState
     # Client has been created but not yet initialized.
@@ -194,6 +200,16 @@ module ACP
     # Set this when advertising the `terminal` capability.
     property on_kill_terminal : KillTerminalHandler?
 
+    # Handler for `elicitation/create` — ask the user for input.
+    # Set this when advertising `elicitation` capabilities. A request for a
+    # mode not advertised there is answered with -32602 without reaching it.
+    # See: https://agentclientprotocol.com/protocol/v1/elicitation
+    property on_create_elicitation : CreateElicitationHandler?
+
+    # Handler for the `elicitation/complete` notification (URL mode). If
+    # unset, the notification goes to `on_notification`.
+    property on_elicitation_complete : ElicitationCompleteHandler?
+
     # ─── Internal State ─────────────────────────────────────────────
 
     # Monotonically increasing request ID counter.
@@ -209,10 +225,32 @@ module ACP
     # are cooperative, this protects against unexpected scheduling).
     @pending_mutex : Mutex = Mutex.new
 
-    # `session/request_permission` requests whose handler hasn't returned
-    # yet, keyed by request ID → session ID. `session_cancel` answers these
-    # with `cancelled`; guarded by `@pending_mutex`.
-    @pending_permissions : Hash(Protocol::RequestId?, String) = Hash(Protocol::RequestId?, String).new
+    # An agent request whose handler hasn't answered yet. Compared by
+    # identity, so a duplicate ID can't claim another request's answer.
+    private class InFlightRequest
+      getter method : String
+      getter session_id : String?
+
+      def initialize(@method : String, @session_id : String?)
+      end
+    end
+
+    # Agent requests (with a non-null ID) whose handler hasn't answered yet.
+    # `session_cancel` and an incoming `$/cancel_request` answer some of
+    # them early by removing them; the handler's late answer is then
+    # dropped. Guarded by `@pending_mutex`.
+    @in_flight : Hash(Protocol::RequestId, InFlightRequest) = Hash(Protocol::RequestId, InFlightRequest).new
+
+    # Agent methods an incoming `$/cancel_request` answers right away,
+    # because they only read or wait: answering early can't hide a side
+    # effect the handler still performs. Others are left to their handler.
+    CANCEL_ANSWERED_EARLY = {
+      Protocol::ClientMethod::SESSION_REQUEST_PERMISSION,
+      Protocol::ClientMethod::ELICITATION_CREATE,
+      Protocol::ClientMethod::FS_READ_TEXT_FILE,
+      Protocol::ClientMethod::TERMINAL_OUTPUT,
+      Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT,
+    }
 
     # Whether the dispatcher fiber is running.
     @dispatcher_running : Bool = false
@@ -320,10 +358,36 @@ module ACP
       ClientLog.info { "Authenticated with method: #{method_id}" }
     end
 
+    # Ends the current authenticated state with the agent (`logout`).
+    #
+    # Requires the agent to advertise `agentCapabilities.auth.logout`;
+    # callers MUST check `agent_capabilities.try(&.auth).try(&.logout?)`
+    # first. Afterwards, new sessions that need authentication require
+    # `authenticate` again, and active sessions may start failing with
+    # auth errors. Local client state is left unchanged.
+    #
+    # Raises `InvalidStateError` if not initialized.
+    # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
+    def logout : Protocol::LogoutResult
+      ensure_state(ClientState::Initialized, "logout")
+
+      raw_result = send_request(Protocol::AgentMethod::LOGOUT, Protocol::LogoutParams.new)
+      result = decode_result(Protocol::LogoutResult, raw_result, Protocol::AgentMethod::LOGOUT)
+
+      ClientLog.info { "Logged out" }
+
+      result
+    end
+
     # Creates a new session with the agent.
     #
     # - `cwd` — the absolute path to the working directory.
     # - `mcp_servers` — optional list of MCP servers to connect to.
+    # - `additional_directories` — extra absolute workspace roots; only pass
+    #   when the agent advertises `sessionCapabilities.additionalDirectories`.
+    # - `system_prompt` — system-level instructions; only pass when the agent
+    #   advertises `sessionCapabilities.systemPrompt` (and `.mode.override`
+    #   for an `override` prompt).
     #
     # Returns the session creation result with the session ID, modes,
     # and config options. Stores the session ID for subsequent calls.
@@ -332,10 +396,14 @@ module ACP
     def session_new(
       cwd : String,
       mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+      *,
+      additional_directories : Array(String)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
     ) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, "session/new")
 
-      params = Protocol::SessionNewParams.new(cwd, mcp_servers)
+      params = Protocol::SessionNewParams.new(cwd, mcp_servers,
+        additional_directories: additional_directories, system_prompt: system_prompt)
       raw_result = send_request(Protocol::AgentMethod::SESSION_NEW, params)
       result = decode_result(Protocol::SessionNewResult, raw_result, Protocol::AgentMethod::SESSION_NEW)
 
@@ -353,6 +421,9 @@ module ACP
     #
     # - `session_id` — the session ID to load.
     # - `cwd` — optional working directory override.
+    # - `additional_directories` / `system_prompt` — as for `session_new`.
+    #   Send the full intended root list and the prompt the session was
+    #   created with; neither is restored implicitly.
     #
     # Raises `InvalidStateError` if not initialized.
     # Raises `JsonRpcError` if the agent can't load the session.
@@ -360,10 +431,14 @@ module ACP
       session_id : String,
       cwd : String,
       mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+      *,
+      additional_directories : Array(String)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
     ) : Protocol::SessionLoadResult
       ensure_state(ClientState::Initialized, "session/load")
 
-      params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers)
+      params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
+        additional_directories: additional_directories, system_prompt: system_prompt)
       raw_result = send_request(Protocol::AgentMethod::SESSION_LOAD, params)
       result = decode_result(Protocol::SessionLoadResult, raw_result, Protocol::AgentMethod::SESSION_LOAD)
 
@@ -414,6 +489,8 @@ module ACP
     # Returns the resume result, which MAY include initial mode/config
     # state if the agent supports those features.
     #
+    # `additional_directories` / `system_prompt` work as for `session_load`.
+    #
     # Raises `InvalidStateError` if not initialized.
     # Raises `JsonRpcError` if the agent can't resume the session.
     # See: https://agentclientprotocol.com/protocol/session-setup#resuming-sessions
@@ -421,10 +498,14 @@ module ACP
       session_id : String,
       cwd : String,
       mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+      *,
+      additional_directories : Array(String)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
     ) : Protocol::SessionResumeResult
       ensure_state(ClientState::Initialized, "session/resume")
 
-      params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers)
+      params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
+        additional_directories: additional_directories, system_prompt: system_prompt)
       raw_result = send_request(Protocol::AgentMethod::SESSION_RESUME, params)
       result = decode_result(Protocol::SessionResumeResult, raw_result, Protocol::AgentMethod::SESSION_RESUME)
 
@@ -476,6 +557,36 @@ module ACP
       forget_session(sid)
 
       ClientLog.info { "Session closed: #{sid}" }
+
+      result
+    end
+
+    # Removes a session from the agent's session history, so it no longer
+    # appears in `session/list` results.
+    #
+    # Requires the agent to advertise `sessionCapabilities.delete`; callers
+    # MUST check `agent_capabilities&.session_capabilities&.delete?` first.
+    # A `-32002` (resource not found) answer counts as success, as the spec
+    # recommends. What happens to an active session is up to the agent, so
+    # the client's cached session state is left alone (see `forget_session`).
+    #
+    # Raises `InvalidStateError` if not initialized.
+    # See: https://agentclientprotocol.com/protocol/v1/session-delete
+    def session_delete(session_id : String) : Protocol::SessionDeleteResult
+      ensure_state(ClientState::Initialized, "session/delete")
+
+      params = Protocol::SessionDeleteParams.new(session_id)
+      raw_result = begin
+        send_request(Protocol::AgentMethod::SESSION_DELETE, params)
+      rescue ex : JsonRpcError
+        # session-delete#semantics: "Clients SHOULD treat a -32002 response
+        # to `session/delete` as a successful delete."
+        raise ex unless ex.resource_not_found?
+        JSON::Any.new({} of String => JSON::Any)
+      end
+      result = decode_result(Protocol::SessionDeleteResult, raw_result, Protocol::AgentMethod::SESSION_DELETE)
+
+      ClientLog.info { "Session deleted: #{session_id}" }
 
       result
     end
@@ -560,8 +671,10 @@ module ACP
       # Claim the pending permissions first so a handler's late answer is
       # dropped even if sending the notification below fails.
       ids = @pending_mutex.synchronize do
-        pending = @pending_permissions.select { |_id, perm_sid| perm_sid == sid }.keys
-        pending.each { |id| @pending_permissions.delete(id) }
+        pending = @in_flight.select do |_id, req|
+          req.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION && req.session_id == sid
+        end.keys
+        pending.each { |id| @in_flight.delete(id) }
         pending
       end
 
@@ -593,14 +706,15 @@ module ACP
     # Changes a configuration option for the active session.
     #
     # - `config_id` — the ID of the configuration option to change.
-    # - `value` — the new value to set.
+    # - `value` — the new value: a value ID for a `select` option, a Bool
+    #   for a `boolean` option (sent with `type: "boolean"`).
     # - `session_id` — optional session ID override.
     #
     # Returns the full set of configuration options and their current values.
     # See: https://agentclientprotocol.com/protocol/session-config-options#from-the-client
     def session_set_config_option(
       config_id : String,
-      value : String,
+      value : String | Bool,
       session_id : String? = nil,
     ) : Protocol::SessionSetConfigOptionResult
       sid = session_id || @session_id
@@ -747,6 +861,17 @@ module ACP
       @transport.send(message)
 
       ClientLog.debug { "Sent raw notification method=#{method}" }
+    end
+
+    # Sends `$/cancel_request` asking the agent to cancel one of our
+    # outstanding requests. The agent may ignore it; it still answers the
+    # request, normally with a `-32800` (`JsonRpcError#request_cancelled?`)
+    # error, which the waiting caller then receives. A request that times
+    # out is cancelled this way automatically. To cancel a prompt turn, use
+    # `session_cancel` instead.
+    # See: https://agentclientprotocol.com/protocol/v1/cancellation
+    def cancel_request(request_id : Protocol::RequestId) : Nil
+      send_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, Protocol::CancelRequestParams.new(request_id))
     end
 
     # Responds to an agent-initiated request.
@@ -938,6 +1063,12 @@ module ACP
         @pending_mutex.synchronize do
           @pending.delete(request_id.to_s)
         end
+        # Nobody waits for the answer any more: tell the agent it can stop.
+        begin
+          cancel_request(request_id)
+        rescue ex
+          ClientLog.debug { "Could not send $/cancel_request for id=#{request_id}: #{ex.message}" }
+        end
         raise RequestTimeoutError.new(request_id, timeout_seconds)
       end
     end
@@ -1127,18 +1258,27 @@ module ACP
 
       ClientLog.debug { "Agent request: method=#{method_name} id=#{id}" }
 
-      # Track a permission request before handing it off, so a
-      # `session_cancel` issued right after it was read still answers it.
+      # Track the request before handing it off, so a `session_cancel` or
+      # `$/cancel_request` read right after it can still answer it.
       # A null-id request isn't tracked: every such request would share the
       # one `nil` key, and all but one would go unanswered.
-      perm_sid = nil
-      if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION && !id.nil?
-        perm_sid = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
-        @pending_mutex.synchronize { @pending_permissions[id] = perm_sid } if perm_sid
+      entry = nil
+      unless id.nil?
+        perm_sid = if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+                     params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
+                   end
+        entry = InFlightRequest.new(method_name, perm_sid)
+        @pending_mutex.synchronize { @in_flight[id] = entry }
       end
 
       spawn(name: "acp-agent-request") do
-        route_agent_request(id, method_name, params, perm_sid)
+        reply = route_agent_request(method_name, params)
+        if claim_agent_request(id, entry)
+          case reply
+          in Protocol::JsonRpcErrorObject then respond_to_agent_error(id, reply.code, reply.message, reply.data)
+          in JSON::Any                    then respond_to_agent(id, reply)
+          end
+        end
         @consecutive_dispatch_errors.set(0)
       rescue ex
         # Only the response write itself lands here (handler errors are
@@ -1154,31 +1294,40 @@ module ACP
       true
     end
 
-    private def route_agent_request(
-      id : Protocol::RequestId?,
-      method_name : String,
-      params : JSON::Any?,
-      perm_sid : String?,
-    ) : Nil
+    # The answer to an agent request: a result, or a JSON-RPC error.
+    private alias AgentReply = JSON::Any | Protocol::JsonRpcErrorObject
+
+    # Runs the handler for an agent request and returns its answer; the
+    # caller sends it unless the request was already answered by a cancel.
+    private def route_agent_request(method_name : String, params : JSON::Any?) : AgentReply
       case method_name
       when Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-        handle_permission_request(id, params, perm_sid)
+        handle_permission_request(params)
       when Protocol::ClientMethod::FS_READ_TEXT_FILE
-        handle_typed_client_method(id, params, @on_read_text_file, Protocol::ReadTextFileParams, method_name)
+        handle_typed_client_method(params, @on_read_text_file, Protocol::ReadTextFileParams, method_name)
       when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
-        handle_typed_client_method(id, params, @on_write_text_file, Protocol::WriteTextFileParams, method_name)
+        handle_typed_client_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name)
       when Protocol::ClientMethod::TERMINAL_CREATE
-        handle_typed_client_method(id, params, @on_create_terminal, Protocol::CreateTerminalParams, method_name)
+        handle_typed_client_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name)
       when Protocol::ClientMethod::TERMINAL_OUTPUT
-        handle_typed_client_method(id, params, @on_terminal_output, Protocol::TerminalOutputParams, method_name)
+        handle_typed_client_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name)
       when Protocol::ClientMethod::TERMINAL_RELEASE
-        handle_typed_client_method(id, params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name)
+        handle_typed_client_method(params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name)
       when Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT
-        handle_typed_client_method(id, params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name)
+        handle_typed_client_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name)
       when Protocol::ClientMethod::TERMINAL_KILL
-        handle_typed_client_method(id, params, @on_kill_terminal, Protocol::KillTerminalParams, method_name)
+        handle_typed_client_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name)
+      when Protocol::ClientMethod::ELICITATION_CREATE
+        # elicitation#url-completion: "Requests using a mode the Client has
+        # not advertised produce JSON-RPC -32602 (Invalid params)."
+        mode = params.try(&.as_h?).try(&.["mode"]?).try(&.as_s?)
+        unless @client_capabilities.elicitation.try(&.supports?(mode))
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
+            "Elicitation mode not advertised by the client: #{mode.inspect}")
+        end
+        handle_typed_client_method(params, @on_create_elicitation, Protocol::CreateElicitationParams, method_name)
       else
-        handle_unknown_agent_request(id, method_name, params)
+        handle_unknown_agent_request(method_name, params)
       end
     end
 
@@ -1190,24 +1339,16 @@ module ACP
     # unknown method (extensibility#custom-requests: "If the receiving end
     # doesn't recognize the custom method name, it should respond with the
     # standard 'Method not found' error"), with the method name as `data`.
-    private def handle_unknown_agent_request(
-      id : Protocol::RequestId?,
-      method_name : String,
-      params : JSON::Any?,
-    ) : Nil
+    private def handle_unknown_agent_request(method_name : String, params : JSON::Any?) : AgentReply
       if handler = @on_agent_request
-        # Only the handler's own failure becomes a JSON-RPC error; a failed
-        # write of the answer propagates to the request fiber.
-        result = begin
+        begin
           handler.call(method_name, params || JSON::Any.new(nil))
         rescue ex
           ClientLog.error { "Error in agent request handler for #{method_name}: #{ex.message}" }
-          return respond_handler_error(id, ex, ex.message || "Handler error")
+          handler_error_reply(ex, ex.message || "Handler error")
         end
-        respond_to_agent(id, result)
       else
-        respond_to_agent_error(
-          id,
+        Protocol::JsonRpcErrorObject.new(
           JsonRpcError::METHOD_NOT_FOUND,
           "Client does not handle method: #{method_name}",
           JSON::Any.new(method_name)
@@ -1219,51 +1360,42 @@ module ACP
     # first, then falls back like an unknown method (`on_agent_request`,
     # else -32601).
     private def handle_typed_client_method(
-      id : Protocol::RequestId?,
       params : JSON::Any?,
       handler,
       params_type,
       method_name : String,
-    ) : Nil
-      return handle_unknown_agent_request(id, method_name, params) unless h = handler
+    ) : AgentReply
+      return handle_unknown_agent_request(method_name, params) unless h = handler
 
       typed_params = begin
         params_type.from_json((params || JSON::Any.new(nil)).to_json)
       rescue ex
         ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
-        return respond_to_agent_error(id, JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
       end
 
       # Separate from the parse above: a JSON error raised by the handler's
       # own code is a handler failure, not invalid params.
-      result = begin
+      begin
         # Convert JSON::Serializable result to JSON::Any via round-trip;
         # Crystal has no direct JSON::Serializable → JSON::Any conversion.
         JSON.parse(h.call(typed_params).to_json)
       rescue ex
         ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
-        return respond_handler_error(id, ex, ex.message || "Handler error")
+        handler_error_reply(ex, ex.message || "Handler error")
       end
-      respond_to_agent(id, result)
     end
 
     # Handles a `session/request_permission` request from the agent.
     # Delegates to the on_agent_request handler or auto-denies.
-    #
-    # `sid` is set when the request was registered in `@pending_permissions`;
-    # the answer is then sent only if `session_cancel` hasn't already sent one.
-    private def handle_permission_request(id : Protocol::RequestId?, params : JSON::Any?, sid : String?) : Nil
+    private def handle_permission_request(params : JSON::Any?) : AgentReply
       if handler = @on_agent_request
-        result = begin
+        begin
           handler.call("session/request_permission", params || JSON::Any.new(nil))
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
-          if claim_permission_response(id, sid)
-            respond_handler_error(id, ex, "Permission handler error: #{ex.message}")
-          end
-          return
+          handler_error_reply(ex, "Permission handler error: #{ex.message}")
         end
-        respond_to_agent(id, result) if claim_permission_response(id, sid)
       else
         # No handler — auto-cancel the permission request.
         #
@@ -1275,31 +1407,70 @@ module ACP
         # prompt turn until it times out. Reuse the typed builder so this path
         # stays consistent with `Protocol::RequestPermissionResult.cancelled`.
         ClientLog.warn { "No handler for permission request; auto-cancelling" }
-        cancelled = JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
-        respond_to_agent(id, cancelled) if claim_permission_response(id, sid)
+        JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
       end
     end
 
-    # Answers an agent request whose handler raised. A handler that raises
-    # `JsonRpcError` chooses the error the agent sees — e.g. -32002 for a
-    # missing file (error#unknown-sessions) or -32800 for a cancelled request
-    # (cancellation) — so its code, message and data are sent as-is. Any
-    # other exception becomes -32603 with `fallback` as the message.
-    private def respond_handler_error(id : Protocol::RequestId?, ex : Exception, fallback : String) : Nil
+    # The answer to an agent request whose handler raised. A handler that
+    # raises `JsonRpcError` chooses the error the agent sees — e.g. -32002
+    # for a missing file (error#unknown-sessions) or -32800 for a cancelled
+    # request (cancellation) — so its code, message and data are sent as-is.
+    # Any other exception becomes -32603 with `fallback` as the message.
+    private def handler_error_reply(ex : Exception, fallback : String) : Protocol::JsonRpcErrorObject
       # An error the agent returned to a request the handler made itself
       # describes that other request, not this one: don't echo it back.
       if ex.is_a?(JsonRpcError) && !ex.received?
-        respond_to_agent_error(id, ex.code, ex.message || fallback, ex.data)
+        Protocol::JsonRpcErrorObject.new(ex.code, ex.message || fallback, ex.data)
       else
-        respond_to_agent_error(id, JsonRpcError::INTERNAL_ERROR, fallback)
+        Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, fallback)
       end
     end
 
-    # Removes a permission request from the pending set. Returns false when
-    # `session_cancel` already answered it, so the caller must not respond.
-    private def claim_permission_response(id : Protocol::RequestId?, sid : String?) : Bool
-      return true unless sid
-      @pending_mutex.synchronize { !@pending_permissions.delete(id).nil? }
+    # Removes an agent request from `@in_flight`. Returns false when a
+    # cancel already answered it, so the caller must not respond again.
+    # Untracked (null-id) requests are always answered.
+    private def claim_agent_request(id : Protocol::RequestId?, entry : InFlightRequest?) : Bool
+      return true unless id && entry
+      @pending_mutex.synchronize do
+        current = @in_flight[id]?
+        # Gone: a cancel answered it. Replaced: the agent reused the ID of a
+        # request still in flight; this one is still ours to answer.
+        return false unless current
+        @in_flight.delete(id) if current.same?(entry)
+        true
+      end
+    end
+
+    # Handles an incoming `$/cancel_request`. A tracked request whose method
+    # is in `CANCEL_ANSWERED_EARLY` is answered now — `cancelled` for a
+    # permission request, -32800 otherwise — and its handler's late answer is
+    # dropped. Other requests are left to their handler, which still answers
+    # them. The notification is then passed to `on_notification`, so the
+    # application can stop the work.
+    private def handle_cancel_request(params : JSON::Any?) : Nil
+      id = params.try { |p| Protocol::CancelRequestParams.from_json(p.to_json).request_id rescue nil }
+      entry = nil
+      if id
+        entry = @pending_mutex.synchronize do
+          req = @in_flight[id]?
+          @in_flight.delete(id) if req && CANCEL_ANSWERED_EARLY.includes?(req.method)
+        end
+      end
+
+      if id && entry
+        ClientLog.info { "Agent cancelled request id=#{id} (#{entry.method})" }
+        begin
+          if entry.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+            respond_to_agent(id, JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json))
+          else
+            respond_to_agent_error(id, JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
+          end
+        rescue ex : TransportError
+          ClientLog.debug { "Could not answer cancelled request id=#{id}: #{ex.message}" }
+        end
+      end
+
+      deliver_raw_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, params)
     end
 
     # Handles an incoming notification from the agent.
@@ -1314,6 +1485,10 @@ module ACP
       case method_name
       when Protocol::AgentMethod::SESSION_UPDATE
         handle_session_update(params)
+      when Protocol::ProtocolMethod::CANCEL_REQUEST
+        handle_cancel_request(params)
+      when Protocol::ClientMethod::ELICITATION_COMPLETE
+        handle_elicitation_complete(params)
       else
         # Delegate to the generic notification handler.
         # Extension notifications (prefixed with `_`) are also routed here.
@@ -1391,6 +1566,21 @@ module ACP
         handler.call(update_params)
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
+      end
+    end
+
+    # Delivers `elicitation/complete` to `on_elicitation_complete`, or to
+    # `on_notification` when that is unset or the params don't parse.
+    private def handle_elicitation_complete(params : JSON::Any?) : Nil
+      method = Protocol::ClientMethod::ELICITATION_COMPLETE
+      handler = @on_elicitation_complete
+      typed = params.try { |p| Protocol::CompleteElicitationParams.from_json(p.to_json) rescue nil }
+      return deliver_raw_notification(method, params) unless handler && typed
+
+      begin
+        handler.call(typed)
+      rescue ex
+        ClientLog.error { "Error in elicitation/complete handler: #{ex.message}" }
       end
     end
 
