@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Breaking Changes
+- Typed session mode and configuration setters validate IDs and values against the session's current advertisements. Initialize with `session.configOptions.boolean` to set v1 boolean options.
 - ACP v1 client helpers now reject unadvertised session operations, optional prompt and setup features, and invalid workspace paths before sending requests. Use absolute Agent-side paths and check the negotiated capabilities.
 - `StdioTransport#incoming` now carries `Transport::IncomingFrame?`. Use `receive` for `JSON::Any?` or `receive_frame` to retain input beyond the range of `JSON::Any`.
 - Schema `uint32`/`uint64` fields are now unsigned: `ReadTextFileParams#line`/`#limit` and `ToolCallLocation#line` are `UInt32?`, `CreateTerminalParams#output_byte_limit` is `UInt64?`, and `UsageUpdate#used`/`#size` are `UInt64`. Valid values above the signed maximum now decode, and negative values are rejected (an `fs/read_text_file` / `terminal/create` request carrying one is answered with `-32602 Invalid params`)
@@ -14,6 +15,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Track ACP v1 and v2 session choices per session. Setup, configuration replies, and Agent updates replace the cached lists in receive order. V2 exposes the exact JSON for extension options.
 - Preserve native MCP-over-ACP declarations in the typed `SessionNewParams` constructor.
 - Preserve full `UInt64` values when stdio dispatches typed ACP usage updates, terminal requests, and elicitation forms.
 - Redact MCP server credentials from outgoing request logs.

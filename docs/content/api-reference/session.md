@@ -106,7 +106,7 @@ when the client advertises subagent support. Use the client's
 session.mode = (mode_id : String)
 ```
 
-Switches the session mode.
+Switches to one of the IDs in `available_mode_ids`.
 
 ### `#available_mode_ids`
 
@@ -125,7 +125,9 @@ session.set_config_option(
 ) : ACP::Protocol::SessionSetConfigOptionResult
 ```
 
-Changes a configuration option: a value ID for a `select` option, a `Bool` for a `boolean` option.
+Changes an option from the session's current `config_options`. Pass an
+advertised value ID for a `select` option or a `Bool` for a negotiated
+`boolean` option.
 
 ### `#close`
 
@@ -173,5 +175,5 @@ Sends a custom extension notification.
 |----------|------|-------------|
 | `id` | `String` | Session ID |
 | `client` | `Client` | Underlying client |
-| `modes` | `SessionModeState?` | Available modes |
-| `config_options` | `Array(ConfigOption)?` | Configuration options |
+| `modes` | `SessionModeState?` | Current mode and available modes |
+| `config_options` | `Array(ConfigOption)?` | Latest configuration options advertised for this session |

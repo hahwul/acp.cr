@@ -2379,7 +2379,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         sent = transport.sent_messages.last
-        transport.inject_raw(%({"jsonrpc":"2.0","id":#{sent["id"].as_i64},"result":{"sessionId":"sess-cfg"}}))
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{sent["id"].as_i64},"result":{"sessionId":"sess-cfg","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast"},{"value":"smart","name":"Smart"}]}]}}))
       end
       client.session_new("/tmp")
 
@@ -7594,12 +7594,12 @@ describe "ACP draft session options" do
   it "leaves the active v1 config cache intact after a malformed setter response" do
     transport = V2TestTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":1})
-    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"fast","options":[]}]})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast"}]}]})
     transport.replies["session/set_config_option"] = %("result":{"configOptions":true})
     client = ACP::Client.new(transport)
     client.initialize_connection
     client.session_new("/work")
-    expect_raises(ACP::ProtocolError) { client.session_set_config_option("model", "slow") }
+    expect_raises(ACP::ProtocolError) { client.session_set_config_option("model", "fast") }
     client.session_config_options.not_nil!.first.current_value.should eq("fast")
   ensure
     client.try(&.close)
@@ -8745,7 +8745,9 @@ describe ACP::V2::Client do
     transport = V2TestTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"delete":{}}}})
     transport.replies["session/list"] = %("result":{"sessions":[{"sessionId":"s","cwd":"/work"}],"nextCursor":"next"})
-    transport.replies["session/set_config_option"] = %("result":{"configOptions":[{"configId":"model","name":"Model","type":"select","currentValue":"fast","options":[]}]})
+    config = %({"configId":"model","name":"Model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast"}]})
+    transport.replies["session/resume"] = %("result":{"configOptions":[#{config}]})
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[#{config}]})
     transport.replies["session/close"] = %("result":{})
     transport.replies["session/delete"] = %("result":{})
     client = ACP::V2::Client.new(transport)
@@ -8755,6 +8757,8 @@ describe ACP::V2::Client do
     listing.sessions.first.cwd.should eq("/work")
     listing.next_cursor.should eq("next")
     take_v2_frame(transport.outgoing)["method"].should eq("session/list")
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    take_v2_frame(transport.outgoing)["method"].should eq("session/resume")
     updated = client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "fast"))
     updated.config_options.first["currentValue"].should eq("fast")
     take_v2_frame(transport.outgoing)["params"]["type"].should eq("id")

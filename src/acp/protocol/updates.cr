@@ -666,7 +666,7 @@ module ACP
       # The full set of configuration options and their current values.
       # Stored as `Array(JSON::Any)` for wire compatibility; use
       # `typed_config_options` for parsed `ConfigOption` structs.
-      @[JSON::Field(key: "configOptions")]
+      @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
       property config_options : Array(JSON::Any) = [] of JSON::Any
 
       # Extension metadata.

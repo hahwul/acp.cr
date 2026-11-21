@@ -4,6 +4,40 @@ require "./skills"
 module ACP
   module Protocol
     module V2
+      # :nodoc:
+      module ConfigGroupValues
+        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
+          values = [] of JSON::Any
+          unless pull.kind.begin_array?
+            pull.skip
+            return values
+          end
+
+          pull.read_array do
+            raw = WireFrame.read_raw(pull)
+            if value = representable_value(raw)
+              values << value
+            end
+          end
+          values
+        end
+
+        def self.to_json(values : Array(JSON::Any), json : JSON::Builder) : Nil
+          values.to_json(json)
+        end
+
+        private def self.representable_value(raw : String) : JSON::Any?
+          value = JSON.parse(raw)
+          value if value.as_h?
+        rescue JSON::Error
+          begin
+            JSON.parse(WireFrame.encode(Protocol::ConfigOptionValue.from_json(raw)))
+          rescue JSON::Error
+            nil
+          end
+        end
+      end
+
       # A named group of selectable values in an ACP v2 configuration option.
       struct ConfigOptionGroup
         include JSON::Serializable
@@ -16,7 +50,7 @@ module ACP
         getter name : String
 
         # Wire objects in the group's option list.
-        @[JSON::Field(converter: ::ACP::Protocol::OptionalOptionList)]
+        @[JSON::Field(converter: ::ACP::Protocol::V2::ConfigGroupValues)]
         getter options : Array(JSON::Any)
 
         # Extension metadata scoped to the group.
@@ -36,7 +70,7 @@ module ACP
       # An open ACP v2 configuration option with typed access to known selectors.
       struct ConfigOption
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Option discriminator, such as select or boolean.
         @[JSON::Field(key: "type")]
@@ -80,15 +114,22 @@ module ACP
 
         # Returns the selectable values as a flat list or a list of named groups.
         def select_options : Array(Protocol::ConfigOptionValue) | Array(ConfigOptionGroup) | Nil
-          return unless @type == "select" && (options = @json_unmapped["options"]?.try(&.as_a?))
-          return unless first = options.first?.try(&.as_h?)
+          return unless @type == "select"
 
-          if first.has_key?("groupId")
-            options.map { |option| ConfigOptionGroup.from_json(option.to_json) }
-          else
-            options.map { |option| Protocol::ConfigOptionValue.from_json(option.to_json) }
+          if raw = raw_field("options")
+            list = RawJson.new(JSON::PullParser.new(raw))
+          elsif representable = @json_unmapped["options"]?
+            list = RawJson.new(representable)
           end
-        rescue JSON::ParseException
+          options = list.try(&.elements?)
+          return unless options && (first = options.first?) && first.object?
+
+          if first.field("groupId")
+            options.map { |option| ConfigOptionGroup.from_json(option.json) }
+          else
+            options.map { |option| Protocol::ConfigOptionValue.from_json(option.json) }
+          end
+        rescue JSON::Error
           nil
         end
       end
@@ -286,7 +327,7 @@ module ACP
         getter session_update : String = "config_option_update"
 
         # Complete list of the session's configuration options.
-        @[JSON::Field(key: "configOptions")]
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
         property config_options : Array(JSON::Any)
 
         # Extension metadata scoped to the update.

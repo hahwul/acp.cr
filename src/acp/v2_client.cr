@@ -27,6 +27,25 @@ module ACP
           send_typed_request(method, params, type)
         end
 
+        def attach_with_choices(method : String, params : JSON::Serializable, type : T.class, session_id : String? = nil) : T forall T
+          send_cached_request(method, params, type) do |result, wire|
+            sid = result.is_a?(Wire::SessionNewResult) ? result.session_id : session_id
+            @session_choices.replace(sid, wire, reattach: !session_id.nil?) if sid && !closed?
+          end
+        end
+
+        def request_option_change(params : Wire::SessionSetConfigOptionParams) : Wire::SessionSetConfigOptionResult
+          send_choice_request(AgentMethod::SESSION_SET_CONFIG_OPTION, params, Wire::SessionSetConfigOptionResult)
+        end
+
+        def config_options(session_id : String) : Array(Wire::ConfigOption)?
+          @pending_mutex.synchronize { @session_choices[session_id].try(&.v2_options) }
+        end
+
+        def config_options_raw(session_id : String) : Protocol::RawJson?
+          @pending_mutex.synchronize { @session_choices[session_id].try(&.options) }
+        end
+
         @initialize_offer : Wire::InitializeParams?
 
         def initialization_offer : Wire::InitializeParams?
@@ -178,7 +197,7 @@ module ACP
 
             begin
               update = Protocol::V2::SessionUpdateParams.from_json(params_json || Protocol::WireFrame.encode(params))
-              if params_json && update.update.session_update.in?("state_update", "subagent_update", "available_commands_update")
+              if params_json && update.update.session_update.in?("state_update", "subagent_update", "available_commands_update", "config_option_update")
                 update_json = Protocol::WireFrame.field(params_json, "update")
               end
               return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
@@ -193,7 +212,7 @@ module ACP
               end
             rescue ex : JSON::ParseException
               ClientLog.warn { "Failed to parse v2 session/update: #{ex.message}" }
-              deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json || suggestion_update
+              deliver_raw_session_update(params, params_json) unless suggestion_update
               return
             end
             return if deliver_update(update)
@@ -202,7 +221,7 @@ module ACP
               return
             end
           end
-          deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
+          deliver_raw_session_update(params, params_json)
         end
 
         private def deliver_update(update : Wire::SessionUpdateParams) : Bool
@@ -475,7 +494,7 @@ module ACP
         @connection.with_request do
           caps = session_capabilities
           validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-          @connection.request_typed(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
+          @connection.attach_with_choices(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
         end
       end
 
@@ -489,7 +508,7 @@ module ACP
         @connection.with_request do
           caps = session_capabilities
           validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-          @connection.request_typed(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
+          @connection.attach_with_choices(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult, params.session_id)
         end
       end
 
@@ -500,7 +519,7 @@ module ACP
           raise InvalidStateError.new("The Agent did not advertise session.fork") unless caps.fork
 
           validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-          @connection.request_typed(AgentMethod::SESSION_FORK, params, Wire::SessionForkResult)
+          @connection.attach_with_choices(AgentMethod::SESSION_FORK, params, Wire::SessionForkResult)
         end
       end
 
@@ -633,6 +652,16 @@ module ACP
         end
       end
 
+      # Latest configuration options for an attached session in Agent order.
+      def session_config_options(session_id : String) : Array(Wire::ConfigOption)?
+        @connection.config_options(session_id)
+      end
+
+      # Exact option list, including extension variants and wide numbers.
+      def session_config_options_raw(session_id : String) : Protocol::RawJson?
+        @connection.config_options_raw(session_id)
+      end
+
       # Changes a session configuration option.
       def session_set_config_option(params : Wire::SessionSetConfigOptionParams) : Wire::SessionSetConfigOptionResult
         @connection.with_request do
@@ -643,7 +672,7 @@ module ACP
           when "boolean"
             raise ArgumentError.new("ACP v2 boolean option values must be booleans") if params.value.as_bool?.nil?
           end
-          request(AgentMethod::SESSION_SET_CONFIG_OPTION, params, Wire::SessionSetConfigOptionResult)
+          @connection.request_option_change(params)
         end
       end
 

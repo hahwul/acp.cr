@@ -28,11 +28,15 @@ module ACP
     # The unique session ID assigned by the agent.
     getter id : String
 
-    # Mode state for this session (may be nil if agent doesn't support modes).
-    getter modes : Protocol::SessionModeState?
+    # Latest mode state reported for this session.
+    def modes : Protocol::SessionModeState?
+      @client.session_modes(@id)
+    end
 
-    # Config options exposed by the agent for this session.
-    getter config_options : Array(Protocol::ConfigOption)?
+    # Latest config options reported for this session.
+    def config_options : Array(Protocol::ConfigOption)?
+      @client.session_config_options(@id)
+    end
 
     # Whether this session has been explicitly cancelled or closed.
     getter? closed : Bool = false
@@ -59,7 +63,7 @@ module ACP
     ) : Session
       result = client.session_new(cwd, mcp_servers || [] of JSON::Any,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
-      new(client, result.session_id, result.modes, result.config_options)
+      new(client, result.session_id)
     end
 
     # Loads (resumes) a previous session via `session/load`.
@@ -81,9 +85,9 @@ module ACP
       system_prompt : Protocol::SystemPrompt? = nil,
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Session
-      result = client.session_load(session_id, cwd, mcp_servers || [] of JSON::Any,
+      client.session_load(session_id, cwd, mcp_servers || [] of JSON::Any,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
-      new(client, session_id, result.modes, result.config_options)
+      new(client, session_id)
     end
 
     # Lists available sessions from the agent.
@@ -114,9 +118,10 @@ module ACP
     def initialize(
       @client : Client,
       @id : String,
-      @modes : Protocol::SessionModeState? = nil,
-      @config_options : Array(Protocol::ConfigOption)? = nil,
+      modes : Protocol::SessionModeState? = nil,
+      config_options : Array(Protocol::ConfigOption)? = nil,
     )
+      @client.seed_session_choices(@id, modes, config_options) if modes || config_options
     end
 
     # ─── Prompt Methods ───────────────────────────────────────────────
@@ -194,7 +199,7 @@ module ACP
     # Returns the list of available mode IDs, or an empty array if
     # the agent doesn't support modes.
     def available_mode_ids : Array(String)
-      @modes.try(&.available_modes.map(&.id)) || [] of String
+      modes.try(&.available_modes.map(&.id)) || [] of String
     end
 
     # ─── Config Options ───────────────────────────────────────────────
@@ -208,9 +213,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-config-options
     def set_config_option(config_id : String, value : String | Bool) : Protocol::SessionSetConfigOptionResult
       ensure_open!
-      result = @client.session_set_config_option(config_id, value, @id)
-      @config_options = result.config_options
-      result
+      @client.session_set_config_option(config_id, value, @id)
     end
 
     # ─── Extension Methods ────────────────────────────────────────────
@@ -275,7 +278,7 @@ module ACP
       params = Protocol::SessionForkParams.new(@id, cwd, cursor_id: cursor_id, additional_directories: additional_directories,
         mcp_servers: mcp_servers, system_prompt: system_prompt, config_options: config_options, meta: meta)
       result = @client.session_fork(params)
-      Session.new(@client, result.session_id, result.modes, result.config_options)
+      Session.new(@client, result.session_id)
     end
 
     # Looks up an Agent-announced cursor in this session.
@@ -350,7 +353,7 @@ module ACP
     def to_s(io : IO) : Nil
       io << "ACP::Session(id=#{@id}"
       io << ", closed" if @closed
-      if m = @modes
+      if m = modes
         io << ", modes=[#{m.available_modes.map(&.id).join(", ")}]"
       end
       io << ")"

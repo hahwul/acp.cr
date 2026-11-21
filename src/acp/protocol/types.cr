@@ -689,7 +689,7 @@ module ACP
     # JSON converter for `configOptions` result fields; see `parse_config_options`.
     module ConfigOptionsConverter
       def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)
-        Protocol.parse_config_options(Array(JSON::Any).new(pull))
+        Protocol.parse_config_options(RequiredOptionList.from_json(pull))
       end
 
       def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
@@ -1208,7 +1208,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)

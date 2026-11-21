@@ -1645,9 +1645,12 @@ describe "ACP v2 outgoing requests" do
       transport.sent_messages.size.should eq(1)
 
       spawn do
+        setup = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"session","configOptions":[{"configId":"toggle","name":"Toggle","type":"boolean","currentValue":true}]}}))
         frame = next_answer(transport)
         transport.inject_raw(%({"jsonrpc":"2.0","id":#{frame["id"].to_json},"result":{"configOptions":[]}}))
       end
+      client.session_new("/work")
       client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("session", "toggle", false))
       transport.sent_messages.last["params"]["value"].should eq(false)
     end
@@ -2036,6 +2039,467 @@ describe "ACP v1 outgoing requests" do
       params = ACP::Protocol::SessionNewParams.new("/work", servers, system_prompt: prompt)
       params.mcp_servers.should eq([declaration.to_json_any])
       client.session_new("/work", params.mcp_servers, system_prompt: prompt).session_id.should eq("new")
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+# The Agent's configuration snapshots are per session and replace the prior
+# list at the receive boundary, even without an application update handler.
+private class ChoiceStateTransport < SignalingTransport
+  getter replies = {} of String => String
+  property before_reply : (String, Hash(String, JSON::Any) -> Nil)?
+  property after_reply : (String, Hash(String, JSON::Any) -> Nil)?
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    super
+    if (method = message["method"]?.try(&.as_s?)) && (id = message["id"]?) && (reply = @replies[method]?)
+      @before_reply.try(&.call(method, message))
+      inject_raw(%({"jsonrpc":"2.0","id":#{id},#{reply}}))
+      @after_reply.try(&.call(method, message))
+    end
+  end
+
+  def update(session_id : String, update : String) : Nil
+    inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{session_id.to_json},"update":#{update}}}))
+  end
+end
+
+private class QueuedChoiceStateTransport < ChoiceStateTransport
+  getter queued = Channel(Int64).new(1)
+  getter write = Channel(Nil).new(1)
+
+  def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+    if message["method"]?.try(&.as_s?) == "session/set_config_option"
+      @queued.send(message["id"].as_i64)
+      @write.receive
+    end
+    super(message, &preflight)
+  end
+end
+
+private def choice_state_barrier(client : ACP::Client | ACP::V2::Client, transport : ChoiceStateTransport) : Nil
+  transport.replies["_barrier"] = %("result":{})
+  client.ext_method("barrier")
+end
+
+private def choice_state_option(key : String, value : String, alternatives : Array(String)) : String
+  options = alternatives.map { |name| {"value" => name, "name" => name} }.to_json
+  %({#{key.to_json}:"model","name":"Model","type":"select","currentValue":#{value.to_json},"options":#{options}})
+end
+
+describe "ACP session choice state" do
+  it "keeps v1 choices per session and applies Agent updates without a typed callback" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    original = choice_state_option("id", "fast", ["fast", "large"])
+    modes = %({"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]})
+    transport.replies["session/new"] = %("result":{"sessionId":"one","modes":#{modes},"configOptions":[#{original}]})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    one = ACP::Session.create(client, "/work/one")
+    transport.replies["session/new"] = %("result":{"sessionId":"two","configOptions":[#{choice_state_option("id", "quiet", ["quiet"])}]})
+    two = ACP::Session.create(client, "/work/two")
+
+    transport.replies["session/set_mode"] = %("result":{})
+    one.mode = "code"
+    one.modes.not_nil!.current_mode_id.should eq("code")
+    transport.before_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+      if method == "session/set_mode"
+        transport.update("one", %({"sessionUpdate":"current_mode_update","currentModeId":"code"}))
+      end
+      nil
+    end
+    one.mode = "ask"
+    one.modes.not_nil!.current_mode_id.should eq("code")
+    expect_raises(ACP::InvalidStateError, /session mode/) { one.mode = "unadvertised" }
+
+    grouped = %({"id":"model","name":"Model","type":"select","currentValue":"cheap","options":[{"group":"test","name":"Test","options":[{"value":"cheap","name":"Cheap"},{"value":"deep","name":"Deep"}]}]})
+    transport.update("one", %({"sessionUpdate":"config_option_update","configOptions":[#{grouped}]}))
+    choice_state_barrier(client, transport)
+    one.config_options.not_nil!.first.current_value.should eq("cheap")
+    two.config_options.not_nil!.first.current_value.should eq("quiet")
+    client.session_config_options.not_nil!.first.current_value.should eq("quiet")
+    expect_raises(ArgumentError, /advertised value ID/) { one.set_config_option("model", "fast") }
+
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[#{choice_state_option("id", "deep", ["deep"])}]})
+    one.set_config_option("model", "deep")
+    one.config_options.not_nil!.first.current_value.should eq("deep")
+    client.session_config_options.not_nil!.first.current_value.should eq("quiet")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps replayed v1 choices out of live state until a successful attachment" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}})
+    initial = choice_state_option("id", "live", ["live"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{initial}]})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    session = ACP::Session.create(client, "/work")
+    snapshots = Channel(Tuple(Bool, String?)).new(2)
+    client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+      current = client.session_config_options("s").try(&.first?).try(&.current_value)
+      snapshots.send({params.before_load_response?, current})
+    end
+    transport.before_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+      if method == "session/load"
+        transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{choice_state_option("id", "history", ["history"])}]}))
+      end
+      nil
+    end
+    transport.replies["session/load"] = %("error":{"code":-32603,"message":"Replay failed"})
+    expect_raises(ACP::JsonRpcError, /Replay failed/) { client.session_load("s", "/work") }
+    snapshots.receive.should eq({true, "live"})
+    session.config_options.not_nil!.first.current_value.should eq("live")
+
+    transport.replies["session/load"] = %("result":{"configOptions":[#{choice_state_option("id", "restored", ["restored"])}]})
+    client.session_load("s", "/work")
+    snapshots.receive.should eq({true, "live"})
+    session.config_options.not_nil!.first.current_value.should eq("restored")
+  ensure
+    client.try(&.close)
+  end
+
+  it "applies v2 replies and notifications as complete replacements in receive order" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    original = choice_state_option("configId", "fast", ["fast", "large"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{original}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    expect_raises(ACP::InvalidStateError, /offer/) do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "unknown", "large"))
+    end
+    expect_raises(ArgumentError, /advertised value ID/) do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "other"))
+    end
+
+    updated = choice_state_option("configId", "large", ["large"])
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[#{updated}]})
+    transport.after_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+      if method == "session/set_config_option"
+        transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{choice_state_option("configId", "latest", ["latest"])}]}))
+      end
+      nil
+    end
+    result = client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large"))
+    result.typed_config_options.first.selected_value.should eq("large")
+    choice_state_barrier(client, transport)
+    client.session_config_options("s").not_nil!.first.selected_value.should eq("latest")
+
+    transport.replies["session/resume"] = %("result":{})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    expect_raises(ACP::InvalidStateError, /offer/) do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "latest"))
+    end
+  ensure
+    client.try(&.close)
+  end
+
+  it "applies a late typed setter response and observes raw v1 changes" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    original = choice_state_option("id", "fast", ["fast", "large"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{original}]})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_set_config_option("model", "large") }
+    next_answer(transport)["method"].as_s.should eq("initialize")
+    next_answer(transport)["method"].as_s.should eq("session/new")
+    request = next_answer(transport)
+    request["method"].as_s.should eq("session/set_config_option")
+    late = choice_state_option("id", "latest", ["latest"])
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"configOptions":[#{late}]}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.session_config_options.not_nil!.first.current_value.should eq("latest")
+
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[]})
+    client.send_request("session/set_config_option", ACP::Protocol::SessionSetConfigOptionParams.new("s", "model", "latest"))
+    client.session_config_options.should eq([] of ACP::Protocol::ConfigOption)
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps the newer v1 mode choice when acknowledgements arrive out of order" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    modes = %({"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"},{"id":"plan","name":"Plan"}]})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","modes":#{modes}})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    done = Channel(Exception?).new(2)
+    spawn do
+      client.session_set_mode("code")
+      done.send(nil)
+    rescue ex
+      done.send(ex)
+    end
+    older = next_answer(transport)
+    spawn do
+      client.session_set_mode("plan")
+      done.send(nil)
+    rescue ex
+      done.send(ex)
+    end
+    newer = next_answer(transport)
+    newer["params"]["modeId"].as_s.should eq("plan")
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{newer["id"]},"result":{"_meta":false}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{older["id"]},"result":{}}))
+    2.times do
+      select
+      when error = done.receive
+        error.should be_nil
+      when timeout(2.seconds)
+        fail "mode setter did not finish"
+      end
+    end
+    client.session_modes.not_nil!.current_mode_id.should eq("plan")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps post-replay config updates when a v2 resume fails" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    original = choice_state_option("configId", "fast", ["fast"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{original}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    observed = [] of String?
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      if params.update.session_update == "config_option_update"
+        observed << client.session_config_options("s").try(&.first?.try(&.selected_value))
+      end
+      nil
+    end
+    transport.before_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{choice_state_option("configId", "old", ["old"])}]}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{choice_state_option("configId", "live", ["live"])}]}))
+      end
+      nil
+    end
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"resume failed"})
+    params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    expect_raises(ACP::JsonRpcError, /resume failed/) { client.session_resume(params) }
+    observed.should eq(["fast", "live"])
+    client.session_config_options("s").not_nil!.first.selected_value.should eq("live")
+
+    transport.replies["session/resume"] = %("result":{"configOptions":[#{choice_state_option("configId", "resumed", ["resumed"])}]})
+    client.session_resume(params)
+    client.session_config_options("s").not_nil!.first.selected_value.should eq("resumed")
+  ensure
+    client.try(&.close)
+  end
+
+  it "applies a v2 setter reply after resuming the same active session" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    original = choice_state_option("configId", "fast", ["fast", "large"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{original}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    completed = Channel(Exception?).new(1)
+    spawn do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large"))
+      completed.send(nil)
+    rescue ex
+      completed.send(ex)
+    end
+    original_request = next_answer(transport)
+    original_request["method"].as_s.should eq("session/set_config_option")
+    transport.replies["session/resume"] = %("result":{"configOptions":[#{original}]})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    latest = choice_state_option("configId", "large", ["large"])
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{original_request["id"]},"result":{"configOptions":[#{latest}]}}))
+    select
+    when error = completed.receive
+      error.should be_nil
+    when timeout(2.seconds)
+      fail "setter did not finish"
+    end
+    client.session_config_options("s").not_nil!.first.selected_value.should eq("large")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a newer v2 attachment after an earlier setter reply" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    original = choice_state_option("configId", "fast", ["fast", "large"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{original}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    transport.replies["_barrier"] = %("result":{})
+    completed = Channel(Exception?).new(1)
+    spawn do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large"))
+      completed.send(nil)
+    rescue ex
+      completed.send(ex)
+    end
+    next_answer(transport)["method"].as_s.should eq("initialize")
+    next_answer(transport)["method"].as_s.should eq("session/new")
+    original_request = next_answer(transport)
+    original_request["method"].as_s.should eq("session/set_config_option")
+    transport.replies["session/close"] = %("result":{})
+    client.session_close("s")
+    client.session_config_options("s").should be_nil
+    attached = choice_state_option("configId", "resumed", ["resumed"])
+    transport.replies["session/resume"] = %("result":{"configOptions":[#{attached}]})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{original_request["id"]},"result":{"configOptions":[#{original}]}}))
+    select
+    when error = completed.receive
+      error.should be_nil
+    when timeout(2.seconds)
+      fail "setter did not finish"
+    end
+    client.session_config_options("s").not_nil!.first.selected_value.should eq("resumed")
+  ensure
+    client.try(&.close)
+  end
+
+  it "rechecks v2 config choices when the transport reaches a queued request" do
+    transport = QueuedChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{choice_state_option("configId", "fast", ["fast", "large"])}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    failure = Channel(Exception?).new(1)
+    spawn do
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large"))
+      failure.send(nil)
+    rescue ex
+      failure.send(ex)
+    end
+    queued_id = select
+    when id = transport.queued.receive
+      id
+    when timeout(2.seconds)
+      fail "setter did not reach the send queue"
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{queued_id},"result":{"configOptions":[]}}))
+    transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{choice_state_option("configId", "fast", ["fast"])}]}))
+    choice_state_barrier(client, transport)
+    transport.write.send(nil)
+    select
+    when error = failure.receive
+      error.should be_a(ArgumentError)
+    when timeout(2.seconds)
+      fail "setter did not finish"
+    end
+    transport.sent_messages.any? { |message| message["method"]?.try(&.as_s?) == "session/set_config_option" }.should be_false
+  ensure
+    transport.try(&.write.close)
+    client.try(&.close)
+  end
+
+  it "keeps representable configuration responses available to raw stdio consumers" do
+    with_wide_stdio do |transport, feed, _outgoing|
+      feed.puts %({"jsonrpc":"2.0","id":1,"result":{"configOptions":[]}})
+      transport.receive(2.seconds).not_nil!["result"]["configOptions"].as_a.should be_empty
+    end
+  end
+
+  it "delivers exact but representable config notifications to raw callbacks" do
+    {false, true}.each do |v2|
+      with_wide_stdio do |transport, feed, outgoing|
+        client = v2 ? ACP::V2::Client.new(transport) : ACP::Client.new(transport)
+        client.request_timeout = 2.0
+        observed = Channel(JSON::Any).new(1)
+        client.on_notification = ->(method : String, params : JSON::Any?) do
+          observed.send(params) if params && method == "session/update"
+          nil
+        end
+        spawn do
+          init = JSON.parse(outgoing.gets.not_nil!)
+          version = v2 ? 2 : 1
+          feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":#{version},"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+          setup = JSON.parse(outgoing.gets.not_nil!)
+          feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}})
+          feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":[]}}})
+        end
+        client.initialize_connection
+        client.session_new("/work")
+        select
+        when params = observed.receive
+          params["update"]["configOptions"].as_a.should be_empty
+        when timeout(2.seconds)
+          fail "configuration update did not reach the legacy callback"
+        end
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "preserves exact v2 extension options next to a normal selector over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      select_option = %({"configId":"model","name":"Model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast","_meta":{"counter":18446744073709551615}},{"value":"large","name":"Large"}]})
+      extension = %({"configId":"custom","name":"Custom","type":"_future","currentValue":{"wide":18446744073709551615}})
+      exact_fraction = %({"configId":"custom","name":"Custom","type":"_future","currentValue":0.12345678901234567891})
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s","configOptions":[#{exact_fraction}]}})
+        snapshot = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{snapshot["id"]},"result":{"configOptions":[#{extension},#{select_option}]}})
+        set = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{set["id"]},"result":{"configOptions":[#{extension},#{select_option}]}})
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":[#{extension}]}}})
+        barrier = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":{}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+      client.session_config_options_raw("s").not_nil!.json.should eq("[#{exact_fraction}]")
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+      options = client.session_config_options("s").not_nil!
+      options.map(&.config_id).should eq(["custom", "model"])
+      options.last.select_options.as(Array(ACP::Protocol::ConfigOptionValue)).map(&.value).should eq(["fast", "large"])
+      client.session_config_options_raw("s").not_nil!.json.should contain("18446744073709551615")
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large"))
+      client.ext_method("barrier")
+      exact = client.session_config_options_raw("s").not_nil!
+      exact.elements?.not_nil!.size.should eq(1)
+      exact.json.should eq("[#{extension}]")
+      client.session_config_options("s").not_nil!.first.raw_field("currentValue").should eq(%({"wide":18446744073709551615}))
     ensure
       client.try(&.close)
     end

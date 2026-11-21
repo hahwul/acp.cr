@@ -159,6 +159,20 @@ module ACP
     end
 
     # :nodoc:
+    module RequiredOptionList
+      def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
+        unless pull.kind.begin_array?
+          raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
+        end
+        OptionalOptionList.from_json(pull)
+      end
+
+      def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
+    # :nodoc:
     module OptionalOptionDescription
       def self.from_json(pull : JSON::PullParser) : String?
         return pull.read_string if pull.kind.string?
