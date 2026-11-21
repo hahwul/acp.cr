@@ -65,6 +65,11 @@ module ACP
     INVALID_PARAMS   = -32602
     INTERNAL_ERROR   = -32603
 
+    # Errors in the outer MCP-over-ACP binding.
+    MCP_RESOURCE_LIMIT     = -33000
+    MCP_SERVER_UNAVAILABLE = -33001
+    MCP_BACKEND_FAILURE    = -33002
+
     # JSON-RPC 2.0 reserved range for server errors: -32000 to -32099
     SERVER_ERROR_START = -32099
     SERVER_ERROR_END   = -32000

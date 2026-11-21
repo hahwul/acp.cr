@@ -15,6 +15,7 @@ require "./session_archive"
 require "./session_options"
 require "./prompt_suggestions"
 require "./providers"
+require "./mcp"
 
 module ACP
   module Protocol
@@ -380,6 +381,10 @@ module ACP
       # Note: SSE transport has been deprecated by the MCP spec.
       property? sse : Bool = false
 
+      # Whether the Agent consumes MCP servers over ACP.
+      @[JSON::Field(converter: ::ACP::Protocol::McpAcpFlag)]
+      property? acp : Bool = false
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -388,6 +393,7 @@ module ACP
         @http : Bool = false,
         @sse : Bool = false,
         @meta : Hash(String, JSON::Any)? = nil,
+        @acp : Bool = false,
       )
       end
     end
@@ -918,7 +924,7 @@ module ACP
     # kept as a tagged union.
     #
     # See: https://agentclientprotocol.com/protocol/session-setup#transport-types
-    alias McpServer = McpServerStdio | McpServerHttp | McpServerSse
+    alias McpServer = McpServerStdio | McpServerHttp | McpServerSse | McpServerAcp
 
     # Helper module for MCP server JSON parsing.
     module McpServerParser
@@ -931,6 +937,8 @@ module ACP
           McpServerHttp.from_json(value.to_json)
         when "sse"
           McpServerSse.from_json(value.to_json)
+        when "acp"
+          McpServerAcp.from_json(value.to_json)
         else
           # Default: stdio transport (no "type" field)
           McpServerStdio.from_json(value.to_json)

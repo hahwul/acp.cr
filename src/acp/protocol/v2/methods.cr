@@ -12,6 +12,7 @@ module ACP
         PROVIDERS_LIST            = Protocol::AgentMethod::PROVIDERS_LIST
         PROVIDERS_SET             = Protocol::AgentMethod::PROVIDERS_SET
         PROVIDERS_DISABLE         = Protocol::AgentMethod::PROVIDERS_DISABLE
+        MCP_MESSAGE               = Protocol::AgentMethod::MCP_MESSAGE
         SESSION_NEW               = "session/new"
         SESSION_SET_CONFIG_OPTION = "session/set_config_option"
         SESSION_PROMPT            = "session/prompt"
@@ -37,6 +38,7 @@ module ACP
         ELICITATION_CREATE         = "elicitation/create"
         ELICITATION_COMPLETE       = "elicitation/complete"
         AUTH_STATUS_UPDATE         = Protocol::ClientMethod::AUTH_STATUS_UPDATE
+        MCP_MESSAGE                = Protocol::ClientMethod::MCP_MESSAGE
       end
 
       # Methods and notifications shared by ACP v2 Preview peers.

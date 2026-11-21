@@ -63,6 +63,13 @@ module ACP
           new("http", fields)
         end
 
+        # Encodes a server registered on the current ACP connection.
+        def self.acp(server : Protocol::McpServerAcp) : McpServer
+          fields = server.to_json_any.as_h
+          fields.delete("type")
+          new("acp", fields)
+        end
+
         # Typed stdio configuration when the transport is stdio.
         def stdio_config : Protocol::McpServerStdio?
           Protocol::McpServerStdio.from_json(to_json) if @transport_type == "stdio"

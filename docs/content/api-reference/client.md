@@ -432,6 +432,48 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+## MCP-over-ACP (draft)
+
+Register an MCP handler on an initialized ACP client and include its
+declaration in session setup. The Agent must advertise `mcpCapabilities.acp`
+in v1 or `session.mcp.acp` in v2. A registration can be declared in multiple
+sessions on the same connection.
+
+```crystal
+server = client.register_mcp_server("workspace-tools") do |context|
+  handle_workspace_mcp_request(context)
+end
+
+# With ACP::V2::Client
+wire_server = ACP::Protocol::V2::McpServer.acp(server)
+session = client.session_new(ACP::Protocol::V2::SessionNewParams.new(
+  Dir.current, mcp_servers: [wire_server]))
+```
+
+With `ACP::Client` v1, pass `[server.to_json_any]` as the `mcp_servers` list.
+The Agent can call a registered handler before the session setup response
+arrives. The handler receives `ACP::McpRequestContext` and returns a
+`MessageMcpResponse.success(result)` or `.failure(mcp_error)`. Use
+`McpJson.from_json` to pass exact JSON for arguments, results, or opaque
+multi-round-trip state.
+
+Handlers implement the MCP methods they expose and apply authorization and
+subscription filters. The binding validates the MCP 2026-07-28 request
+metadata, routes `context.notify` to the active operation, and preserves
+inner MCP errors separately from ACP binding failures. Use
+`context.cancellation` or `context.cancelled?` to stop work and finish cleanup
+before returning. Unregistering a server or closing its connection signals
+cancellation to the affected handlers.
+
+Set `mcp_request_limit:` on either client to change the default of 32 active
+operations. The binding limits individual frames to 16 MiB, outer ACP IDs
+to 1 KiB, and retained input and queued output to 32 MiB each. A handler may
+have one notification waiting to write at a time. The connection closes
+if its bounded rejection queue fills. Stdio preserves exact JSON frames.
+Custom transports can return `WireFrame` with `exact_params: true` and
+override `send_wire` to preserve exact JSON in both directions.
+[MCP-over-ACP Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/mcp-over-acp.mdx)
+
 ## Model providers (draft)
 
 After initialization, call `providers_list` if the Agent advertises

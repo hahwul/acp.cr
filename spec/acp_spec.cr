@@ -6217,6 +6217,405 @@ private def take_v2_frame(channel : Channel(T)) : T forall T
   end
 end
 
+private def mcp_params(detail : String = "", version : String = ACP::MCP_PROTOCOL_VERSION) : String
+  %({"_meta":{"io.modelcontextprotocol/protocolVersion":#{version.to_json},"io.modelcontextprotocol/clientCapabilities":{}}#{detail}})
+end
+
+private def mcp_request(transport : V2TestTransport, server : ACP::Protocol::McpServerAcp, id : Int32,
+                        logical : String = "logical-#{id}", method : String = "tools/call",
+                        params : String = mcp_params) : Nil
+  transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":#{logical.to_json},"method":#{method.to_json},"params":#{params}}}))
+end
+
+private class PausedMcpRejectionTransport < V2TestTransport
+  getter blocked = Channel(Nil).new(1)
+  getter resume_write = Channel(Nil).new
+  property blocked_code = -33001
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    if message["error"]?.try(&.["code"]?) == JSON::Any.new(@blocked_code.to_i64)
+      @blocked.send(nil)
+      @resume_write.receive?
+    end
+    super
+  end
+
+  def close : Nil
+    super
+    @resume_write.close
+  end
+end
+
+describe "ACP draft native MCP binding" do
+  it "preserves explicit nulls, exact numbers, and inner error extensions" do
+    wire = %({"error":{"code":-32000,"message":"Inner","data":null,"extension":18446744073709551615,"decimal":0.123456789012345678901}})
+    carrier = ACP::Protocol::V2::MessageMcpResponse.from_json(wire)
+    carrier.error.not_nil!.data.not_nil!.json.should eq("null")
+    carrier.error.not_nil!.raw_field("extension").should eq("18446744073709551615")
+    carrier.error.not_nil!.raw_field("decimal").should eq("0.123456789012345678901")
+    ACP::Protocol::MessageMcpResponse.from_json(carrier.to_json).error.not_nil!.code.should eq(-32000)
+
+    both = ACP::Protocol::MessageMcpResponse.from_json(%({"result":null,"error":false,"_meta":{"exact":18446744073709551615}}))
+    both.result.not_nil!.json.should eq("null")
+    both.error.should be_nil
+    both.meta.not_nil!.field("exact").not_nil!.json.should eq("18446744073709551615")
+    ACP::Protocol::MessageMcpResponse.from_json(%({"result":null,"_meta":false})).meta.should be_nil
+    expect_raises(JSON::ParseException) { ACP::Protocol::MessageMcpResponse.from_json("{}") }
+    expect_raises(JSON::ParseException) { ACP::Protocol::MessageMcpResponse.from_json(%({"error":null})) }
+    ACP::Protocol::McpCapabilities.from_json(%({"acp":{}})).acp?.should be_false
+    duplicate = ACP::Protocol::WireFrame.new(%({"params":{"wide":18446744073709551615},"params":{"last":true}}))
+    duplicate.params_json.should be_nil
+    duplicate.project_for_routing["params"]["last"].should eq(true)
+  end
+
+  {"v1", "v2"}.each do |version|
+    it "serves registered operations before the session setup reply on #{version}" do
+      transport = V2TestTransport.new
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+        client = ACP::Client.new(transport)
+      else
+        transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+        client = ACP::V2::Client.new(transport)
+      end
+      server = client.register_mcp_server("fixture") do |ctx|
+        ctx.notify("notifications/progress", ACP::Protocol::McpJson.from_json(%({"progress":1})))
+        ACP::Protocol::MessageMcpResponse.success(ctx.request.params.not_nil!.field("arguments").not_nil!)
+      end
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)
+      mcp_request(transport, server, 410)
+      take_v2_frame(transport.outgoing)["error"]["code"].should eq(-33001)
+
+      transport.replies["session/new"] = %("result":{"sessionId":"s"})
+      transport.before_reply = ->(method : String) do
+        if method == "session/new"
+          mcp_request(transport, server, 411, params: mcp_params(%(,"arguments":{"text":"fixture"})))
+        end
+        nil
+      end
+      case client
+      when ACP::Client
+        client.session_new("/work", [server.to_json_any])
+      when ACP::V2::Client
+        wire = ACP::Protocol::V2::McpServer.acp(server)
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [wire]))
+      end
+      setup = take_v2_frame(transport.outgoing)
+      setup["params"]["mcpServers"][0]["serverId"].should eq(server.server_id)
+      progress = take_v2_frame(transport.outgoing)
+      progress["method"].should eq("mcp/message")
+      progress["id"]?.should be_nil
+      progress["params"]["requestId"].should eq("logical-411")
+      result = take_v2_frame(transport.outgoing)
+      result["id"].should eq(411)
+      result["result"]["result"]["text"].should eq("fixture")
+
+      mcp_request(transport, server, 412, params: "[]")
+      take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32602)
+      mcp_request(transport, server, 413, params: "{}")
+      take_v2_frame(transport.outgoing)["result"]["error"]["code"].should eq(-32602)
+      mcp_request(transport, server, 414, params: mcp_params(version: "2025-11-25"))
+      error = take_v2_frame(transport.outgoing)["result"]["error"]
+      error["code"].should eq(-32022)
+      error["data"]["supported"][0].should eq("2026-07-28")
+      transport.inject_raw(%({"jsonrpc":"1.0","id":414,"method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":"invalid-rpc","method":"tools/list","params":#{mcp_params}}}))
+      rejected = take_v2_frame(transport.outgoing)
+      rejected["id"].raw.should be_nil
+      rejected["error"]["code"].should eq(-32600)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{("x" * 1025).to_json},"method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":"oversize-id","method":"tools/list","params":#{mcp_params}}}))
+      rejected = take_v2_frame(transport.outgoing)
+      rejected["id"].raw.should be_nil
+      rejected["error"]["code"].should eq(-33000)
+      client.unregister_mcp_server(server.server_id).should be_true
+      mcp_request(transport, server, 415)
+      take_v2_frame(transport.outgoing)["error"]["code"].should eq(-33001)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects an unnegotiated or foreign declaration before any setup is sent" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    server = ACP::Protocol::McpServerAcp.new("fixture", "foreign")
+    params = ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [ACP::Protocol::V2::McpServer.acp(server)])
+    expect_raises(ACP::InvalidStateError, /did not advertise/) { client.session_new(params) }
+    transport.sent_messages.size.should eq(1)
+    client.close
+
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /must be registered/) { client.session_new(params) }
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "holds the logical ID and permit until cancellation cleanup finishes" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::Client.new(transport, mcp_request_limit: 1)
+    started = Channel(ACP::McpRequestContext).new(1)
+    cancelled = Channel(Nil).new(1)
+    cleanup = Channel(Nil).new
+    server = client.register_mcp_server("fixture") do |ctx|
+      if ctx.request.request_id == "active"
+        started.send(ctx)
+        ctx.cancellation.receive?
+        cancelled.send(nil)
+        cleanup.receive?
+      end
+      ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil))
+    end
+    client.initialize_connection
+    client.session_new("/work", [server.to_json_any])
+    take_v2_frame(transport.outgoing)
+    take_v2_frame(transport.outgoing)
+
+    mcp_request(transport, server, 420, "active")
+    context = take_v2_frame(started)
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":420}}))
+    take_v2_frame(cancelled)
+    context.cancelled?.should be_true
+    expect_raises(ACP::RequestCancelledError) { context.notify("notifications/progress") }
+    mcp_request(transport, server, 421, "active")
+    duplicate = take_v2_frame(transport.outgoing)
+    duplicate["id"].should eq(421)
+    duplicate["error"]["code"].should eq(-32602)
+    mcp_request(transport, server, 422, "next")
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-33000)
+
+    cleanup.send(nil)
+    response = take_v2_frame(transport.outgoing)
+    response["id"].should eq(420)
+    response["error"]["code"].should eq(-32800)
+    # Let the writer return and release admission after the response.
+    Fiber.yield
+    mcp_request(transport, server, 423, "next")
+    take_v2_frame(transport.outgoing)["result"]["result"].raw.should be_nil
+  ensure
+    cleanup.try(&.close)
+    client.try(&.close)
+  end
+
+  it "scopes subscription notifications and preserves opaque multi-round-trip state" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::Client.new(transport)
+    server = client.register_mcp_server("fixture") do |ctx|
+      result = case ctx.request.method
+               when "subscriptions/listen"
+                 ctx.notify("notifications/subscriptions/acknowledged", ACP::Protocol::McpJson.from_json(%({"notifications":{"toolsListChanged":true}})))
+                 ctx.notify("notifications/tools/list_changed")
+                 %({"_meta":{"fixture":"kept"}})
+               when "server/discover"
+                 %({"supportedVersions":["2025-11-25","2026-07-28"],"capabilities":{}})
+               else
+                 if state = ctx.request.params.try(&.field("requestState"))
+                   %({"resultType":"complete","echo":#{state.json}})
+                 else
+                   %({"resultType":"input_required","requestState":"fixture-only"})
+                 end
+               end
+      ACP::Protocol::MessageMcpResponse.success(ACP::Protocol::McpJson.from_json(result))
+    end
+    client.initialize_connection
+    client.session_new("/work", [server.to_json_any])
+    take_v2_frame(transport.outgoing)
+    take_v2_frame(transport.outgoing)
+    mcp_request(transport, server, 430, method: "subscriptions/listen")
+    ack = take_v2_frame(transport.outgoing)
+    ack["params"]["method"].should eq("notifications/subscriptions/acknowledged")
+    ack["params"]["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"].should eq("logical-430")
+    take_v2_frame(transport.outgoing)["params"]["method"].should eq("notifications/tools/list_changed")
+    meta = take_v2_frame(transport.outgoing)["result"]["result"]["_meta"]
+    meta["io.modelcontextprotocol/subscriptionId"].should eq("logical-430")
+    meta["fixture"].should eq("kept")
+    mcp_request(transport, server, 431, method: "server/discover")
+    take_v2_frame(transport.outgoing)["result"]["result"]["supportedVersions"].as_a.map(&.as_s).should eq(["2026-07-28"])
+    mcp_request(transport, server, 432)
+    state = take_v2_frame(transport.outgoing)["result"]["result"]["requestState"]
+    mcp_request(transport, server, 433, params: mcp_params(%(,"requestState":#{state.to_json},"inputResponses":{})))
+    take_v2_frame(transport.outgoing)["result"]["result"]["echo"].should eq(state)
+  ensure
+    client.try(&.close)
+  end
+
+  it "preserves wide MCP parameters and replies over stdio during setup" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::V2::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 3.0
+    transcript = Channel(Array(String) | Exception).new(1)
+    server = client.register_mcp_server("fixture") do |ctx|
+      value = ctx.request.params.not_nil!.field("counter").not_nil!
+      ctx.notify("notifications/progress", ACP::Protocol::McpJson.from_json(%({"progress":#{value.json}})))
+      ACP::Protocol::MessageMcpResponse.success(value, ctx.request.meta)
+    end
+    spawn do
+      init = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{init["id"].to_json},"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}}})
+      setup = JSON.parse(outgoing.gets.not_nil!)
+      id = setup["params"]["mcpServers"][0]["serverId"]
+      feed.puts %({"jsonrpc":"2.0","id":"outer","method":"mcp/message","params":{"serverId":#{id.to_json},"requestId":"inner","method":"tools/call","params":#{mcp_params(%(,"counter":18446744073709551615))},"_meta":{"opaque":18446744073709551615}}})
+      messages = [outgoing.gets.not_nil!, outgoing.gets.not_nil!]
+      feed.puts %({"jsonrpc":"2.0","id":"decimal","method":"mcp/message","params":{"serverId":#{id.to_json},"requestId":"decimal","method":"tools/call","params":#{mcp_params(%(,"counter":0.123456789012345678901))}}})
+      messages << outgoing.gets.not_nil! << outgoing.gets.not_nil!
+      feed.puts %({"jsonrpc":"2.0","id":"decimal-wide-envelope","method":"mcp/message","future":18446744073709551615,"params":{"serverId":#{id.to_json},"requestId":"wide-envelope","method":"tools/call","params":#{mcp_params(%(,"counter":0.123456789012345678901))}}})
+      messages << outgoing.gets.not_nil! << outgoing.gets.not_nil!
+      feed.puts %({"jsonrpc":"2.0","id":#{setup["id"].to_json},"result":{"sessionId":"s"}})
+      transcript.send(messages)
+    rescue ex
+      transcript.send(ex)
+    end
+    client.initialize_connection
+    wire = ACP::Protocol::V2::McpServer.acp(server)
+    client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [wire]))
+    outcome = take_v2_frame(transcript)
+    raise outcome if outcome.is_a?(Exception)
+
+    progress, result, decimal_progress, decimal_result, exact_progress, exact_result = outcome
+    progress.should contain(%("requestId":"inner"))
+    progress.should contain(%("progress":18446744073709551615))
+    result.should contain(%("id":"outer"))
+    result.should contain(%("result":{"result":18446744073709551615,"_meta":{"opaque":18446744073709551615}}))
+    decimal_progress.should contain(%("progress":0.123456789012345678901))
+    decimal_result.should contain(%("result":{"result":0.123456789012345678901}))
+    exact_progress.should contain(%("progress":0.123456789012345678901))
+    exact_result.should contain(%("result":{"result":0.123456789012345678901}))
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "cancels only work owned by a released registration and never rebinds its ID" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::Client.new(transport)
+    started = Channel(ACP::McpRequestContext).new(2)
+    handler = ->(ctx : ACP::McpRequestContext) do
+      started.send(ctx)
+      ctx.cancellation.receive?
+      ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil))
+    end
+    first = client.register_mcp_server("fixture", &handler)
+    second = client.register_mcp_server("sibling", &handler)
+    client.initialize_connection
+    client.session_new("/work", [first.to_json_any])
+    client.session_resume("s", "/work", [second.to_json_any])
+    3.times { take_v2_frame(transport.outgoing) }
+    mcp_request(transport, first, 440, "same")
+    mcp_request(transport, second, 441, "same")
+    contexts = [take_v2_frame(started), take_v2_frame(started)]
+    client.unregister_mcp_server(first.server_id).should be_true
+    take_v2_frame(transport.outgoing)["id"].should eq(440)
+    contexts.find! { |ctx| ctx.outer_id == 441 }.cancelled?.should be_false
+
+    replacement = client.register_mcp_server("fixture", &handler)
+    replacement.server_id.should_not eq(first.server_id)
+    mcp_request(transport, first, 442)
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-33001)
+    client.close
+    contexts.find! { |ctx| ctx.outer_id == 441 }.cancelled?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "reserves an outer ID while its rejection is still writing" do
+    transport = PausedMcpRejectionTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::Client.new(transport)
+    server = client.register_mcp_server("fixture") do |_ctx|
+      ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil))
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    barrier = Channel(String).new(1)
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      barrier.send(method)
+      nil
+    end
+    mcp_request(transport, server, 450)
+    take_v2_frame(transport.blocked)
+    client.session_new("/work", [server.to_json_any])
+    take_v2_frame(transport.outgoing)
+    mcp_request(transport, server, 450)
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_fixture/barrier"}))
+    take_v2_frame(barrier).should eq("_fixture/barrier")
+    transport.resume_write.send(nil)
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-33001)
+    collision = take_v2_frame(transport.outgoing)
+    collision["id"].raw.should be_nil
+    collision["error"]["code"].should eq(-32600)
+  ensure
+    transport.try(&.resume_write.close)
+    client.try(&.close)
+  end
+
+  it "interrupts a blocked MCP notification when the Agent closes its output" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 3.0
+    cleaned = Channel(Bool).new(1)
+    payload = ACP::Protocol::McpJson.from_json(%({"under_pressure":"#{"a" * (1024 * 1024)}"}))
+    server = client.register_mcp_server("fixture") do |ctx|
+      begin
+        ctx.notify("notifications/progress", payload)
+        ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil))
+      ensure
+        cleaned.send(ctx.cancelled?)
+      end
+    end
+    spawn do
+      init = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{init["id"].to_json},"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}}})
+      setup = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{setup["id"].to_json},"result":{"sessionId":"s"}})
+    end
+    client.initialize_connection
+    client.session_new("/work", [server.to_json_any])
+    feed.puts %({"jsonrpc":"2.0","id":451,"method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":"blocked","method":"tools/list","params":#{mcp_params}}})
+    outgoing.read_byte.should eq('{'.ord.to_u8)
+    feed.close
+    take_v2_frame(cleaned).should be_true
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "aborts the writer on EOF while an ID-less MCP rejection is pending" do
+    transport = PausedMcpRejectionTransport.new
+    transport.blocked_code = -32600
+    disconnected = Channel(Nil).new(1)
+    client = ACP::Client.new(transport)
+    client.on_disconnect = -> do
+      disconnected.send(nil)
+      nil
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"mcp/message","params":{}}))
+    take_v2_frame(transport.blocked)
+    transport.inject_message(nil)
+    take_v2_frame(disconnected)
+    transport.closed?.should be_true
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP draft authentication status" do
   {"v1", "v2"}.each do |version|
     it "receives early status changes and queries status on #{version}" do

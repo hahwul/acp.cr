@@ -35,6 +35,7 @@ require "./protocol/types"
 require "./protocol/session_fork"
 require "./protocol/client_methods"
 require "./transport"
+require "./mcp_provider"
 require "./errors"
 require "./subagents"
 require "./cursors"
@@ -245,6 +246,7 @@ module ACP
 
     # Negotiated once by the dispatcher before delivering any suggestions.
     @suggestion_content_types : Set(String)?
+    @mcp_acp_supported = false
 
     # Keep v1 history out of the composer until the wire reply, even after a timeout.
     @suggestion_loads = {} of String => String
@@ -342,11 +344,24 @@ module ACP
       @client_capabilities : Protocol::ClientCapabilities = Protocol::ClientCapabilities.new,
       *,
       client_info : Protocol::ClientInfo? = nil,
+      @mcp_request_limit : Int32 = 32,
     )
       @client_info = client_info || Protocol::ClientInfo.new(client_name, client_version)
+      @mcp_provider = McpProvider.new(@transport, @mcp_request_limit)
       @subagent_registry = SubagentRegistry.new(v2: v2_wire?) if v2_wire? || @client_capabilities.subagents
       @cursor_registry = CursorRegistry.new(v2: v2_wire?) if v2_wire? || @client_capabilities.session.try(&.cursors)
       start_dispatcher
+    end
+
+    # Registers an MCP handler on this connection. Include the declaration in
+    # session setup to let the Agent make requests to it.
+    def register_mcp_server(name : String, *, meta : Hash(String, JSON::Any)? = nil, &handler : McpRequestHandler) : Protocol::McpServerAcp
+      @mcp_provider.register(name, meta, handler)
+    end
+
+    # Retires the registration and signals cancellation to its active handlers.
+    def unregister_mcp_server(server_id : Protocol::McpServerAcpId) : Bool
+      @mcp_provider.release(server_id)
     end
 
     private def v2_wire? : Bool
@@ -470,7 +485,8 @@ module ACP
       raise AuthenticationError.new("Terminal authentication exited unsuccessfully") unless status.success?
       ensure_terminal_auth_state
 
-      replacement = Client.new(process_transport.reconnect, client_capabilities: @client_capabilities, client_info: @client_info)
+      replacement = Client.new(process_transport.reconnect, client_capabilities: @client_capabilities,
+        client_info: @client_info, mcp_request_limit: @mcp_request_limit)
       replacement.request_timeout = @request_timeout
       replacement.prompt_timeout = @prompt_timeout
       replacement.on_update = @on_update
@@ -1326,6 +1342,7 @@ module ACP
       id_str = id.to_s
       message = message_builder.call(id)
       params = message["params"]?.try(&.as_h?)
+      mcp_servers = mcp_declarations(method, params)
       close_on_missing = method == Protocol::AgentMethod::SESSION_CLOSE
       if close_on_missing || method == Protocol::AgentMethod::SESSION_ARCHIVE
         closing_session = params.try(&.["sessionId"]?).try(&.as_s?)
@@ -1358,12 +1375,12 @@ module ACP
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
       begin
-        if fork_cursor
+        if fork_cursor || before_send || mcp_servers
           @transport.send_checked(message) do
-            refresh_fork_grant(id_str, params)
+            refresh_fork_grant(id_str, params) if fork_cursor
+            before_send.try(&.call)
+            @mcp_provider.publish(mcp_servers) if mcp_servers
           end
-        elsif before_send
-          @transport.send_checked(message, &before_send)
         else
           @transport.send(message)
         end
@@ -1390,6 +1407,28 @@ module ACP
         # `drain_pending_requests` closed it: the connection is gone.
         raise ConnectionClosedError.new("#{@user_closed ? "Client closed" : "Connection lost"} while waiting for response to #{method}")
       end
+    end
+
+    # Only session setup can publish an MCP registration to the Agent.
+    private def mcp_declarations(method : String, params : Hash(String, JSON::Any)?) : Array(String)?
+      return unless method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_LOAD,
+                      Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
+      return unless servers = params.try(&.["mcpServers"]?).try(&.as_a?)
+
+      ids = servers.compact_map do |entry|
+        next unless (fields = entry.as_h?) && fields["type"]?.try(&.as_s?) == "acp"
+
+        unless fields["name"]?.try(&.as_s?) && (id = fields["serverId"]?.try(&.as_s?))
+          raise ArgumentError.new("ACP MCP declarations require a name and server ID")
+        end
+        id
+      end
+      return if ids.empty?
+
+      unless @pending_mutex.synchronize { @mcp_acp_supported }
+        raise InvalidStateError.new("The Agent did not advertise MCP over ACP")
+      end
+      ids
     end
 
     # Rechecks the cursor once the transport is ready to write the request.
@@ -1483,7 +1522,8 @@ module ACP
     # requests from then on. Used during close and disconnect to unblock
     # callers. (A fake JSON-RPC error here would pose as an answer from the
     # agent.)
-    private def drain_pending_requests : Nil
+    private def drain_pending_requests(*, abort_mcp_writes : Bool = false) : Nil
+      @mcp_provider.close(abort_writes: abort_mcp_writes)
       @pending_mutex.synchronize do
         @disconnected = true
         @pending.each_value { |request| request.response.close }
@@ -1582,7 +1622,7 @@ module ACP
       @dispatcher_running = false
 
       # Notify pending requests that the connection is lost.
-      drain_pending_requests
+      drain_pending_requests(abort_mcp_writes: true)
 
       # Invoke the disconnect callback if set — but only for an UNEXPECTED loss
       # of the transport. When the caller asked for `close`, the dispatcher
@@ -1632,6 +1672,11 @@ module ACP
 
       kind = Protocol.classify_message(msg)
 
+      if obj["method"]?.try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
+        handle_mcp_request(msg, wire_frame) if obj.has_key?("id")
+        return false
+      end
+
       if v2_wire? && obj["jsonrpc"]?.try(&.as_s?) != "2.0"
         reject_invalid_request("ACP v2 requires JSON-RPC 2.0") unless kind == Protocol::MessageKind::Response
         return false
@@ -1673,6 +1718,18 @@ module ACP
         end
       end
       false
+    end
+
+    # Handles the binding's request direction without blocking the dispatcher.
+    private def handle_mcp_request(msg : JSON::Any, frame : Protocol::WireFrame?) : Nil
+      unless msg["jsonrpc"]?.try(&.as_s?) == "2.0" && (id = Protocol.extract_id(msg))
+        return @mcp_provider.reject_invalid_envelope
+      end
+
+      params = frame.try(&.params_json)
+      params ||= Protocol::WireFrame.field(frame.json, "params") if frame
+      collision = @pending_mutex.synchronize { @in_flight.has_key?(id) }
+      @mcp_provider.receive(id, params || Protocol::WireFrame.encode(msg["params"]?), collision: collision)
     end
 
     # Answers an incoming value we could not read as a JSON-RPC message with
@@ -1783,6 +1840,7 @@ module ACP
         typed = Protocol::V2::InitializeResult.from_json(result.to_json)
         if typed.protocol_version == Protocol::V2::VERSION
           @v2_initialization_result = typed
+          @mcp_acp_supported = !!typed.capabilities.session.try(&.mcp).try(&.acp)
           @auth_status_supported = typed.capabilities.auth_status?
           prompt = typed.capabilities.session.try(&.prompt)
           @suggestion_content_types = suggestions.try &.content_types(
@@ -1792,6 +1850,7 @@ module ACP
       else
         typed = Protocol::InitializeResult.from_json(result.to_json)
         if ACP.supports_protocol_version?(typed.protocol_version)
+          @mcp_acp_supported = typed.agent_capabilities.mcp_capabilities.try(&.acp?) || false
           @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?
           prompt = typed.agent_capabilities.prompt_capabilities
           @suggestion_content_types = suggestions.try &.content_types(
@@ -1836,6 +1895,10 @@ module ACP
       return false unless method_name
 
       params = msg["params"]?
+      if id && @mcp_provider.active_outer?(id)
+        @mcp_provider.reject_collision
+        return false
+      end
 
       ClientLog.debug { "Agent request: method=#{method_name} id=#{id}" }
 
@@ -2104,7 +2167,7 @@ module ACP
     private def handle_cancel_request(params : JSON::Any?) : Nil
       id = params.try { |p| Protocol::CancelRequestParams.from_json(p.to_json).request_id rescue nil }
       entry = nil
-      if id
+      if id && !@mcp_provider.cancel(id)
         entry = @pending_mutex.synchronize do
           req = @in_flight[id]?
           if req && CANCEL_ANSWERED_EARLY.includes?(req.method)
@@ -2191,7 +2254,7 @@ module ACP
       return unless method_name
 
       params = msg["params"]?
-      if params_json && method_name != Protocol::AgentMethod::SESSION_UPDATE
+      if params_json && !method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
         ClientLog.warn { "Ignoring notification with parameters outside the range of JSON::Any" }
         return
       end

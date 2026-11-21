@@ -35,6 +35,16 @@ module ACP
       alias DisableProviderParams = Protocol::DisableProviderParams
       alias DisableProviderResult = Protocol::DisableProviderResult
 
+      # Draft MCP-over-ACP declarations and message envelopes.
+      alias McpServerAcp = Protocol::McpServerAcp
+      alias McpServerAcpId = Protocol::McpServerAcpId
+      alias McpRequestId = Protocol::McpRequestId
+      alias McpJson = Protocol::McpJson
+      alias McpError = Protocol::McpError
+      alias MessageMcpRequest = Protocol::MessageMcpRequest
+      alias MessageMcpNotification = Protocol::MessageMcpNotification
+      alias MessageMcpResponse = Protocol::MessageMcpResponse
+
       # Presence advertises support for a feature with no named fields.
       struct Capability
         include JSON::Serializable
@@ -174,6 +184,10 @@ module ACP
         # Presence advertises HTTP MCP servers.
         property http : Capability?
 
+        # Presence advertises support for servers hosted over ACP.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
+        property acp : Capability?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -183,6 +197,7 @@ module ACP
           @stdio : Capability? = nil,
           @http : Capability? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @acp : Capability? = nil,
         )
         end
       end

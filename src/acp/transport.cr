@@ -44,6 +44,15 @@ module ACP
       send(message)
     end
 
+    # Sends exact serialized JSON. Custom transports can override this to
+    # support values outside the range of JSON::Any.
+    def send_wire(frame : Protocol::WireFrame, &preflight : -> Nil) : Nil
+      message = JSON.parse(frame.json).as_h
+      send_checked(message, &preflight)
+    rescue JSON::Error
+      raise ProtocolError.new("This transport cannot send an exact JSON frame")
+    end
+
     # Receives the next incoming JSON message, blocking until one arrives.
     # Returns nil if the transport is closed.
     abstract def receive : JSON::Any?
@@ -84,7 +93,7 @@ module ACP
     # transport redacts these from DEBUG-level frame logs so a session
     # with debug logging enabled does not write credentials/tokens to log
     # files. Add to this set if new methods carry secrets.
-    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update"}
+    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update", Protocol::AgentMethod::MCP_MESSAGE}
 
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).
@@ -168,6 +177,16 @@ module ACP
       write_message(message, preflight)
     end
 
+    # Writes exact JSON using the same write lock as ordinary messages.
+    def send_wire(frame : Protocol::WireFrame, &preflight : -> Nil) : Nil
+      pull = JSON::PullParser.new(frame.json)
+      raise ProtocolError.new("ACP frames must be JSON objects") unless pull.kind.begin_object?
+
+      wire = frame.json.includes?('\n') ? Protocol::WireFrame.read_raw(pull) : frame.json
+      Log.debug { ">>> [REDACTED exact frame]" }
+      write_line(wire + '\n', &preflight)
+    end
+
     private def write_message(message : Hash(String, JSON::Any), preflight : (-> Nil)? = nil) : Nil
       raise ConnectionClosedError.new if @closed
 
@@ -179,14 +198,20 @@ module ACP
       end
       Log.debug { ">>> #{redact_frame(message)}" }
 
+      write_line(frame) do
+        preflight.try(&.call)
+        track_provider_request(message)
+      end
+    end
+
+    private def write_line(frame : String, &preflight : -> Nil) : Nil
       @write_mutex.synchronize do
         # Re-check under the lock: the transport may have been closed while
         # we were queued behind another sender.
         raise ConnectionClosedError.new if @closed
-        preflight.try(&.call)
+        preflight.call
 
         begin
-          track_provider_request(message)
           @writer.print(frame)
           @writer.flush
         rescue ex : IO::Error
@@ -204,7 +229,11 @@ module ACP
       loop do
         case msg = receive_frame
         when JSON::Any then return msg
-        when Nil       then return nil
+        when Protocol::WireFrame
+          if view = msg.representable
+            return view
+          end
+        when Nil then return nil
         end
       end
     end
@@ -233,9 +262,13 @@ module ACP
       loop do
         remaining = deadline - Time.instant
         case msg = receive_frame(Math.max(remaining, Time::Span.zero))
-        when JSON::Any           then return msg
-        when Nil                 then return nil
-        when Protocol::WireFrame then return nil if Time.instant >= deadline
+        when JSON::Any then return msg
+        when Nil       then return nil
+        when Protocol::WireFrame
+          if view = msg.representable
+            return view
+          end
+          return nil if Time.instant >= deadline
         end
       end
     end
@@ -453,7 +486,12 @@ module ACP
 
         begin
           parsed = begin
-            JSON.parse(line)
+            value = JSON.parse(line)
+            if value.as_h?.try(&.["method"]?).try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
+              Protocol::WireFrame.new(line, exact_params: true)
+            else
+              value
+            end
           rescue JSON::ParseException
             Protocol::WireFrame.new(line)
           end
