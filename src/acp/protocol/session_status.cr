@@ -1,4 +1,5 @@
 require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -50,14 +51,11 @@ module ACP
     # Session status fields shared by the v1 and v2 responses.
     abstract struct SessionStatusSnapshot
       include JSON::Serializable
+      include LosslessMetadata
 
       # Reported status, including future wire values.
       @[JSON::Field(key: "status")]
       getter raw_status : String
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
 
       # Returns open or saved. Future statuses behave like saved.
       def status : String
@@ -73,7 +71,8 @@ module ACP
     # A read-only v1 snapshot of the Agent's session status.
     struct SessionStatusResult < SessionStatusSnapshot
       # Creates a status result.
-      def initialize(@raw_status : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@raw_status : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
   end

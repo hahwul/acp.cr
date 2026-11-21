@@ -629,7 +629,7 @@ module ACP
             raise InvalidStateError.new("The Agent did not advertise session.status")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult)
+          @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult, exact_response: true)
         end
       end
 
