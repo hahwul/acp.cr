@@ -154,6 +154,10 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::SessionTitleCapabilities)]
         property title : Protocol::SessionTitleCapabilities?
 
+        # When present, the Agent supports archiving, restoration, and archive filters.
+        @[JSON::Field(converter: ::ACP::Protocol::SessionArchiveCapabilities)]
+        property archive : Protocol::SessionArchiveCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -168,6 +172,7 @@ module ACP
           @meta : Hash(String, JSON::Any)? = nil,
           @status : Protocol::SessionStatusCapabilities? = nil,
           @title : Protocol::SessionTitleCapabilities? = nil,
+          @archive : Protocol::SessionArchiveCapabilities? = nil,
         )
         end
       end

@@ -225,7 +225,14 @@ module ACP
     # The dispatcher fiber sends the response into the channel when
     # it arrives, unblocking the caller.
     private alias PendingResponse = JSON::Any | Protocol::WireFrame
-    @pending = {} of String => Channel(PendingResponse)
+
+    private record PendingRequest,
+      response : Channel(PendingResponse),
+      closing_session : String?,
+      close_on_missing : Bool,
+      on_result : (JSON::Any -> Nil)?
+
+    @pending = {} of String => PendingRequest
 
     # Mutex for thread-safe access to @pending (though Crystal fibers
     # are cooperative, this protects against unexpected scheduling).
@@ -539,13 +546,7 @@ module ACP
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_NEW, params)
-      result = decode_result(Protocol::SessionNewResult, raw_result, Protocol::AgentMethod::SESSION_NEW)
-
-      @session_id = result.session_id
-      @session_modes = result.modes
-      @session_config_options = result.config_options
-      @state = ClientState::SessionActive
+      result = attach_session(Protocol::AgentMethod::SESSION_NEW, params, Protocol::SessionNewResult)
 
       ClientLog.info { "Session created: #{result.session_id}" }
 
@@ -574,13 +575,7 @@ module ACP
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_LOAD, params)
-      result = decode_result(Protocol::SessionLoadResult, raw_result, Protocol::AgentMethod::SESSION_LOAD)
-
-      @session_id = session_id
-      @session_modes = result.modes
-      @session_config_options = result.config_options
-      @state = ClientState::SessionActive
+      result = attach_session(Protocol::AgentMethod::SESSION_LOAD, params, Protocol::SessionLoadResult, session_id)
 
       ClientLog.info { "Session loaded: #{session_id}" }
 
@@ -594,6 +589,7 @@ module ACP
     #
     # - `cwd` — optional filter: only return sessions with this working directory.
     # - `cursor` — optional pagination cursor from a previous response.
+    # - `archived` — optional archive filter when the agent supports archiving.
     #
     # Returns the list result with sessions and optional next cursor.
     #
@@ -602,12 +598,14 @@ module ACP
     def session_list(
       cwd : String? = nil,
       cursor : String? = nil,
+      *,
+      archived : String? = nil,
     ) : Protocol::SessionListResult
       ensure_state(ClientState::Initialized, "session/list")
+      ensure_archive_support("session/list") if archived
 
-      params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_LIST, params)
-      decode_result(Protocol::SessionListResult, raw_result, Protocol::AgentMethod::SESSION_LIST)
+      params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived)
+      send_typed_request(Protocol::AgentMethod::SESSION_LIST, params, Protocol::SessionListResult)
     end
 
     # Queries a session without attaching to it. Requires draft status support.
@@ -630,6 +628,27 @@ module ACP
       end
 
       send_typed_request(method, Protocol::SetSessionTitleParams.new(session_id, title, meta), Protocol::SetSessionTitleResult)
+    end
+
+    # Closes and archives the session while preserving its saved history.
+    def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionArchiveResult
+      method = Protocol::AgentMethod::SESSION_ARCHIVE
+      ensure_archive_support(method)
+      send_typed_request(method, Protocol::SessionArchiveParams.new(session_id, meta), Protocol::SessionArchiveResult)
+    end
+
+    # Restores the session to default list results without attaching to it.
+    def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionUnarchiveResult
+      method = Protocol::AgentMethod::SESSION_UNARCHIVE
+      ensure_archive_support(method)
+      send_typed_request(method, Protocol::SessionUnarchiveParams.new(session_id, meta), Protocol::SessionUnarchiveResult)
+    end
+
+    private def ensure_archive_support(method : String) : Nil
+      ensure_state(ClientState::Initialized, method)
+      unless @agent_capabilities.try(&.session_capabilities).try(&.archive)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.archive")
+      end
     end
 
     # Resumes an existing session by ID without replaying conversation history.
@@ -663,13 +682,7 @@ module ACP
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_RESUME, params)
-      result = decode_result(Protocol::SessionResumeResult, raw_result, Protocol::AgentMethod::SESSION_RESUME)
-
-      @session_id = session_id
-      @session_modes = result.modes
-      @session_config_options = result.config_options
-      @state = ClientState::SessionActive
+      result = attach_session(Protocol::AgentMethod::SESSION_RESUME, params, Protocol::SessionResumeResult, session_id)
 
       ClientLog.info { "Session resumed: #{session_id}" }
 
@@ -707,11 +720,6 @@ module ACP
         JSON::Any.new({} of String => JSON::Any)
       end
       result = decode_result(Protocol::SessionCloseResult, raw_result, Protocol::AgentMethod::SESSION_CLOSE)
-
-      # If we just closed the active session, drop the cached session
-      # state so subsequent prompt/cancel calls fail with the correct
-      # error instead of silently re-using stale state.
-      forget_session(sid)
 
       ClientLog.info { "Session closed: #{sid}" }
 
@@ -764,7 +772,11 @@ module ACP
       @pending_mutex.synchronize do
         @plan_ids.delete(session_id)
         @subagent_registry.try(&.drop_runtime(session_id))
+        forget_active_session(session_id)
       end
+    end
+
+    private def forget_active_session(session_id : String) : Bool
       return false unless @session_id == session_id
 
       @session_id = nil
@@ -884,10 +896,9 @@ module ACP
       raise NoActiveSessionError.new unless sid
 
       params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
-      raw_result = send_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params)
-      result = decode_result(Protocol::SessionSetConfigOptionResult, raw_result, Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION)
-
-      @session_config_options = result.config_options
+      result = send_cached_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params, Protocol::SessionSetConfigOptionResult) do |updated|
+        @session_config_options = updated.config_options if @session_id == sid && !closed?
+      end
 
       ClientLog.info { "Config option '#{config_id}' set to '#{value}'" }
 
@@ -1086,6 +1097,40 @@ module ACP
 
     # ─── Private Methods ────────────────────────────────────────────
 
+    # Commits attachment before dispatching later frames such as archive.
+    private def attach_session(method : String, params : JSON::Serializable, type : T.class, session_id : String? = nil) : T forall T
+      send_cached_request(method, params, type) do |result|
+        unless closed?
+          @session_id = result.is_a?(Protocol::SessionNewResult) ? result.session_id : session_id
+          @session_modes = result.modes
+          @session_config_options = result.config_options
+          @state = ClientState::SessionActive
+        end
+      end
+    end
+
+    # Applies an internal cache update in wire order after a result decodes.
+    private def send_cached_request(method : String, params : JSON::Serializable, type : T.class, &apply : T -> Nil) : T forall T
+      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
+      decoded = nil
+      observe = ->(payload : JSON::Any) do
+        begin
+          result = T.from_json(payload.to_json)
+          apply.call(result)
+          decoded = result
+        rescue JSON::Error
+          # Leave the cache alone. The waiting caller reports the decoding error.
+        end
+        nil
+      end
+
+      response = send_and_await_response(method, message_builder, on_result: observe)
+      cached_result = decoded
+      return cached_result if cached_result
+
+      decode_result(type, response_result(response, method), method)
+    end
+
     # Core implementation for sending a JSON-RPC request and awaiting
     # its response. Both `send_request` and `send_request_raw` delegate
     # to this method, differing only in how they build the message.
@@ -1094,6 +1139,7 @@ module ACP
     # - `message_builder` — a proc that receives the request ID and returns
     #   the serialized message hash ready for transport.
     # - `timeout` — optional timeout in seconds (nil = no timeout).
+    # - `on_result` — internal cache update for ordinary successful results.
     #
     # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
@@ -1102,6 +1148,8 @@ module ACP
       method : String,
       message_builder : Int64 -> Hash(String, JSON::Any),
       timeout : Float64? = @request_timeout,
+      *,
+      on_result : (JSON::Any -> Nil)? = nil,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1117,11 +1165,16 @@ module ACP
       end
       id_str = id.to_s
       message = message_builder.call(id)
+      params = message["params"]?.try(&.as_h?)
+      close_on_missing = method == Protocol::AgentMethod::SESSION_CLOSE
+      if close_on_missing || method == Protocol::AgentMethod::SESSION_ARCHIVE
+        closing_session = params.try(&.["sessionId"]?).try(&.as_s?)
+      end
 
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
-        @subagent_registry.try(&.request_sent(id_str, method, message["params"]?.try(&.as_h?)))
-        @pending[id_str] = response_channel
+        @subagent_registry.try(&.request_sent(id_str, method, params))
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, on_result)
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
       begin
@@ -1220,7 +1273,7 @@ module ACP
     private def drain_pending_requests : Nil
       @pending_mutex.synchronize do
         @disconnected = true
-        @pending.each_value(&.close)
+        @pending.each_value { |request| request.response.close }
         @pending.clear
         @plan_ids.clear
         @subagent_registry.try(&.clear)
@@ -1432,16 +1485,24 @@ module ACP
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
       channel = @pending_mutex.synchronize do
-        if response_channel = @pending.delete(id_str)
+        if request = @pending.delete(id_str)
           if @initialize_request == id_str
             @initialize_request = nil
             observe_initialize_response(msg) unless wire_frame
           end
           closed_sessions = @subagent_registry.try(&.request_finished(id_str, wire_frame ? nil : msg))
+          if wire_frame.nil? && !msg["error"]? && (result = msg["result"]?)
+            request.on_result.try(&.call(result))
+          end
+          if (session_id = request.closing_session) && closes_session?(request, msg, wire_frame)
+            closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
+            closed_sessions.each { |sid| @plan_ids.delete(sid) }
+            forget_active_session(session_id)
+          end
           if closed_sessions && !v2_wire?
             cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
           end
-          response_channel
+          request.response
         end
       end
       if channel
@@ -1453,6 +1514,23 @@ module ACP
       else
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
       end
+    end
+
+    # Close and archive retire runtime before any later attachment is applied.
+    private def closes_session?(request : PendingRequest, msg : JSON::Any, wire_frame : Protocol::WireFrame?) : Bool
+      if error = msg["error"]?
+        return request.close_on_missing && !wire_frame && error.as_h?.try(&.["code"]?).try(&.as_i64?) == JsonRpcError::RESOURCE_NOT_FOUND
+      end
+      return false unless result = msg["result"]?
+
+      # Archive results default malformed optional metadata on decode.
+      return !result.as_h?.nil? unless request.close_on_missing
+      return false if wire_frame
+
+      Protocol::SessionCloseResult.from_json(result.to_json)
+      true
+    rescue JSON::Error
+      false
     end
 
     # Runs under the pending-request mutex before releasing the initialize waiter.

@@ -736,6 +736,10 @@ module ACP
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
+      # Whether the Agent reports this session as archived. Nil means unreported.
+      @[JSON::Field(converter: ::ACP::Protocol::ArchivedFlag, ignore_serialize: true)]
+      property archived : Bool?
+
       def initialize(
         @session_id : String,
         @cwd : String,
@@ -743,7 +747,14 @@ module ACP
         @updated_at : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
+        @archived : Bool? = nil,
       )
+      end
+
+      protected def on_to_json(json)
+        super
+        # JSON::Serializable's converter branch emits null for false.
+        json.field("archived", @archived) unless @archived.nil?
       end
     end
 
@@ -764,10 +775,14 @@ module ACP
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
+      # Optional archive filter: exclude, include, only, or a future wire value.
+      property archived : String?
+
       def initialize(
         @cwd : String? = nil,
         @cursor : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @archived : String? = nil,
       )
       end
     end

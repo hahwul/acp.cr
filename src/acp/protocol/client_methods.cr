@@ -765,6 +765,8 @@ module ACP
       SESSION_LIST              = "session/list"
       SESSION_STATUS            = "session/status"
       SESSION_SET_TITLE         = "session/set_title"
+      SESSION_ARCHIVE           = "session/archive"
+      SESSION_UNARCHIVE         = "session/unarchive"
       SESSION_RESUME            = "session/resume"
       SESSION_CLOSE             = "session/close"
       SESSION_DELETE            = "session/delete"
@@ -780,7 +782,7 @@ module ACP
       # `session_method?` cannot drift apart as methods are added.
       SESSION_METHODS = {
         SESSION_NEW, SESSION_LOAD, SESSION_LIST, SESSION_STATUS, SESSION_SET_TITLE, SESSION_RESUME,
-        SESSION_CLOSE, SESSION_DELETE, SESSION_PROMPT, SESSION_CANCEL,
+        SESSION_CLOSE, SESSION_DELETE, SESSION_ARCHIVE, SESSION_UNARCHIVE, SESSION_PROMPT, SESSION_CANCEL,
         SESSION_SET_MODE, SESSION_SET_CONFIG_OPTION, SESSION_UPDATE,
       }
 
