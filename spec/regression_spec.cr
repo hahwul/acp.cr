@@ -333,14 +333,14 @@ describe "ACP::ProcessTransport lifecycle" do
 end
 
 # ─── R8: closing a session must clear the client's active-session state ──
-private def r8_client_with_session : {TestTransport, ACP::Client, ACP::Session}
+private def r8_client_with_session(*, session_capabilities : String? = nil) : {TestTransport, ACP::Client, ACP::Session}
   transport = TestTransport.new
   client = ACP::Client.new(transport)
 
   spawn do
     sleep 10.milliseconds
     if msg = transport.last_sent
-      transport.inject_raw(build_init_response(msg["id"].as_i64))
+      transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: session_capabilities))
     end
   end
   client.initialize_connection
@@ -1040,6 +1040,12 @@ describe "ACP::Client agent request handlers" do
     release = Channel(Nil).new(1) # buffered: the ensure must not block if the handler never ran
     entered = Channel(Nil).new(1)
 
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(build_init_response(request["id"].as_i64))
+    end
+    client.initialize_connection
+
     client.on_agent_request = ->(_method : String, _params : JSON::Any) do
       entered.send(nil)
       release.receive
@@ -1361,7 +1367,7 @@ end
 # response to session/close as a successful close." It raised instead, and
 # the client kept reporting the gone session as active.
 private def r28_close_with_error(code : Int32) : {ACP::Client, Exception?}
-  transport, client, _session = r8_client_with_session
+  transport, client, _session = r8_client_with_session(session_capabilities: %({"close":{}}))
   spawn do
     sleep 10.milliseconds
     if msg = transport.last_sent
@@ -1845,5 +1851,193 @@ private def await_wide_update(updates : Channel(Nil))
   when updates.receive
   when timeout(2.seconds)
     fail "the wide state update was dropped"
+  end
+end
+
+# ACP v1 optional methods and content depend on the Agent's initialization
+# response. The typed client used to send requests even without those grants.
+private def with_v1_validation_client(capabilities : String = "{}", &)
+  transport = SignalingTransport.new
+  client = ACP::Client.new(transport)
+  client.request_timeout = 2.0
+  client.prompt_timeout = 2.0
+  spawn do
+    request = next_answer(transport)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"protocolVersion":1,"agentCapabilities":#{capabilities}}}))
+  end
+  client.initialize_connection
+  yield client, transport
+ensure
+  client.try(&.close)
+end
+
+describe "ACP v1 outgoing requests" do
+  it "keeps capability-gated session operations off the wire when the Agent omitted support" do
+    with_v1_validation_client do |client, transport|
+      expect_raises(ACP::InvalidStateError, /loadSession/) { client.session_load("old", "/work") }
+      expect_raises(ACP::InvalidStateError, /sessionCapabilities.resume/) { client.session_resume("old", "/work") }
+      expect_raises(ACP::InvalidStateError, /sessionCapabilities.list/) { client.session_list }
+      expect_raises(ACP::InvalidStateError, /sessionCapabilities.close/) { client.session_close("old") }
+      expect_raises(ACP::InvalidStateError, /sessionCapabilities.delete/) { client.session_delete("old") }
+      expect_raises(ACP::InvalidStateError, /additionalDirectories/) do
+        client.session_new("/work", additional_directories: [] of String)
+      end
+      expect_raises(ACP::InvalidStateError, /systemPrompt/) do
+        client.session_new("/work", system_prompt: ACP::Protocol::SystemPrompt.append("Keep it short"))
+      end
+      http = JSON.parse(%({"type":"http","name":"catalog","url":"https://example.test/mcp","headers":[]}))
+      sse = JSON.parse(%({"type":"sse","name":"events","url":"https://example.test/sse","headers":[]}))
+      expect_raises(ACP::InvalidStateError, /MCP HTTP/) { client.session_new("/work", [http]) }
+      expect_raises(ACP::InvalidStateError, /MCP SSE/) { client.session_new("/work", [sse]) }
+      transport.sent_messages.size.should eq(1)
+    end
+  end
+
+  it "checks absolute Agent paths and system prompt modes on setup" do
+    caps = %({"loadSession":true,"sessionCapabilities":{"list":{},"resume":{},"additionalDirectories":{},"systemPrompt":{"mode":{"_concise":{},"_invalid":false}}},"mcpCapabilities":{"http":true,"sse":true}})
+    with_v1_validation_client(caps) do |client, transport|
+      expect_raises(ArgumentError, /directories must be absolute/) { client.session_new("C:project") }
+      expect_raises(ArgumentError, /directories must be absolute/) do
+        client.session_load("old", "/work", additional_directories: ["relative"])
+      end
+      expect_raises(ArgumentError, /directories must be absolute/) { client.session_resume("old", "relative") }
+      expect_raises(ArgumentError, /list directory must be absolute/) { client.session_list(cwd: "relative") }
+      expect_raises(ArgumentError, /directories must be absolute/) { client.session_new("/work\0invalid") }
+
+      expect_raises(ACP::InvalidStateError, /systemPrompt.*override/) do
+        client.session_new("/work", system_prompt: ACP::Protocol::SystemPrompt.override("Override"))
+      end
+      empty = ACP::Protocol::SystemPrompt.new("append", [] of ACP::Protocol::ContentBlock)
+      expect_raises(ArgumentError, /system prompts require/) { client.session_new("/work", system_prompt: empty) }
+      image = ACP::PromptBuilder.new.image("YQ==").build
+      expect_raises(ArgumentError, /system prompts require/) do
+        client.session_new("/work", system_prompt: ACP::Protocol::SystemPrompt.new("append", image))
+      end
+      %w(_invalid _undeclared).each do |mode|
+        prompt = ACP::Protocol::SystemPrompt.new(mode, ACP::PromptBuilder.new.text("Be concise").build)
+        expect_raises(ACP::InvalidStateError, /systemPrompt/) { client.session_resume("old", "/work", system_prompt: prompt) }
+      end
+
+      relative = JSON.parse(%({"name":"local","command":"relative-server","args":[],"env":[]}))
+      malformed_type = JSON.parse(%({"type":false,"name":"local","command":"/bin/true","args":[],"env":[]}))
+      expect_raises(ArgumentError, /transport type must be a string/) { client.session_new("/work", [malformed_type]) }
+      invalid_url = JSON.parse(%({"type":"sse","name":"events","url":"/sse","headers":[]}))
+      expect_raises(ArgumentError, /stdio commands must be absolute/) { client.session_new("/work", [relative]) }
+      expect_raises(ArgumentError, /absolute HTTP\(S\) URL/) { client.session_new("/work", [invalid_url]) }
+      [
+        "https://example.test/invalid path",
+        "https://exa%00mple.test/mcp",
+        "https://exa%20mple.test/mcp",
+        "https://example.test:65536/mcp",
+        "https://example.test:9999999999999999999999999/mcp",
+      ].each do |url|
+        invalid = ACP::Protocol::McpServerHttp.new("catalog", url)
+        expect_raises(ArgumentError, /absolute HTTP\(S\) URL/) do
+          client.session_new("/work", [JSON.parse(invalid.to_json)])
+        end
+      end
+      malformed = [
+        %({"command":"/bin/true","args":[],"env":[]}),
+        %({"name":"local","command":"/bin/true","args":[0],"env":[]}),
+        %({"name":"local","command":"/bin/true","args":[],"env":["bad"]}),
+        %({"type":"http","name":"remote","url":"https://example.test/mcp","headers":[{"name":"Accept","value":true}]}),
+        %({"type":"http","name":"remote","url":"https://example.test/mcp"}),
+      ]
+      malformed.each do |server|
+        expect_raises(ArgumentError) { client.session_new("/work", [JSON.parse(server)]) }
+      end
+      transport.sent_messages.size.should eq(1)
+
+      stdio = JSON.parse(%({"name":"local","command":"C:/tools/server.exe","args":[],"env":[]}))
+      http = JSON.parse(%({"type":"http","name":"catalog","url":"https://example.test/mcp","headers":[],"_meta":{"fixture":true}}))
+      legacy_stdio = JSON.parse(%({"name":"nullable","command":"C:/tools/nullable.exe","args":null,"env":null}))
+      future = JSON.parse(%({"type":"_extension","name":"future","_meta":{"opaque":true}}))
+      prompt = ACP::Protocol::SystemPrompt.new("_concise", ACP::PromptBuilder.new.text("Be concise").build)
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessionId":"new"}}))
+      end
+      client.session_new("C:/work", [stdio, http, legacy_stdio, future], additional_directories: ["D:/docs"], system_prompt: prompt).session_id.should eq("new")
+      wire = transport.sent_messages.last["params"]
+      wire["additionalDirectories"].should eq(JSON.parse(%(["D:/docs"])))
+      wire["systemPrompt"]["mode"].should eq("_concise")
+      wire["mcpServers"].as_a.should eq([stdio, http, legacy_stdio, future])
+    end
+  end
+
+  it "enforces negotiated prompt content types through the regular prompt API" do
+    caps = %({"promptCapabilities":{"image":true,"audio":"yes","embeddedContext":false}})
+    with_v1_validation_client(caps) do |client, transport|
+      expect_raises(ACP::InvalidStateError, /audio prompts/) do
+        client.session_prompt(ACP::PromptBuilder.new.audio("YQ==").build, "s")
+      end
+      expect_raises(ACP::InvalidStateError, /embedded context/) do
+        client.session_prompt(ACP::PromptBuilder.new.resource("file:///work/source.cr", "source").build, "s")
+      end
+      transport.sent_messages.size.should eq(1)
+
+      spawn do
+        setup = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}}))
+        prompt = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{prompt["id"]},"result":{"stopReason":"end_turn"}}))
+      end
+      session = ACP::Session.create(client, "/work")
+      blocks = ACP::PromptBuilder.new.text("Question").image("YQ==").resource_link("file:///work/source.cr", "Source").build
+      session.prompt(blocks).stop_reason.should eq("end_turn")
+      transport.sent_messages.last["params"]["prompt"].as_a.map(&.["type"].as_s).should eq(["text", "image", "resource_link"])
+    end
+  end
+
+  it "defaults malformed optional fields in the initialize response" do
+    response = ACP::Protocol::InitializeResult.from_json(%({"protocolVersion":1,"agentCapabilities":[],"authMethods":false,"agentInfo":["bad"],"_meta":false}))
+    response.protocol_version.should eq(1_u16)
+    response.agent_capabilities.load_session?.should be_false
+    response.auth_methods.should be_nil
+    response.agent_info.should be_nil
+    response.meta.should be_nil
+  end
+
+  it "retains valid capabilities next to invalid optional fields" do
+    caps = %({"loadSession":{},"auth":false,"mcpCapabilities":{"http":[]},"sessionCapabilities":{"list":{"_meta":false},"resume":false,"additionalDirectories":[],"systemPrompt":{"mode":{"override":[]}}}})
+    with_v1_validation_client(caps) do |client, transport|
+      expect_raises(ACP::InvalidStateError, /loadSession/) { client.session_load("old", "/work") }
+      expect_raises(ACP::InvalidStateError, /sessionCapabilities.resume/) { client.session_resume("old", "/work") }
+      expect_raises(ACP::InvalidStateError, /systemPrompt.*override/) do
+        client.session_new("/work", system_prompt: ACP::Protocol::SystemPrompt.override("Replace"))
+      end
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessions":[]}}))
+      end
+      client.session_list.sessions.should be_empty
+      transport.sent_messages.last["method"].should eq("session/list")
+    end
+  end
+
+  it "preserves wide advertised modes and serializes native ACP MCP server declarations" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      declaration = client.register_mcp_server("local") { |_request| ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil)) }
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true},"sessionCapabilities":{"systemPrompt":{"mode":{"_future":{"counter":18446744073709551615}}}}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"new"}})
+      end
+      result = client.initialize_connection
+      modes = result.agent_capabilities.not_nil!.session_capabilities.not_nil!.system_prompt.not_nil!
+      modes.supports_mode?("_future").should be_true
+      modes.mode.not_nil!.raw_field("_future").should eq(%({"counter":18446744073709551615}))
+
+      prompt = ACP::Protocol::SystemPrompt.new("_future", ACP::PromptBuilder.new.text("Read source").build)
+      servers = [declaration] of ACP::Protocol::McpServer
+      params = ACP::Protocol::SessionNewParams.new("/work", servers, system_prompt: prompt)
+      params.mcp_servers.should eq([declaration.to_json_any])
+      client.session_new("/work", params.mcp_servers, system_prompt: prompt).session_id.should eq("new")
+    ensure
+      client.try(&.close)
+    end
   end
 end

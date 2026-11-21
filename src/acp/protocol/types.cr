@@ -155,6 +155,31 @@ module ACP
       end
     end
 
+    # :nodoc:
+    module OptionalRawAuthMethods
+      def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)?
+        unless pull.kind.begin_array?
+          pull.skip
+          return nil
+        end
+
+        methods = [] of JSON::Any
+        pull.read_array do
+          raw = WireFrame.read_raw(pull)
+          begin
+            methods << JSON.parse(raw)
+          rescue JSON::ParseException
+            # Skip entries outside JSON::Any's range while retaining siblings.
+          end
+        end
+        methods
+      end
+
+      def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
     # Result of the `initialize` method (Agent → Client).
     struct InitializeResult
       include JSON::Serializable
@@ -164,21 +189,21 @@ module ACP
       property protocol_version : UInt16
 
       # Capabilities the agent advertises to the client.
-      @[JSON::Field(key: "agentCapabilities")]
+      @[JSON::Field(key: "agentCapabilities", converter: ::ACP::Protocol::DefaultCapabilityObject(::ACP::Protocol::AgentCapabilities))]
       property agent_capabilities : AgentCapabilities = AgentCapabilities.new
 
       # Authentication methods the agent supports.
       # If empty or nil, no authentication is required.
-      @[JSON::Field(key: "authMethods")]
+      @[JSON::Field(key: "authMethods", converter: ::ACP::Protocol::OptionalRawAuthMethods)]
       property auth_methods : Array(JSON::Any)?
 
       # Metadata about the agent.
       # Note: in future versions of the protocol, this will be required.
-      @[JSON::Field(key: "agentInfo")]
+      @[JSON::Field(key: "agentInfo", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::AgentInfo))]
       property agent_info : AgentInfo?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -344,18 +369,7 @@ module ACP
       def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil,
                    additional_directories : Array(String)? = nil, system_prompt : SystemPrompt? = nil,
                    config_options : Array(InitialSessionConfigOption)? = nil)
-        json_servers = mcp_servers.map do |server|
-          case server
-          when McpServerStdio
-            JSON.parse(server.to_json)
-          when McpServerHttp
-            JSON.parse(server.to_json)
-          when McpServerSse
-            JSON.parse(server.to_json)
-          else
-            JSON::Any.new(nil)
-          end
-        end
+        json_servers = mcp_servers.map { |server| JSON.parse(server.to_json) }
         inst = allocate
         inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta,
           additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)

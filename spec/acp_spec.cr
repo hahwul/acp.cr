@@ -2256,7 +2256,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         if msg = transport.last_sent
-          transport.inject_raw(build_init_response(msg["id"].as_i64))
+          transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: %({"resume":{}})))
         end
       end
       client.initialize_connection
@@ -2530,7 +2530,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         if msg = transport.last_sent
-          transport.inject_raw(build_init_response(msg["id"].as_i64))
+          transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: %({"close":{}})))
         end
       end
       client.initialize_connection
@@ -2698,7 +2698,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         if msg = transport.last_sent
-          transport.inject_raw(build_init_response(msg["id"].as_i64))
+          transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: %({"list":{}})))
         end
       end
       client.initialize_connection
@@ -2742,7 +2742,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         if msg = transport.last_sent
-          transport.inject_raw(build_init_response(msg["id"].as_i64))
+          transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: %({"list":{}})))
         end
       end
       client.initialize_connection
@@ -2783,7 +2783,7 @@ describe ACP::Client do
       spawn do
         sleep 10.milliseconds
         if msg = transport.last_sent
-          transport.inject_raw(build_init_response(msg["id"].as_i64))
+          transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: %({"list":{}})))
         end
       end
       client.initialize_connection
@@ -3257,7 +3257,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 # Helper to create a fully initialized client with a session
-def setup_client_with_session
+def setup_client_with_session(*, session_capabilities : String? = nil)
   transport = TestTransport.new
   client = ACP::Client.new(transport)
 
@@ -3265,7 +3265,7 @@ def setup_client_with_session
   spawn do
     sleep 10.milliseconds
     if msg = transport.last_sent
-      transport.inject_raw(build_init_response(msg["id"].as_i64))
+      transport.inject_raw(build_init_response(msg["id"].as_i64, session_capabilities: session_capabilities))
     end
   end
   client.initialize_connection
@@ -3363,7 +3363,7 @@ describe ACP::Session do
 
   describe ".list" do
     it "lists sessions through the client" do
-      transport, client = setup_client_with_session
+      transport, client = setup_client_with_session(session_capabilities: %({"list":{}}))
 
       spawn do
         sleep 10.milliseconds
@@ -3398,7 +3398,7 @@ describe ACP::Session do
     end
 
     it "passes cwd and cursor to client.session_list" do
-      transport, client = setup_client_with_session
+      transport, client = setup_client_with_session(session_capabilities: %({"list":{}}))
 
       spawn do
         sleep 10.milliseconds
@@ -6499,7 +6499,7 @@ describe "ACP draft native MCP binding" do
 
   it "cancels only work owned by a released registration and never rebinds its ID" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true}}})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"acp":true},"sessionCapabilities":{"resume":{}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"s"})
     transport.replies["session/resume"] = %("result":{})
     client = ACP::Client.new(transport)
@@ -7371,7 +7371,7 @@ describe "ACP draft session cursors" do
 
   it "preserves cursors on v1 resume and failed load, and rebuilds on successful load" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}})
     transport.replies["session/resume"] = %("result":{})
     transport.replies["session/load"] = %("error":{"code":-32603,"message":"Replay failed"})
     caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(cursors: ACP::Protocol::SessionCursorsCapabilities.new))
@@ -7494,7 +7494,7 @@ describe "ACP draft session options" do
 
   it "forwards v1 options through create, load, and resume in list order" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}}}})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"options":{},"resume":{}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"new"})
     transport.replies["session/load"] = %("result":{})
     transport.replies["session/resume"] = %("result":{})
@@ -7618,7 +7618,7 @@ describe "ACP draft session options" do
       begin
         spawn do
           initialize_result = if version == "v1"
-                                %({"protocolVersion":1})
+                                %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}})
                               else
                                 %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
                               end
@@ -7675,6 +7675,11 @@ private class QueuedRequestTransport < V2TestTransport
   end
 end
 
+private def mode_from_fixture_extension(mode : String, advertised : ACP::Protocol::SessionSystemPromptCapabilities) : Bool
+  names = advertised.meta.try(&.["example.com/modes"]?).try(&.as_a?)
+  !!names.try(&.any? { |value| value.as_s? == mode })
+end
+
 describe "ACP draft session fork" do
   it "uses the same optional cursor wire shape on v1 and v2" do
     {
@@ -7697,6 +7702,7 @@ describe "ACP draft session fork" do
     transport.replies["session/fork"] = %("result":{"sessionId":"forked","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"large","options":[]}]})
     transport.replies["session/prompt"] = %("result":{"stopReason":"end_turn"})
     client = ACP::Client.new(transport)
+    client.on_system_prompt_mode = ->mode_from_fixture_extension(String, ACP::Protocol::SessionSystemPromptCapabilities)
     client.initialize_connection
     take_v2_frame(transport.outgoing)
     source = ACP::Session.create(client, "/work")
@@ -7726,6 +7732,7 @@ describe "ACP draft session fork" do
     transport.replies["session/fork"] = %("result":{"sessionId":"forked","availableCommands":[{"type":"command","name":"review","description":"Review the fork"}]})
     transport.replies["session/prompt"] = %("result":{"messageId":"prompt"})
     client = ACP::V2::Client.new(transport)
+    client.on_system_prompt_mode = ->mode_from_fixture_extension(String, ACP::Protocol::SessionSystemPromptCapabilities)
     client.initialize_connection
     take_v2_frame(transport.outgoing)
     prompt = ACP::Protocol::SystemPrompt.new("_concise", [ACP::Protocol::TextContentBlock.new("Keep it short.").as(ACP::Protocol::ContentBlock)])
@@ -8616,16 +8623,31 @@ describe "ACP version negotiation" do
     transport.closed?.should be_true
   end
 
-  it "rejects a malformed v1 response before retrying" do
+  it "falls back to v1 when the response has malformed optional capabilities" do
+    first = V2TestTransport.new
+    first.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":[]})
+    second = V2TestTransport.new
+    second.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":[]})
+    transports = [first, second]
+    client = ACP.connect_negotiated { transports.shift }.as(ACP::Client)
+    client.negotiated_protocol_version.should eq(1_u16)
+    client.agent_capabilities.not_nil!.load_session?.should be_false
+    first.closed?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "rejects a malformed required protocol version before retrying" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":[]})
+    transport.replies["initialize"] = %("result":{"protocolVersion":"1"})
     opens = 0
-    expect_raises(ACP::ProtocolError, /malformed result/) do
+    error = expect_raises(ACP::VersionMismatchError) do
       ACP.connect_negotiated do
         opens += 1
         transport
       end
     end
+    error.agent_version.should be_nil
     opens.should eq(1)
     transport.closed?.should be_true
   end

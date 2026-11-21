@@ -223,7 +223,7 @@ describe "ACP::Client#session_delete" do
   end
 
   it "treats -32002 as a successful delete and raises other errors" do
-    transport, client = v1_client
+    transport, client = v1_client(%({"sessionCapabilities":{"delete":{}}}))
     transport.replies["session/delete"] = %("error":{"code":-32002,"message":"Resource not found"})
     client.session_delete("gone").should be_a(ACP::Protocol::SessionDeleteResult)
 
@@ -246,7 +246,7 @@ end
 
 describe "ACP additionalDirectories and systemPrompt" do
   it "sends them on session/new, session/load and session/resume" do
-    transport, client = v1_client
+    transport, client = v1_client(%({"loadSession":true,"sessionCapabilities":{"additionalDirectories":{},"systemPrompt":{},"resume":{}}}))
     transport.replies["session/new"] = %("result":{"sessionId":"s1"})
     transport.replies["session/load"] = %("result":{})
     transport.replies["session/resume"] = %("result":{})
@@ -641,7 +641,7 @@ end
 describe "ACP subagent sessions" do
   it "registers nested children and applies workspace patches independently" do
     caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
-    transport, client = v1_client(client_caps: caps)
+    transport, client = v1_client(%({"sessionCapabilities":{"additionalDirectories":{}}}), client_caps: caps)
     sent(transport, "initialize")["params"]["clientCapabilities"]["subagents"].should eq(JSON.parse("{}"))
     transport.replies["session/new"] = %("result":{"sessionId":"root"})
     root = ACP::Session.create(client, "/work/root", additional_directories: ["/docs"])
@@ -679,7 +679,7 @@ describe "ACP subagent sessions" do
 
   it "blocks outgoing child methods across the typed and raw APIs" do
     caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
-    transport, client = v1_client(client_caps: caps)
+    transport, client = v1_client(%({"loadSession":true,"sessionCapabilities":{"resume":{},"close":{},"delete":{}}}), client_caps: caps)
     transport.inject_raw(subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}})))
     transport.inject_raw(subagent_update_frame("child", "nested", ""))
     synchronize_updates(transport, client)
@@ -709,7 +709,7 @@ describe "ACP subagent sessions" do
   it "uses the load response as the boundary between historical and current child state" do
     caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
     transport = SubagentSetupTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}})
     transport.replies["session/load"] = %("result":{})
     client = ACP::Client.new(transport, client_capabilities: caps)
     client.request_timeout = 2.0
@@ -744,7 +744,7 @@ describe "ACP subagent sessions" do
   it "keeps resume capabilities provisional and clears them if resume fails" do
     caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
     transport = SubagentSetupTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}})
     transport.replies["session/resume"] = %("error":{"code":-32002,"message":"Unknown session"})
     client = ACP::Client.new(transport, client_capabilities: caps)
     client.request_timeout = 2.0
@@ -775,7 +775,7 @@ describe "ACP subagent sessions" do
       subagents: ACP::Protocol::SubagentCapabilities.new,
       elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new),
     )
-    transport, client = v1_client(client_caps: caps)
+    transport, client = v1_client(%({"sessionCapabilities":{"close":{}}}), client_caps: caps)
     entered = Channel(Nil).new(3)
     release = Channel(Nil).new(3)
     client.on_agent_request = ->(_method : String, _params : JSON::Any) do
