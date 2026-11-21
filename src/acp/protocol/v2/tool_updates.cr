@@ -10,17 +10,15 @@ module ACP
       # Optional actions allowed for a tool call or an Agent-owned terminal.
       struct EntityCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # A current marker authorizing a cancel request.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property cancel : Capability?
 
-        # Extension metadata scoped to these capabilities.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates entity capabilities.
-        def initialize(@cancel : Capability? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@cancel : Capability? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
 
@@ -245,16 +243,14 @@ module ACP
       # Base64 terminal output snapshot.
       struct TerminalOutput
         include JSON::Serializable
+        include LosslessMetadata
 
         # Base64-encoded terminal bytes.
         property data : String
 
-        # Extension metadata scoped to the output snapshot.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates an output snapshot from base64 text.
-        def initialize(@data : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@data : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
 
         # Decodes the terminal output bytes.
@@ -266,6 +262,7 @@ module ACP
       # Process exit status for an Agent-owned terminal.
       struct TerminalExitStatus
         include JSON::Serializable
+        include LosslessMetadata
 
         # Signed exit code, including platform-specific values.
         @[JSON::Field(key: "exitCode")]
@@ -274,18 +271,16 @@ module ACP
         # Signal name when the process was terminated by a signal.
         property signal : String?
 
-        # Extension metadata scoped to the exit status.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates an exit status snapshot.
-        def initialize(@exit_code : Int64? = nil, @signal : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@exit_code : Int64? = nil, @signal : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
 
       # Reported dimensions of the Agent-owned terminal.
       struct TerminalSize
         include JSON::Serializable
+        include LosslessMetadata
 
         # Terminal columns.
         property cols : UInt16
@@ -293,12 +288,9 @@ module ACP
         # Terminal rows.
         property rows : UInt16
 
-        # Extension metadata scoped to the dimensions.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates terminal dimensions.
-        def initialize(@cols : UInt16, @rows : UInt16, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@cols : UInt16, @rows : UInt16, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
 
@@ -322,9 +314,8 @@ module ACP
           exit_status:  {TerminalExitStatus, "exitStatus"},
           size:         {TerminalSize, "size"},
           capabilities: {EntityCapabilities, "capabilities"},
-          meta:         {Hash(String, JSON::Any), "_meta"},
         })
-        include MetadataPatch
+        include LosslessMetadataPatch
 
         # Creates a terminal patch. Set a field to nil to explicitly clear it.
         def initialize(@terminal_id : String)
@@ -334,6 +325,7 @@ module ACP
       # Appends bytes to an Agent-owned display terminal.
       struct TerminalOutputChunk
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -346,12 +338,9 @@ module ACP
         # Base64-encoded output bytes.
         property data : String
 
-        # Extension metadata scoped to this chunk.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates a terminal output chunk from base64 text.
-        def initialize(@terminal_id : String, @data : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@terminal_id : String, @data : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
 
         # Decodes the newly appended output bytes.

@@ -98,9 +98,8 @@ module ACP
         PatchFields.define({
           title:      {String, "title"},
           updated_at: {String, "updatedAt"},
-          meta:       {Hash(String, JSON::Any), "_meta"},
         })
-        include MetadataPatch
+        include LosslessMetadataPatch
 
         # Creates a session info update. Assign fields to patch them.
         def initialize
@@ -124,9 +123,8 @@ module ACP
         # Cumulative cost and key-level metadata patches.
         PatchFields.define({
           cost: {Protocol::Cost, "cost"},
-          meta: {Hash(String, JSON::Any), "_meta"},
         })
-        include MetadataPatch
+        include LosslessMetadataPatch
 
         # Creates a usage update for the reported token counts.
         def initialize(@used : UInt64, @size : UInt64)

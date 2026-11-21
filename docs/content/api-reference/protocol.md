@@ -235,7 +235,13 @@ See [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt
 `update.typed` accessor decodes foreground state, message upserts and chunks,
 and replay completion. Use `StateUpdate#idle?` and `#stop_reason` to inspect
 foreground completion. An absent background list represents unreported work.
-`MessageUpdate#apply_metadata` applies the v2 top-level metadata patch.
+For v2 upserts, `meta_present?` distinguishes a supplied patch from
+omission, and `meta_raw` exposes the exact metadata object. Use
+`apply_metadata_raw(previous)` to apply the patch to an existing
+`RawJson?` snapshot. Null clears the snapshot or removes an individual
+key, and other values replace their key whole. Use `apply_metadata` for a
+`Hash(String, JSON::Any)` view.
+[ACP v2 metadata patches](https://agentclientprotocol.com/protocol/v2/extensibility#metadata-patches)
 
 `update.typed` also decodes tool-call and Agent-owned terminal updates and
 chunks. Tool-call diff content exposes structured file changes and optional

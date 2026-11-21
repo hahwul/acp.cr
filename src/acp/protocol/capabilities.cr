@@ -17,6 +17,7 @@ require "./prompt_suggestions"
 require "./providers"
 require "./mcp"
 require "./optional_capability"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -243,29 +244,25 @@ module ACP
     # Presence authorizes cancellation for an announced child session.
     struct SessionCancelCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates the cancellation capability, optionally with metadata.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
     # Methods the client can send to an announced child session.
     struct SubagentSessionCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # A value authorizes `session/cancel` for the child.
       property cancel : SessionCancelCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates the child's method allowlist.
-      def initialize(@cancel : SessionCancelCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@cancel : SessionCancelCapabilities? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

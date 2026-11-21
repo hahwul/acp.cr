@@ -4138,3 +4138,126 @@ describe "ACP v2 open content blocks" do
     compact.typed_summary.should eq([] of ACP::Protocol::ContentBlock)
   end
 end
+
+describe "ACP v2 exact upsert metadata" do
+  it "keeps typed terminal, session info, and usage updates when metadata exceeds JSON::Any" do
+    wide = %({"example.test/sequence":18446744073709551615})
+    updates = [
+      %({"sessionUpdate":"terminal_update","terminalId":"t","command":"build","_meta":#{wide}}),
+      %({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"AP9B","_meta":#{wide}}),
+      %({"sessionUpdate":"session_info_update","title":"Demo","_meta":#{wide}}),
+      %({"sessionUpdate":"usage_update","used":4,"size":8,"_meta":#{wide}}),
+      %({"sessionUpdate":"subagent_update","sessionId":"child","_meta":#{wide}}),
+      %({"sessionUpdate":"user_message","messageId":"m","_meta":#{wide}}),
+      %({"sessionUpdate":"agent_message","messageId":"m","_meta":#{wide}}),
+      %({"sessionUpdate":"agent_thought","messageId":"m","_meta":#{wide}}),
+      %({"sessionUpdate":"session_message","messageId":"m","_meta":#{wide}}),
+      %({"sessionUpdate":"tool_call_update","toolCallId":"call","_meta":#{wide}}),
+      %({"sessionUpdate":"compaction_update","compactionId":"compact","_meta":#{wide}}),
+    ]
+
+    updates.each do |wire|
+      update = ACP::Protocol::V2::SessionUpdate.from_json(wire)
+      typed = update.typed.not_nil!
+      ACP::Protocol::RawJson.from_json(typed.to_json).field("_meta").not_nil!.json.should eq(wide)
+    end
+  end
+
+  it "applies exact metadata by key, handling omission, clears, and nested replacements" do
+    previous = ACP::Protocol::RawJson.from_json(%({"example.test/keep":18446744073709551615,"example.test/replace":{"old":true},"example.test/remove":true}))
+    wire = %({"terminalId":"t","_meta":{"example.test/replace":{"value":0.1234567890123456789,"nested":null},"example.test/remove":null,"example.test/added":-9223372036854775809}})
+    update = ACP::Protocol::V2::TerminalUpdate.from_json(wire)
+    result = update.apply_metadata_raw(previous).not_nil!
+    result.field("example.test/keep").not_nil!.json.should eq(UInt64::MAX.to_s)
+    result.field("example.test/replace").not_nil!.json.should eq(%({"value":0.1234567890123456789,"nested":null}))
+    result.field("example.test/remove").should be_nil
+    result.field("example.test/added").not_nil!.json.should eq("-9223372036854775809")
+    previous.field("example.test/remove").not_nil!.json.should eq("true")
+
+    ["", %(,"_meta":false), %(,"_meta":18446744073709551615)].each do |field|
+      ignored = ACP::Protocol::V2::TerminalUpdate.from_json(%({"terminalId":"t"#{field}}))
+      ignored.meta_present?.should be_false
+      ignored.apply_metadata_raw(previous).should eq(previous)
+      ignored.to_json.should_not contain(%("_meta"))
+    end
+
+    empty = ACP::Protocol::V2::TerminalUpdate.from_json(%({"terminalId":"t","_meta":{}}))
+    empty.meta_present?.should be_true
+    empty.apply_metadata_raw(previous).should eq(previous)
+    empty.apply_metadata_raw(nil).should be_nil
+
+    clear = ACP::Protocol::V2::TerminalUpdate.new("t")
+    clear.meta = nil
+    clear.meta_present?.should be_true
+    clear.to_json.should contain(%("_meta":null))
+    clear.apply_metadata_raw(previous).should be_nil
+
+    remove_only = ACP::Protocol::V2::TerminalUpdate.from_json(%({"terminalId":"t","_meta":{"only":null}}))
+    remove_only.apply_metadata_raw(ACP::Protocol::RawJson.from_json(%({"only":true}))).should be_nil
+
+    update.meta.not_nil!["example.test/label"] = JSON::Any.new("edited")
+    edited = update.apply_metadata_raw(previous).not_nil!
+    edited.field("example.test/label").not_nil!.as_s?.should eq("edited")
+    edited.field("example.test/added").not_nil!.json.should eq("-9223372036854775809")
+  end
+
+  it "delivers exact nested metadata and child announcements through the stdio client" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(5)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+
+      meta = %({"example.test/sequence":18446744073709551615,"example.test/precision":0.1234567890123456789})
+      updates = [
+        %({"sessionUpdate":"terminal_update","terminalId":"t","output":{"data":"AP9B","_meta":#{meta}},"exitStatus":{"exitCode":-9,"_meta":#{meta}},"size":{"cols":80,"rows":24,"_meta":#{meta}},"capabilities":{"cancel":{"_meta":#{meta}},"_meta":#{meta}},"_meta":#{meta}}),
+        %({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"AAE=","_meta":#{meta}}),
+        %({"sessionUpdate":"subagent_update","sessionId":"child","title":"Child","capabilities":{"cancel":{"_meta":#{meta}},"_meta":#{meta}},"_meta":#{meta}}),
+        %({"sessionUpdate":"session_info_update","title":"Demo","_meta":#{meta}}),
+        %({"sessionUpdate":"usage_update","used":9223372036854775808,"size":18446744073709551615,"cost":{"amount":0.5,"currency":"USD","_meta":#{meta}},"_meta":#{meta}}),
+      ]
+      updates.each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":#{update}}})
+      end
+
+      terminal = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::TerminalUpdate)
+      terminal.output.not_nil!.bytes.should eq(Bytes[0, 255, 65])
+      terminal.exit_status.not_nil!.exit_code.should eq(-9_i64)
+      terminal.size.not_nil!.cols.should eq(80_u16)
+      terminal.output.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      terminal.size.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      terminal.exit_status.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      terminal.capabilities.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      terminal.capabilities.not_nil!.cancel.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      terminal.meta_raw.not_nil!.json.should eq(meta)
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::TerminalOutputChunk)
+      chunk.bytes.should eq(Bytes[0, 1])
+      chunk.meta_raw.not_nil!.json.should eq(meta)
+
+      child = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+      child.session_id.should eq("child")
+      child.meta_raw.not_nil!.json.should eq(meta)
+      child.capabilities.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      child.capabilities.not_nil!.cancel.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      registered_child = client.subagent("child").not_nil!
+      registered_child.title.should eq("Child")
+      registered_child.cancel?.should be_true
+
+      info = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SessionInfoUpdate)
+      info.title.should eq("Demo")
+      info.meta_raw.not_nil!.json.should eq(meta)
+
+      usage = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::UsageUpdate)
+      usage.used.should eq(9223372036854775808_u64)
+      usage.size.should eq(UInt64::MAX)
+      usage.cost.not_nil!.currency.should eq("USD")
+      usage.cost.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      usage.meta_raw.not_nil!.json.should eq(meta)
+    ensure
+      client.try(&.close)
+    end
+  end
+end

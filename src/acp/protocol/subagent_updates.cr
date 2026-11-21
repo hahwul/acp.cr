@@ -1,6 +1,7 @@
 require "json"
 require "./capabilities"
 require "./content_block"
+require "./metadata_patch"
 require "./patch_fields"
 require "./wire_frame"
 
@@ -59,8 +60,8 @@ module ACP
         state:                  {SubagentState, "state"},
         cwd:                    {String, "cwd"},
         additional_directories: {Array(String), "additionalDirectories"},
-        meta:                   {Hash(String, JSON::Any), "_meta"},
       })
+      include LosslessMetadataPatch
 
       # Builds an announcement. Assign only the fields this update should patch.
       def initialize(@session_id : String)
