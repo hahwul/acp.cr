@@ -61,6 +61,19 @@ extension fields and precise numbers. `session_set_config_option` checks the
 Agent's current option IDs and advertised select values before sending.
 [ACP v2 Session Config Options](https://agentclientprotocol.com/protocol/v2/session-config-options)
 
+Read the current command list with `session_available_commands(session_id)`.
+Filter by `slash_command?` to build slash command completion. The list is
+empty when the session has no commands and `nil` when the client has no
+snapshot for the session. Ambiguous command names are omitted from the
+typed list. Setup responses and `available_commands_update`
+notifications replace the list. Read it inside `on_update` to see the
+latest live replacement. With the stdio transport,
+`session_available_commands_raw(session_id)` retains extension variants and
+exact numeric values. After a close, archive, or delete timeout, the list
+is unavailable until the Agent confirms the request failed or a successful
+resume supplies a new list.
+[ACP v2 Slash Commands](https://agentclientprotocol.com/protocol/v2/slash-commands)
+
 In a permission callback, `typed_subject` exposes the optional tool-call patch
 or command details. Future subjects retain their raw fields. A tool-call
 patch from a permission request reaches `on_update` in receive order before
@@ -558,10 +571,10 @@ Agent returns.
 
 Advertise `commands: CommandsCapabilities.new(skill: CommandsSkillCapabilities.new)`
 on `Protocol::V2::ClientSessionCapabilities` and pass it as `session:` on
-the v2 client capabilities. Use `typed_available_skills` on a session setup
-result or a typed `AvailableCommandsUpdate` to read the available skills.
-Each setup result or update replaces the session's list. A `session_options`
-result previews the list. Each skill has a name, description, and optional
+the v2 client capabilities. Read negotiated skills with
+`session_available_commands(session_id).try(&.compact_map(&.skill))`. Setup
+responses, command updates, and `session_options` previews also expose
+`typed_available_skills`. Each skill has a name, description, and optional
 path on the Agent's filesystem.
 
 When the user selects a skill, put its name in

@@ -54,7 +54,6 @@ module ACP
     @setup_by_session = {} of String => SetupRequest
     @closed_roots = Set(String).new
     @cancellable_entities = Set(Tuple(String, String, String)).new
-    @skill_names : Hash(String, Set(String))?
 
     def initialize(@v2 : Bool = false)
     end
@@ -109,28 +108,6 @@ module ACP
         @closed_roots.includes?(session_id) || @setup_by_session.has_key?(session_id)
     end
 
-    def configure_skill_commands(enabled : Bool) : Nil
-      @skill_names = enabled ? {} of String => Set(String) : nil
-    end
-
-    def skill_advertised?(session_id : String, name : String) : Bool
-      !setup_for(session_id) && (@skill_names.try(&.[session_id]?).try(&.includes?(name)) || false)
-    end
-
-    def observe_available_commands(session_id : String, update : Hash(String, JSON::Any), update_json : String?) : Nil
-      return unless @skill_names && @workspace.has_key?(session_id) && current_updates?(session_id)
-
-      listing = Protocol::V2::AvailableCommandsUpdate.from_json(update_json || Protocol::WireFrame.encode(update))
-      replace_skill_names(session_id, listing)
-    rescue JSON::Error
-    end
-
-    private def replace_skill_names(session_id : String, listing : Protocol::V2::AvailableCommandList) : Nil
-      if names = @skill_names
-        names[session_id] = listing.typed_available_skills.map(&.name).to_set
-      end
-    end
-
     def request_sent(id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
       sid = params.try(&.["sessionId"]?).try(&.as_s?)
       if @v2 && (key = entity_cancel_key(method))
@@ -153,8 +130,6 @@ module ACP
         end
         clear_descendant_runtime(sid)
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
-      when Protocol::AgentMethod::SESSION_DELETE
-        return unless @v2
       else
         return
       end
@@ -171,34 +146,26 @@ module ACP
     end
 
     # Applies a response at the dispatch boundary, before the next update.
-    # Returns closed session IDs whose pending user input needs a reply.
-    def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Array(String)?
+    def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Nil
       return unless setup = @setups.delete(id)
       sid = setup.session_id
       method = setup.method
       workspace = setup.workspace
-      raw_result = response.try(&.["result"]?)
 
       case method
       when Protocol::AgentMethod::SESSION_LOAD, Protocol::AgentMethod::SESSION_RESUME
         return unless sid
 
         @setup_by_session.delete(sid)
-        if attached = attach_result(method, Protocol::WireFrame.result_json(response, frame))
+        if attach_result(method, Protocol::WireFrame.result_json(response, frame))
           @closed_roots.delete(sid)
           @workspace[sid] = workspace if workspace
-          replace_skill_names(sid, attached) if attached.is_a?(Protocol::V2::SessionResumeResult)
         else
           clear_descendant_runtime(sid)
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
         if workspace && (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
           @workspace[created.session_id] = workspace
-          replace_skill_names(created.session_id, created) if created.is_a?(Protocol::V2::SessionNewResult)
-        end
-      when Protocol::AgentMethod::SESSION_DELETE
-        if sid && !frame && closed_session?(response, raw_result)
-          return close_runtime(sid)
         end
       end
       nil
@@ -214,7 +181,6 @@ module ACP
       return if child?(session_id)
 
       @closed_roots.add(session_id) if @workspace.delete(session_id) || @children.any? { |_, child| child.parent_id == session_id }
-      @skill_names.try(&.delete(session_id))
       clear_descendant_runtime(session_id)
     end
 
@@ -225,7 +191,6 @@ module ACP
       @setup_by_session.clear
       @closed_roots.clear
       @cancellable_entities.clear
-      @skill_names.try(&.clear)
     end
 
     # Observes v2 capabilities at the wire boundary. Each replaying session
@@ -375,18 +340,6 @@ module ACP
       end
     rescue JSON::Error
       nil
-    end
-
-    private def closed_session?(response : JSON::Any?, result : JSON::Any?) : Bool
-      if error = response.try(&.["error"]?)
-        return error.as_h?.try(&.["code"]?).try(&.as_i64?) == JsonRpcError::RESOURCE_NOT_FOUND
-      end
-      return false unless result
-
-      Protocol::SessionCloseResult.from_json(result.to_json)
-      true
-    rescue JSON::ParseException
-      false
     end
   end
 end

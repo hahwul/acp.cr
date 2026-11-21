@@ -27,6 +27,10 @@ module ACP
           send_typed_request(method, params, type)
         end
 
+        def retire_session(method : String, params : JSON::Serializable, type : T.class) : T forall T
+          send_session_retirement_request(method, params, type)
+        end
+
         def attach_with_choices(method : String, params : JSON::Serializable, type : T.class, session_id : String? = nil) : T forall T
           send_cached_request(method, params, type) do |result, wire|
             sid = result.is_a?(Wire::SessionNewResult) ? result.session_id : session_id
@@ -45,6 +49,22 @@ module ACP
         def config_options_raw(session_id : String) : Protocol::RawJson?
           @pending_mutex.synchronize { @session_choices[session_id].try(&.options) }
         end
+
+        def available_commands(session_id : String) : Array(Wire::AvailableCommand)?
+          @pending_mutex.synchronize do
+            commands = @session_choices.commands(session_id)
+            if commands && !@skill_commands_negotiated
+              commands.reject! { |command| command.type == "skill" }
+            end
+            commands
+          end
+        end
+
+        def available_commands_raw(session_id : String) : Protocol::RawJson?
+          @pending_mutex.synchronize { @session_choices.commands_raw(session_id) }
+        end
+
+        @skill_commands_negotiated = false
 
         @initialize_offer : Wire::InitializeParams?
 
@@ -129,7 +149,7 @@ module ACP
           suggestions = session.try(&.prompt_suggestions)
           prompt = result.capabilities.session.try(&.prompt)
           @client_capabilities.elicitation = advertised.elicitation
-          @subagent_registry.not_nil!.configure_skill_commands(!!session.try(&.commands).try(&.skill))
+          @skill_commands_negotiated = !!session.try(&.commands).try(&.skill) && !!prompt.try(&.skill)
           @mcp_acp_supported = !!result.capabilities.session.try(&.mcp).try(&.acp)
           @auth_status_supported = result.capabilities.auth_status?
           @suggestion_content_types = suggestions.try &.content_types(
@@ -176,8 +196,8 @@ module ACP
                 raise InvalidStateError.new("Skill references require a current command list after session replay")
               end
 
-              registry = @subagent_registry.not_nil!
-              if name = names.find { |candidate| !registry.skill_advertised?(session_id, candidate) }
+              advertised = @session_choices.command_skill_names(session_id)
+              if name = names.find { |candidate| !advertised.try(&.includes?(candidate)) }
                 raise InvalidStateError.new("Skill #{name.inspect} is not currently advertised for session #{session_id.inspect}")
               end
             end
@@ -639,7 +659,7 @@ module ACP
       def session_close(session_id : String) : Wire::SessionCloseResult
         @connection.with_request do
           session_capabilities
-          request(AgentMethod::SESSION_CLOSE, Wire::SessionCloseParams.new(session_id), Wire::SessionCloseResult)
+          @connection.retire_session(AgentMethod::SESSION_CLOSE, Wire::SessionCloseParams.new(session_id), Wire::SessionCloseResult)
         end
       end
 
@@ -648,8 +668,18 @@ module ACP
         @connection.with_request do
           raise InvalidStateError.new("The Agent did not advertise session deletion") unless session_capabilities.delete
 
-          request(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
+          @connection.retire_session(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
         end
+      end
+
+      # Latest unambiguous command advertisements for an attached session.
+      def session_available_commands(session_id : String) : Array(Wire::AvailableCommand)?
+        @connection.available_commands(session_id)
+      end
+
+      # Exact advertised list, including extension commands and precise numbers.
+      def session_available_commands_raw(session_id : String) : Protocol::RawJson?
+        @connection.available_commands_raw(session_id)
       end
 
       # Latest configuration options for an attached session in Agent order.
