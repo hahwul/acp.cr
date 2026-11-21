@@ -1451,8 +1451,9 @@ module ACP
         @pending_mutex.synchronize { @in_flight[id] = entry }
       end
 
+      prepared = prepare_agent_request(id, method_name, params)
       spawn(name: "acp-agent-request") do
-        reply = route_agent_request(method_name, params)
+        reply = prepared ? prepared.call : route_agent_request(method_name, params)
         if claim_agent_request(id, entry)
           case reply
           in Protocol::JsonRpcErrorObject then respond_to_agent_error(id, reply.code, reply.message, reply.data)
@@ -1476,6 +1477,12 @@ module ACP
 
     # The answer to an agent request: a result, or a JSON-RPC error.
     private alias AgentReply = JSON::Any | Protocol::JsonRpcErrorObject
+
+    # Allows version-specific request handling to observe wire-ordered state
+    # on the dispatcher before running the user handler on its own fiber.
+    private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?) : (-> AgentReply)?
+      nil
+    end
 
     # Runs the handler for an agent request and returns its answer; the
     # caller sends it unless the request was already answered by a cancel.

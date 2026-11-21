@@ -138,13 +138,9 @@ module ACP
         end
       end
 
-      # Creates or patches one tool call in the session timeline.
-      struct ToolCallUpdate
+      # Fields shared by tool-call updates and permission subjects.
+      abstract struct ToolCallPatch
         include JSON::Serializable
-
-        # Session update discriminator.
-        @[JSON::Field(key: "sessionUpdate")]
-        getter session_update : String = "tool_call_update"
 
         # Tool call updated by this patch.
         @[JSON::Field(key: "toolCallId")]
@@ -168,6 +164,13 @@ module ACP
         # Creates a tool-call patch. Set a field to nil to explicitly clear it.
         def initialize(@tool_call_id : String)
         end
+      end
+
+      # Creates or patches one tool call in the session timeline.
+      struct ToolCallUpdate < ToolCallPatch
+        # Session update discriminator.
+        @[JSON::Field(key: "sessionUpdate")]
+        getter session_update : String = "tool_call_update"
       end
 
       # Appends one content item to a tool call.

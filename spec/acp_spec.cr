@@ -6358,6 +6358,83 @@ describe ACP::V2::Client do
     client.try(&.close)
   end
 
+  it "applies a permission tool patch in wire order before calling the handler" do
+    transport = V2TestTransport.new
+    transport.replies["tool_call/cancel"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    events = Channel(String).new(4)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      patch = note.update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      events.send(patch.capabilities_present? ? "permission patch" : "notification")
+      nil
+    end
+    client.on_request_permission = ->(permission : ACP::Protocol::V2::RequestPermissionParams) do
+      permission.request_id.should eq("p-1")
+      patch = permission.typed_subject.not_nil!.tool_call.not_nil!
+      patch.title_present?.should be_true
+      patch.title.should be_nil
+      JSON.parse(patch.to_json)["sessionUpdate"]?.should be_nil
+      events.send("permission handler")
+      client.tool_call_cancel(permission.session_id, patch.tool_call_id)
+      ACP::Protocol::V2::RequestPermissionResult.cancelled
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    transport.update("s", %({"sessionUpdate":"tool_call_update","toolCallId":"t","title":"First title"}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"p-1","method":"session/request_permission","params":{"sessionId":"s","title":"Cancel tool?","subject":{"type":"tool_call","toolCall":{"toolCallId":"t","title":null,"capabilities":{"cancel":{}}}},"options":[{"optionId":"once","name":"Allow","kind":"allow_once"}]}}))
+    take_v2_frame(events).should eq("notification")
+    take_v2_frame(events).should eq("permission patch")
+    take_v2_frame(events).should eq("permission handler")
+    cancel = take_v2_frame(transport.outgoing)
+    cancel["method"].should eq("tool_call/cancel")
+    cancel["params"]["toolCallId"].should eq("t")
+    take_v2_frame(transport.outgoing)["result"]["outcome"]["outcome"].should eq("cancelled")
+  ensure
+    client.try(&.close)
+  end
+
+  it "delivers typed command details and rejects malformed known permission subjects" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    entered = Channel(ACP::Protocol::V2::RequestPermissionParams).new(4)
+    client.on_request_permission = ->(permission : ACP::Protocol::V2::RequestPermissionParams) do
+      entered.send(permission)
+      ACP::Protocol::V2::RequestPermissionResult.cancelled
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    options = %([{"optionId":"once","name":"Allow","kind":"allow_once"}])
+    transport.inject_raw(%({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","title":"Run tests?","subject":{"type":"command","command":"crystal spec","cwd":"C:/work","toolCallId":"t","terminalId":"term"},"options":#{options}}}))
+    take_v2_frame(transport.outgoing)["result"]["outcome"]["outcome"].should eq("cancelled")
+    request = take_v2_frame(entered)
+    command = request.typed_subject.not_nil!.command.not_nil!
+    request.request_id.should eq(1_i64)
+    JSON.parse(request.to_json)["requestId"]?.should be_nil
+    command.command.should eq("crystal spec")
+    command.cwd.should eq("C:/work")
+    command.tool_call_id.should eq("t")
+    command.terminal_id.should eq("term")
+
+    [
+      %({"type":"command","command":"crystal spec","cwd":"relative"}),
+      %({"type":"tool_call","toolCall":{"title":"Missing ID"}}),
+      %({"type":false}),
+    ].each do |subject|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"s","title":"Malformed","subject":#{subject},"options":#{options}}}))
+      take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32602)
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"s","title":"No options","options":[]}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32602)
+    select
+    when entered.receive
+      raise "malformed permission reached the handler"
+    else
+    end
+  ensure
+    client.try(&.close)
+  end
+
   it "uses v2 auth method IDs and the v2 permission request shape" do
     transport = V2TestTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":[{"type":"agent","methodId":"credentials","name":"Agent login"},{"type":"terminal","methodId":"terminal","name":"Terminal login"}]})
@@ -6368,6 +6445,7 @@ describe ACP::V2::Client do
       params.session_id.should eq("child")
       params.title.should eq("Review access")
       params.subject.not_nil!["type"].should eq("_future")
+      params.typed_subject.not_nil!.type.should eq("_future")
       ACP::Protocol::V2::RequestPermissionResult.selected(params.options.first.option_id)
     end
     client.initialize_connection
@@ -6447,7 +6525,7 @@ describe ACP::V2::Client do
     client.initialize_connection
     take_v2_frame(transport.outgoing)
     {"stopped", "kept"}.each do |id|
-      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"method":"session/request_permission","params":{"sessionId":"s","title":#{id.to_json},"options":[]}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"method":"session/request_permission","params":{"sessionId":"s","title":#{id.to_json},"options":[{"optionId":"ok","name":"Allow","kind":"allow_once"}]}}))
     end
     [take_v2_frame(entered), take_v2_frame(entered)].sort.should eq(["kept", "stopped"])
     client.session_cancel("s")
