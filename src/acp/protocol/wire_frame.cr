@@ -13,12 +13,15 @@ module ACP
       @exact_fields : Hash(String, Tuple(String, String))?
 
       protected def on_unknown_json_attribute(pull, key, key_location)
-        json = WireFrame.read_raw(pull)
+        retain_unmapped_json(key, WireFrame.read_raw(pull))
+      end
+
+      protected def retain_unmapped_json(key : String, json : String, *, projection : JSON::Any? = nil) : Nil
         @json_unmapped.delete(key)
         @raw_fields.try(&.delete(key))
         @exact_fields.try(&.delete(key))
         begin
-          value = JSON.parse(json)
+          value = projection || JSON.parse(json)
           @json_unmapped[key] = value
           if keep_exact_unmapped?(key)
             projected = WireFrame.encode(value)

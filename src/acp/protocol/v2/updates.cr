@@ -1,5 +1,5 @@
 require "./initialization"
-require "../wire_frame"
+require "../raw_json"
 require "../usage"
 require "../cursor_update"
 require "./configuration"
@@ -289,6 +289,32 @@ module ACP
           true
         end
 
+        # Filters prompt suggestions while keeping the original JSON of the usable entries.
+        # :nodoc:
+        def filter_prompt_suggestions(types : Set(String)) : JSON::Any?
+          return unless raw = exact_unmapped_json("suggestions")
+          pull = JSON::PullParser.new(raw)
+          return unless pull.kind.begin_array?
+
+          suggestions = [] of PromptSuggestion
+          filtered = JSON.build do |builder|
+            builder.array do
+              pull.read_array do
+                candidate = WireFrame.read_raw(pull)
+                # Duplicate members can change the meaning for a downstream parser.
+                suggestion = Protocol::PromptSuggestionList(PromptSuggestion).decode_usable(candidate, unique_members: true)
+                if suggestion && suggestion.allowed?(types)
+                  suggestions << suggestion
+                  builder.raw(candidate)
+                end
+              end
+            end
+          end
+          projection = JSON.parse(WireFrame.encode(suggestions))
+          retain_unmapped_json("suggestions", filtered, projection: projection)
+          projection
+        end
+
         # Returns the typed form of a recognized session update.
         def typed
           case @session_update
@@ -343,6 +369,7 @@ module ACP
       # Parameters of a v2 session/update notification.
       struct SessionUpdateParams
         include JSON::Serializable
+        include LosslessUnmapped
 
         # Session whose state or transcript changed.
         @[JSON::Field(key: "sessionId")]
@@ -351,12 +378,37 @@ module ACP
         # Open update payload.
         property update : SessionUpdate
 
-        # Extension metadata scoped to the notification.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalPreservedMetadata)]
+        @metadata_wire : PreservedJson?
 
         # Creates a notification payload.
-        def initialize(@session_id : String, @update : SessionUpdate, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@session_id : String, @update : SessionUpdate, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
+        end
+
+        # Metadata fields that can be represented as JSON::Any.
+        def meta : Hash(String, JSON::Any)?
+          @metadata_wire.try(&.value).try(&.as_h?)
+        end
+
+        # Replaces the notification metadata.
+        def meta=(value : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
+          @metadata_wire = value.try { |fields| PreservedJson.new(JSON::Any.new(fields)) }
+          value
+        end
+
+        # Notification metadata with its exact JSON values.
+        def meta_raw : RawJson?
+          @metadata_wire.try(&.raw)
+        end
+
+        # The delivered notification params, including extension fields and exact JSON numbers.
+        def raw : RawJson
+          RawJson.new(JSON::PullParser.new(WireFrame.encode(self)))
+        end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
         end
       end
     end

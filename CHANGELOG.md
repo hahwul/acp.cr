@@ -15,6 +15,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve unknown fields and exact JSON numbers across ACP v2 session updates and their notification parameters over stdio.
 - Give Agents time to exit after stdin closes and drain stdout during shutdown before falling back to process signals.
 - Preserve exact ACP v2 permission subjects and tool-call payloads, including wide numbers, while delivering tool patches before permission callbacks.
 - Recheck cancellation grants at the transport writer. Keep historical tool, terminal, and child grants inactive during replay, and preserve current root grants when resuming without replay.

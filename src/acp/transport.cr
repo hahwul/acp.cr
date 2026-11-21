@@ -252,7 +252,7 @@ module ACP
       end
     end
 
-    # Receives JSON::Any or an exact frame for values outside its range.
+    # Receives JSON::Any or a WireFrame retained for exact decoding.
     def receive_frame : IncomingFrame?
       return if @closed
 
@@ -565,9 +565,8 @@ module ACP
       value = JSON.parse(line)
       envelope = value.as_h?
       method = envelope.try(&.["method"]?).try(&.as_s?)
-      update = envelope.try(&.["params"]?).try(&.as_h?).try(&.["update"]?).try(&.as_h?) if method == Protocol::AgentMethod::SESSION_UPDATE
-      exact_params = method.in?(Protocol::ClientMethod::MCP_MESSAGE, Protocol::ClientMethod::SESSION_REQUEST_PERMISSION) ||
-                     (update.try(&.["sessionUpdate"]?) || update.try(&.["type"]?)).try(&.as_s?).in?("config_option_update", "config_options_update", "available_commands_update", "state_update", "tool_call_update", "tool_call_content_chunk")
+      session_update = method == Protocol::AgentMethod::SESSION_UPDATE && envelope.try(&.["id"]?).try(&.raw).nil?
+      exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE, Protocol::ClientMethod::SESSION_REQUEST_PERMISSION)
       result = envelope.try(&.["result"]?).try(&.as_h?)
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
       if exact_params || choices_result

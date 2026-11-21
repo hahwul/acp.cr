@@ -229,10 +229,9 @@ module ACP
                 observe_cursor_update(update.session_id, cursor)
               end
               if suggestion_update && (types = @suggestion_content_types)
-                suggestions = update.update.typed.as?(Wire::PromptSuggestionsUpdate) || return
-                suggestions.suggestions.select! { |suggestion| suggestion.allowed?(types) }
-                suggestion_list = JSON.parse(Protocol::WireFrame.encode(suggestions.suggestions))
-                update.update.json_unmapped["suggestions"] = suggestion_list
+                payload = update.update
+                suggestion_list = payload.filter_prompt_suggestions(types) || return
+                update.update = payload
               end
             rescue ex : JSON::ParseException
               ClientLog.warn { "Failed to parse v2 session/update: #{ex.message}" }

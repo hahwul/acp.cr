@@ -187,6 +187,20 @@ module ACP
     end
 
     # :nodoc:
+    module OptionalPreservedMetadata
+      def self.from_json(pull : JSON::PullParser) : PreservedJson?
+        return PreservedMetadata.from_json(pull) if pull.kind.begin_object?
+
+        pull.skip
+        nil
+      end
+
+      def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
+        PreservedMetadata.to_json(value, json)
+      end
+    end
+
+    # :nodoc:
     module OptionalRawMetadata
       def self.from_json(pull : JSON::PullParser) : RawJson?
         return RawJson.new(pull) if pull.kind.begin_object?
