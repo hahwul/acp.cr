@@ -14,6 +14,7 @@ module ACP
 
       private class Connection < ACP::Client
         property on_v2_update : (Protocol::V2::SessionUpdateParams -> Nil)?
+        property on_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
 
         def initialization_result : Protocol::V2::InitializeResult?
           v2_initialization_result
@@ -33,21 +34,64 @@ module ACP
               deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params)
               return
             end
-            if handler = @on_v2_update
-              begin
-                handler.call(update)
-              rescue ex
-                ClientLog.error { "Error in v2 session update handler: #{ex.message}" }
-              end
-              return
-            end
+            return if deliver_update(update)
           end
           deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params)
         end
 
+        private def deliver_update(update : Wire::SessionUpdateParams) : Bool
+          return false unless handler = @on_v2_update
+
+          begin
+            handler.call(update)
+          rescue ex
+            ClientLog.error { "Error in v2 session update handler: #{ex.message}" }
+          end
+          true
+        end
+
+        private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?) : (-> AgentReply)?
+          return super unless method_name == ClientMethod::SESSION_REQUEST_PERMISSION
+
+          input = Wire::RequestPermissionParams.from_json(params.to_json)
+          input.request_id = id
+          subject = input.typed_subject
+          if command = subject.try(&.command)
+            unless Path.posix(command.cwd).absolute? || Path.windows(command.cwd).absolute?
+              return invalid_permission("The command's working directory must be absolute")
+            end
+          end
+          if input.options.empty? || input.options.map(&.option_id).uniq.size != input.options.size
+            return invalid_permission("Permission requests require a non-empty list of unique option IDs")
+          end
+          if subject && subject.tool_call
+            fields = subject.json_unmapped["toolCall"].as_h.dup
+            fields["sessionUpdate"] = JSON::Any.new("tool_call_update")
+            if observe_v2_session_update(input.session_id, fields)
+              fields.delete("sessionUpdate")
+              update = Wire::SessionUpdate.new("tool_call_update", fields)
+              deliver_update(Wire::SessionUpdateParams.new(input.session_id, update))
+            end
+          end
+          -> { handle_v2_permission(input) }
+        rescue JSON::ParseException
+          invalid_permission("Malformed ACP v2 permission request")
+        end
+
+        private def invalid_permission(message : String) : -> AgentReply
+          -> { Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, message).as(AgentReply) }
+        end
+
+        private def handle_v2_permission(input : Wire::RequestPermissionParams) : AgentReply
+          result = @on_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
+          JSON.parse(result.to_json)
+        rescue ex
+          ClientLog.error { "Error handling permission request: #{ex.message}" }
+          handler_error_reply(ex, "Permission handler error: #{ex.message}")
+        end
+
         private def route_agent_request(method_name : String, params : JSON::Any?) : JSON::Any | Protocol::JsonRpcErrorObject
-          if method_name == Protocol::V2::ClientMethod::SESSION_REQUEST_PERMISSION ||
-             method_name == Protocol::V2::ClientMethod::ELICITATION_CREATE ||
+          if method_name == Protocol::V2::ClientMethod::ELICITATION_CREATE ||
              Protocol::ExtensionMethod.extension?(method_name)
             return super
           end
@@ -65,9 +109,6 @@ module ACP
       # Client capabilities included in the handshake.
       getter capabilities : Wire::ClientCapabilities
 
-      # Handler for permission requests. The default outcome is cancelled.
-      property on_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
-
       # Handler for custom Agent-to-Client requests.
       property on_extension_request : AgentRequestHandler?
 
@@ -82,7 +123,7 @@ module ACP
       )
         @connection = Connection.new(@transport,
           client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation))
-        @connection.on_agent_request = ->handle_agent_request(String, JSON::Any)
+        @connection.on_agent_request = ->handle_extension_request(String, JSON::Any)
       end
 
       # Default timeout in seconds for requests.
@@ -91,7 +132,7 @@ module ACP
       # Timeout in seconds for prompt insertion acknowledgements.
       delegate prompt_timeout, :"prompt_timeout=", to: @connection
 
-      # Callback for v2 session updates in wire order.
+      # Callback for v2 session updates and permission tool patches in wire order.
       def on_update : (Wire::SessionUpdateParams -> Nil)?
         @connection.on_v2_update
       end
@@ -106,6 +147,9 @@ module ACP
 
       # Callback when the connection is unexpectedly lost.
       delegate on_disconnect, :"on_disconnect=", to: @connection
+
+      # Handler for permission requests. The default outcome is cancelled.
+      delegate on_request_permission, :"on_request_permission=", to: @connection
 
       # Callback for advertised elicitation modes and their URL completion.
       delegate on_create_elicitation, :"on_create_elicitation=", on_elicitation_complete, :"on_elicitation_complete=", to: @connection
@@ -291,17 +335,7 @@ module ACP
         raise ProtocolError.new("Agent returned a malformed result for '#{method}': #{ex.message}", ex)
       end
 
-      private def handle_agent_request(method : String, params : JSON::Any) : JSON::Any
-        if method == ClientMethod::SESSION_REQUEST_PERMISSION
-          input = begin
-            Wire::RequestPermissionParams.from_json(params.to_json)
-          rescue ex : JSON::ParseException
-            raise JsonRpcError.new(JsonRpcError::INVALID_PARAMS, "Malformed v2 permission request")
-          end
-          result = @on_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
-          return JSON.parse(result.to_json)
-        end
-
+      private def handle_extension_request(method : String, params : JSON::Any) : JSON::Any
         if Protocol::ExtensionMethod.extension?(method) && (handler = @on_extension_request)
           return handler.call(method, params)
         end

@@ -46,6 +46,13 @@ available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
 current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 
+In a permission callback, `typed_subject` exposes the optional tool-call patch
+or command details. Future subjects retain their raw fields. A tool-call
+patch from a permission request reaches `on_update` in receive order before
+the permission handler runs. Use the callback's `request_id` to match
+`$/cancel_request` notifications delivered through `on_notification`.
+[ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
+
 ## Automatic version negotiation
 
 Use `ACP.connect_negotiated` to try ACP v2 Preview first. If the Agent
