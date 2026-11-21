@@ -1,4 +1,5 @@
 require "./initialization"
+require "./tool_updates"
 
 module ACP
   module Protocol
@@ -89,57 +90,15 @@ module ACP
         @[JSON::Field(key: "messageId")]
         getter message_id : String
 
-        # Replacement content blocks when present.
-        @[JSON::Field(presence: true)]
-        getter content : Array(JSON::Any)?
-
-        # Whether this update includes replacement content or a clear.
-        @[JSON::Field(ignore: true)]
-        getter? content_present : Bool = false
-
-        # Top-level metadata patch.
-        @[JSON::Field(key: "_meta", presence: true)]
-        getter meta : Hash(String, JSON::Any)?
-
-        # Whether this update includes a metadata patch or a clear.
-        @[JSON::Field(ignore: true)]
-        getter? meta_present : Bool = false
+        # Replacement content and key-level metadata patches.
+        PatchFields.define({
+          content: {Array(JSON::Any), "content"},
+          meta:    {Hash(String, JSON::Any), "_meta"},
+        })
+        include MetadataPatch
 
         # Creates a message upsert. Assign nil explicitly to clear a field.
         def initialize(@session_update : String, @message_id : String)
-        end
-
-        # Sets replacement content, with nil clearing the message.
-        def content=(@content : Array(JSON::Any)?) : Array(JSON::Any)?
-          @content_present = true
-          @content
-        end
-
-        # Sets the metadata patch, with nil clearing all metadata.
-        def meta=(@meta : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
-          @meta_present = true
-          @meta
-        end
-
-        # Applies this update's top-level metadata patch to a previous snapshot.
-        def apply_metadata(previous : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
-          return previous.try(&.dup) unless @meta_present
-          return unless patch = @meta
-
-          result = previous.try(&.dup) || {} of String => JSON::Any
-          patch.each do |key, value|
-            if value.raw.nil?
-              result.delete(key)
-            else
-              result[key] = value
-            end
-          end
-          result
-        end
-
-        protected def on_to_json(json : ::JSON::Builder)
-          json.field("content", nil) if @content_present && @content.nil?
-          json.field("_meta", nil) if @meta_present && @meta.nil?
         end
       end
 
@@ -206,8 +165,8 @@ module ACP
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
-        # Returns the typed form of a recognized lifecycle update.
-        def typed : StateUpdate | MessageUpdate | MessageChunkUpdate | ReplayCompleteUpdate | Nil
+        # Returns the typed form of a recognized session update.
+        def typed : StateUpdate | MessageUpdate | MessageChunkUpdate | ReplayCompleteUpdate | ToolCallUpdate | ToolCallContentChunk | TerminalUpdate | TerminalOutputChunk | Nil
           case @session_update
           when "state_update"
             StateUpdate.from_json(to_json)
@@ -217,6 +176,14 @@ module ACP
             MessageChunkUpdate.from_json(to_json)
           when "replay_complete"
             ReplayCompleteUpdate.from_json(to_json)
+          when "tool_call_update"
+            ToolCallUpdate.from_json(to_json)
+          when "tool_call_content_chunk"
+            ToolCallContentChunk.from_json(to_json)
+          when "terminal_update"
+            TerminalUpdate.from_json(to_json)
+          when "terminal_output_chunk"
+            TerminalOutputChunk.from_json(to_json)
           end
         rescue JSON::ParseException
           nil

@@ -188,6 +188,57 @@ describe "ACP v2 Preview prompt lifecycle updates" do
   end
 end
 
+describe "ACP v2 tool call and terminal updates" do
+  it "preserves omitted and cleared tool-call fields and open content" do
+    wire = JSON.parse(%({"sessionUpdate":"tool_call_update","toolCallId":"tool","status":"paused","rawInput":null,"content":[{"type":"terminal","terminalId":"t"},{"type":"_future","details":{"key":"value"}}],"capabilities":{"cancel":{}},"_meta":{"remove":null}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::ToolCallUpdate)
+    update.tool_call_id.should eq("tool")
+    update.status.should eq("paused")
+    update.title_present?.should be_false
+    update.raw_input_present?.should be_true
+    update.raw_input.should be_nil
+    update.content.not_nil!.first.terminal_id.should eq("t")
+    update.content.not_nil!.last.json_unmapped["details"]["key"].should eq("value")
+    update.capabilities.not_nil!.cancel.should be_a(ACP::Protocol::V2::Capability)
+    update.apply_metadata({"remove" => JSON::Any.new(true), "keep" => JSON::Any.new(true)}).should eq({"keep" => JSON::Any.new(true)})
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "decodes structured file changes and patch text from a tool-call chunk" do
+    wire = JSON.parse(%({"sessionUpdate":"tool_call_content_chunk","toolCallId":"tool","content":{"type":"diff","changes":[{"operation":"move","path":"/work/new","oldPath":"/work/old"},{"operation":"_future","details":[1]}],"patch":{"format":"git_patch","text":"example"}}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+    diff = update.content.diff.not_nil!
+    diff.changes.first.old_path.should eq("/work/old")
+    diff.changes.first.path.should eq("/work/new")
+    diff.changes.last.json_unmapped["details"].should eq(JSON.parse("[1]"))
+    diff.patch.not_nil!.format.should eq("git_patch")
+    diff.patch.not_nil!.text.should eq("example")
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "decodes Agent-owned terminal snapshots and preserves signed exit codes" do
+    wire = JSON.parse(%({"sessionUpdate":"terminal_update","terminalId":"t","output":{"data":"AP9B"},"size":{"cols":80,"rows":24},"exitStatus":{"exitCode":-9},"capabilities":null}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::TerminalUpdate)
+    update.terminal_id.should eq("t")
+    update.output.not_nil!.bytes.should eq(Bytes[0, 255, 65])
+    update.size.not_nil!.cols.should eq(80_u16)
+    update.exit_status.not_nil!.exit_code.should eq(-9_i64)
+    update.command_present?.should be_false
+    update.capabilities_present?.should be_true
+    update.capabilities.should be_nil
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "decodes streamed terminal bytes and separate output metadata" do
+    wire = JSON.parse(%({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"AAE=","_meta":{"sequence":2}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::TerminalOutputChunk)
+    update.terminal_id.should eq("t")
+    update.bytes.should eq(Bytes[0, 1])
+    update.meta.not_nil!["sequence"].should eq(2)
+    JSON.parse(update.to_json).should eq(wire)
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({

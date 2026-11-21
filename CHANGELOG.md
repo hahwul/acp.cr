@@ -29,6 +29,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Decode ACP v2 tool-call and display terminal updates, structured diffs, and streamed terminal bytes.
 - Add an opt-in ACP v2 client for initialization, authentication, session and prompt operations, permission and elicitation callbacks, and capability-gated cancellation.
 - Decode ACP v2 Preview foreground state, message upserts and chunks, and replay completion while preserving open session update payloads.
 - Add ACP v2 Preview session setup, resume and replay, and prompt acknowledgement wire types.

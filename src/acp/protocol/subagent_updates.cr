@@ -1,6 +1,7 @@
 require "json"
 require "./capabilities"
 require "./content_block"
+require "./patch_fields"
 
 module ACP
   module Protocol
@@ -43,7 +44,7 @@ module ACP
 
       # Optional fields are patches. A cleared directory inherits its parent's
       # value. An empty additional directory list replaces the parent's list.
-      session_update_patch_fields({
+      PatchFields.define({
         title:                  {String, "title"},
         description:            {String, "description"},
         capabilities:           {SubagentSessionCapabilities, "capabilities"},
@@ -68,7 +69,7 @@ module ACP
 
       # Only present fields replace stored values. A null or empty content
       # list clears the message. Linked IDs refer to views in other transcripts.
-      session_update_patch_fields({
+      PatchFields.define({
         sender_session_id:    {String, "senderSessionId"},
         recipient_session_id: {String, "recipientSessionId"},
         sender_message_id:    {String, "senderMessageId"},

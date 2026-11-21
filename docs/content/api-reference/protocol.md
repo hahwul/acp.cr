@@ -192,6 +192,13 @@ and replay completion. Use `StateUpdate#idle?` and `#stop_reason` to inspect
 foreground completion. An absent background list represents unreported work.
 `MessageUpdate#apply_metadata` applies the v2 top-level metadata patch.
 
+`update.typed` also decodes tool-call and Agent-owned terminal updates and
+chunks. Tool-call diff content exposes structured file changes and optional
+patch text. Terminal snapshots and chunks expose decoded bytes through
+`bytes`. The `*_present?` methods on upserts identify fields the update
+supplies, including explicit clears.
+[ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls)
+
 ## Capabilities
 
 ### ClientCapabilities
