@@ -406,7 +406,12 @@ module ACP
 
     # Redacts incoming authentication payloads and launch descriptors.
     private def redact_raw_frame(line : String, frame : IncomingFrame) : String
-      return "[REDACTED frame]" if frame.is_a?(Protocol::WireFrame)
+      if frame.is_a?(Protocol::WireFrame)
+        if (projection = frame.representable) && (fields = projection.as_h?) && redact_response?(projection, fields)
+          return "[REDACTED response]"
+        end
+        return "[REDACTED frame]"
+      end
       return "[REDACTED frame]" unless fields = frame.as_h?
       return "[REDACTED response]" if redact_response?(frame, fields)
 
@@ -572,7 +577,8 @@ module ACP
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
-      if exact_params || versioned_result || choices_result
+      result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
+      if exact_params || versioned_result || choices_result || result_metadata
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value

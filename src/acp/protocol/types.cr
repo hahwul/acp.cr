@@ -440,6 +440,7 @@ module ACP
     # Matches the Rust SDK's `SessionConfigSelectOption`.
     struct ConfigOptionValue
       include JSON::Serializable
+      include LosslessMetadata
 
       # Unique identifier for this option value (required).
       # Maps to the Rust SDK's `SessionConfigValueId`.
@@ -452,16 +453,13 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::OptionalOptionDescription)]
       property description : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @value : String,
         @name : String,
         @description : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 

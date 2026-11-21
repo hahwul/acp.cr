@@ -276,12 +276,19 @@ IDs it tracks before creation completes. Use `on_update` to receive
 plans containing exact values outside `JSON::Any`.
 [ACP v2 Agent Plan](https://agentclientprotocol.com/protocol/v2/agent-plan)
 
-Configuration and command updates expose `typed_config_options` and
-`typed_available_commands`. Session setup responses provide the same
-accessors, and configuration change responses expose the updated options.
-Select options can be flat or grouped. Commands with `slash_command?` set
-expose their input specification, including text hints. Unknown variants
-retain their raw fields.
+Session setup, option previews, option changes, and configuration updates
+expose `typed_config_options` and `config_options_raw`. The typed view
+keeps valid options in Agent order, including unrecognized option types.
+The raw array retains the received values until the projected list is edited.
+`ConfigOption#raw` preserves the option's extension fields. Select options
+expose flat or grouped choices through `select_options`.
+[ACP v2 configuration options](https://agentclientprotocol.com/protocol/v2/session-config-options)
+
+Configuration lists, groups, and individual values retain exact JSON
+metadata. Use `ConfigOptionGroup#options_raw` or `meta_raw` to read values
+outside `JSON::Any`. Session updates and setup responses also expose
+`typed_available_commands`. Commands with `slash_command?` set expose
+their input specification, including text hints.
 
 ## Capabilities
 

@@ -225,11 +225,14 @@ module ACP
       end
 
       # :nodoc:
-      def self.field(json : String, name : String) : String?
+      def self.field(json : String, name : String, *, unique : Bool = false) : String?
         pull = JSON::PullParser.new(json)
         value = nil
-        pull.read_object do |key|
+        pull.read_object do |key, location|
           if key == name
+            if unique && value
+              raise JSON::ParseException.new("Duplicate JSON member #{name.inspect}", *location)
+            end
             value = read_raw(pull)
           else
             pull.skip

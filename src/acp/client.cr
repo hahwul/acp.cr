@@ -262,7 +262,8 @@ module ACP
       on_result : (String -> Nil)?,
       on_response : (PendingResponse -> Nil)?,
       armed : Bool,
-      retirement_order : UInt64? = nil
+      retirement_order : UInt64? = nil,
+      exact_response : Bool = false
 
     @pending = {} of String => PendingRequest
 
@@ -1271,11 +1272,12 @@ module ACP
       response_result(send_and_await_response(method, message_builder, timeout), method)
     end
 
-    # Decodes a typed response using original JSON when JSON::Any cannot hold it.
+    # Decodes from original JSON for wide results and requests that need exact values.
     protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class,
-                                     *, timeout : Float64? = @request_timeout) : T forall T
+                                     *, timeout : Float64? = @request_timeout, exact_response : Bool = false) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, timeout, check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
+      response = send_and_await_response(method, message_builder, timeout,
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: exact_response)
       decode_typed_response(method, response, type)
     end
 
@@ -1392,7 +1394,7 @@ module ACP
 
     protected def send_choice_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, validate_choice: true)
+      response = send_and_await_response(method, message_builder, validate_choice: true, exact_response: v2_wire?)
       decode_typed_response(method, response, type)
     end
 
@@ -1425,7 +1427,7 @@ module ACP
       end
 
       response = send_and_await_response(method, message_builder, on_result: observe,
-        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: v2_wire?)
       cached_result = decoded
       return cached_result if cached_result
 
@@ -1457,6 +1459,7 @@ module ACP
       on_response : (PendingResponse -> Nil)? = nil,
       check_fork_cursor : Bool = false,
       validate_choice : Bool = false,
+      exact_response : Bool = false,
       before_send : (-> Nil)? = nil,
       wire_params : Protocol::RawJson? = nil,
     ) : PendingResponse
@@ -1529,7 +1532,8 @@ module ACP
         if loading_session && @suggestion_content_types
           @suggestion_loads[id_str] = loading_session
         end
-        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result, on_response, !arm_at_write)
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor,
+          on_result, on_response, !arm_at_write, exact_response: exact_response)
         if initialize
           @initialize_request = id_str
           @v2_initialize_armed = false if v2_wire?
@@ -2052,6 +2056,7 @@ module ACP
         end
         @suggestion_loads.delete(id_str)
         if request = @pending.delete(id_str)
+          response = wire_frame if request.exact_response && wire_frame && !msg["error"]?
           if (grant = request.fork_cursor) && msg["error"]?.try(&.as_h?).try(&.["code"]?).try(&.as_i64?) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
           end

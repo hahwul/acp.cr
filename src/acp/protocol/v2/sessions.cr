@@ -178,24 +178,22 @@ module ACP
       # Optional configuration and slash commands returned during session setup.
       abstract struct SessionSetupResult
         include JSON::Serializable
-        include ConfigOptionList
+        include LosslessConfigOptionList
         include AvailableCommandList
+        include LosslessMetadata
 
-        # Agent configuration, including open option variants.
-        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalOptionList)]
-        property config_options : Array(JSON::Any) = [] of JSON::Any
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::ConfigOptionArray)]
+        @config_options_wire : PreservedJson = PreservedJson.new(JSON::Any.new([] of JSON::Any))
 
         # Available slash commands, including open command variants.
         @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::V2::AvailableCommandsJson)]
         property available_commands : Array(JSON::Any) = [] of JSON::Any
-
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
       end
 
       # A newly created v2 session and its initial configuration.
       struct SessionNewResult < SessionSetupResult
+        ConfigOptionArray.guard_envelope
+
         # Unique ID assigned by the Agent.
         @[JSON::Field(key: "sessionId")]
         property session_id : String
@@ -203,21 +201,27 @@ module ACP
         # Creates a new-session result.
         def initialize(
           @session_id : String,
-          @config_options : Array(JSON::Any) = [] of JSON::Any,
+          config_options : Array(JSON::Any) = [] of JSON::Any,
           @available_commands : Array(JSON::Any) = [] of JSON::Any,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          self.config_options = config_options
+          self.meta = meta
         end
       end
 
       # Configuration returned when resuming a v2 session.
       struct SessionResumeResult < SessionSetupResult
+        ConfigOptionArray.guard_envelope
+
         # Creates a resume result.
         def initialize(
-          @config_options : Array(JSON::Any) = [] of JSON::Any,
+          config_options : Array(JSON::Any) = [] of JSON::Any,
           @available_commands : Array(JSON::Any) = [] of JSON::Any,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          self.config_options = config_options
+          self.meta = meta
         end
       end
 
@@ -232,12 +236,16 @@ module ACP
 
       # Advisory options and commands for a proposed v2 session.
       struct SessionOptionsResult < SessionSetupResult
+        ConfigOptionArray.guard_envelope
+
         # Creates an options and commands preview.
         def initialize(
-          @config_options : Array(JSON::Any) = [] of JSON::Any,
+          config_options : Array(JSON::Any) = [] of JSON::Any,
           @available_commands : Array(JSON::Any) = [] of JSON::Any,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          self.config_options = config_options
+          self.meta = meta
         end
       end
 
@@ -365,18 +373,18 @@ module ACP
       # The complete configuration after a successful option change.
       struct SessionSetConfigOptionResult
         include JSON::Serializable
-        include ConfigOptionList
+        include LosslessConfigOptionList
+        include LosslessMetadata
 
-        # All current configuration options, including extension variants.
-        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
-        property config_options : Array(JSON::Any)
+        ConfigOptionArray.guard_envelope
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::RequiredConfigOptionArray)]
+        @config_options_wire : PreservedJson
 
         # Creates a result containing all current configuration options.
-        def initialize(@config_options : Array(JSON::Any), @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(config_options : Array(JSON::Any), meta : Hash(String, JSON::Any)? = nil)
+          @config_options_wire = PreservedJson.new(JSON::Any.new(config_options))
+          self.meta = meta
         end
       end
 

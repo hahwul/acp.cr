@@ -5,42 +5,49 @@ module ACP
   module Protocol
     module V2
       # :nodoc:
-      module ConfigGroupValues
-        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
-          values = [] of JSON::Any
+      module ConfigOptionArray
+        # Validates the option-list field before JSON::Serializable can collapse repeated members.
+        macro guard_envelope
+          def self.new(pull : JSON::PullParser) : self
+            wire = ::ACP::Protocol::WireFrame.read_raw(pull)
+            ::ACP::Protocol::WireFrame.field(wire, "configOptions", unique: true)
+            previous_def(JSON::PullParser.new(wire))
+          end
+        end
+
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          if pull.kind.begin_array?
+            wire = RawJson.new(pull)
+            PreservedJson.new(wire, project_array_objects: true, object_entries_only: true)
+          else
+            WireFrame.read_raw(pull)
+            PreservedJson.new(JSON::Any.new([] of JSON::Any))
+          end
+        end
+
+        def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
+          value.to_json(json)
+        end
+      end
+
+      # :nodoc:
+      module RequiredConfigOptionArray
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
           unless pull.kind.begin_array?
-            pull.skip
-            return values
+            raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
           end
-
-          pull.read_array do
-            raw = WireFrame.read_raw(pull)
-            if value = representable_value(raw)
-              values << value
-            end
-          end
-          values
+          ConfigOptionArray.from_json(pull)
         end
 
-        def self.to_json(values : Array(JSON::Any), json : JSON::Builder) : Nil
-          values.to_json(json)
-        end
-
-        private def self.representable_value(raw : String) : JSON::Any?
-          value = JSON.parse(raw)
-          value if value.as_h?
-        rescue JSON::Error
-          begin
-            JSON.parse(WireFrame.encode(Protocol::ConfigOptionValue.from_json(raw)))
-          rescue JSON::Error
-            nil
-          end
+        def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
+          value.to_json(json)
         end
       end
 
       # A named group of selectable values in an ACP v2 configuration option.
       struct ConfigOptionGroup
         include JSON::Serializable
+        include LosslessMetadata
 
         # Identifier for the group within the selector.
         @[JSON::Field(key: "groupId")]
@@ -49,21 +56,32 @@ module ACP
         # User-visible group label.
         getter name : String
 
-        # Wire objects in the group's option list.
-        @[JSON::Field(converter: ::ACP::Protocol::V2::ConfigGroupValues)]
-        getter options : Array(JSON::Any)
-
-        # Extension metadata scoped to the group.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "options", converter: ::ACP::Protocol::V2::ConfigOptionArray)]
+        @options_wire : PreservedJson
 
         # Creates a group with its selectable values.
-        def initialize(@group_id : String, @name : String, @options : Array(JSON::Any), @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@group_id : String, @name : String, options : Array(JSON::Any), meta : Hash(String, JSON::Any)? = nil)
+          @options_wire = PreservedJson.new(JSON::Any.new(options))
+          self.meta = meta
+        end
+
+        # Representable fields in this group's option list.
+        def options : Array(JSON::Any)
+          @options_wire.value.not_nil!.as_a
+        end
+
+        # Exact option values as advertised by the Agent.
+        def options_raw : RawJson
+          @options_wire.raw
         end
 
         # Returns valid selectable values in this group.
         def values : Array(Protocol::ConfigOptionValue)
-          @options.compact_map { |option| Protocol::ConfigOptionValue.from_json(option.to_json) rescue nil }
+          options_raw.elements?.not_nil!.compact_map do |value|
+            Protocol::ConfigOptionValue.from_json(value.json) if WireFrame.unique_members?(value.json, recursive: false)
+          rescue JSON::Error
+            nil
+          end
         end
       end
 
@@ -85,6 +103,22 @@ module ACP
 
         # Creates an option with its variant-specific wire fields.
         def initialize(@type : String, @config_id : String, @name : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+        end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
+        # The original option fields, including exact extension data.
+        def raw : RawJson
+          RawJson.new(JSON::PullParser.new(WireFrame.encode(self)))
+        end
+
+        # Exact extension metadata scoped to this option.
+        def meta_raw : RawJson?
+          if metadata = exact_unmapped_json("_meta")
+            RawJson.new(JSON::PullParser.new(metadata)) if metadata.starts_with?('{')
+          end
         end
 
         # User-visible description when supplied.
@@ -114,23 +148,83 @@ module ACP
 
         # Returns the selectable values as a flat list or a list of named groups.
         def select_options : Array(Protocol::ConfigOptionValue) | Array(ConfigOptionGroup) | Nil
-          return unless @type == "select"
+          return unless @type == "select" && (wire = exact_unmapped_json("options"))
 
-          if raw = raw_field("options")
-            list = RawJson.new(JSON::PullParser.new(raw))
-          elsif representable = @json_unmapped["options"]?
-            list = RawJson.new(representable)
-          end
-          options = list.try(&.elements?)
-          return unless options && (first = options.first?) && first.object?
+          options = RawJson.new(JSON::PullParser.new(wire)).elements?
+          return unless options && !options.empty?
 
-          if first.field("groupId")
-            options.map { |option| ConfigOptionGroup.from_json(option.json) }
+          if options.any? { |entry| entry.field("groupId").try(&.as_s?) && entry.field("options").try(&.array?) }
+            grouped_select_options(options)
           else
-            options.map { |option| Protocol::ConfigOptionValue.from_json(option.json) }
+            flat_select_options(options)
+          end
+        end
+
+        # Flattens selectable values across groups.
+        def selectable_values : Array(Protocol::ConfigOptionValue)?
+          case choices = select_options
+          when Array(Protocol::ConfigOptionValue) then choices
+          when Array(ConfigOptionGroup)           then choices.flat_map(&.values)
+          end
+        end
+
+        # Decodes a usable configuration snapshot in the Agent's order.
+        # :nodoc:
+        def self.decode_list(raw : RawJson?) : Array(ConfigOption)
+          entries = raw.try(&.elements?) || return [] of ConfigOption
+          ids = entries.compact_map { |entry| entry.field("configId").try(&.as_s?) }.tally
+          entries.compact_map do |entry|
+            option = decode_usable(entry)
+            option if option && ids[option.config_id] == 1
+          end
+        end
+
+        # Reads a known valid option or an unrecognized option envelope.
+        # :nodoc:
+        def self.decode_usable(raw : RawJson) : self?
+          return unless WireFrame.unique_members?(raw.json, recursive: false)
+
+          option = from_json(raw.json)
+          case option.type
+          when "select"
+            if (selected = option.selected_value) && option.selectable_values.try(&.any? { |value| value.value == selected })
+              option
+            end
+          when "boolean" then option unless option.boolean_value.nil?
+          else                option
           end
         rescue JSON::Error
           nil
+        end
+
+        private def flat_select_options(options : Array(RawJson)) : Array(Protocol::ConfigOptionValue)?
+          values = options.map do |option|
+            return unless WireFrame.unique_members?(option.json, recursive: false)
+            Protocol::ConfigOptionValue.from_json(option.json)
+          end
+          values if unique_values?(values)
+        rescue JSON::Error
+          nil
+        end
+
+        private def grouped_select_options(options : Array(RawJson)) : Array(ConfigOptionGroup)?
+          values = [] of Protocol::ConfigOptionValue
+          groups = options.map do |option|
+            return unless WireFrame.unique_members?(option.json, recursive: false)
+
+            group = ConfigOptionGroup.from_json(option.json)
+            group_values = group.values
+            return if group_values.empty?
+            values.concat(group_values)
+            group
+          end
+          groups if groups.map(&.group_id).uniq.size == groups.size && unique_values?(values)
+        rescue JSON::Error
+          nil
+        end
+
+        private def unique_values?(values : Array(Protocol::ConfigOptionValue)) : Bool
+          values.map(&.value).uniq.size == values.size
         end
       end
 
@@ -210,20 +304,37 @@ module ACP
         end
       end
 
-      # Typed access to configuration options while retaining their raw values.
+      # Typed access to configuration options.
       module ConfigOptionList
         # Parses usable configuration entries, preserving future option types.
         def typed_config_options : Array(ConfigOption)
-          config_options.compact_map do |raw|
-            option = ConfigOption.from_json(WireFrame.encode(raw))
-            case option.type
-            when "select"  then option if option.selected_value && option.select_options
-            when "boolean" then option unless option.boolean_value.nil?
-            else                option
-            end
-          rescue JSON::Error
-            nil
-          end
+          ConfigOption.decode_list(config_options_raw)
+        end
+
+        # The configuration option objects as JSON.
+        def config_options_raw : RawJson
+          RawJson.new(JSON::PullParser.new(WireFrame.encode(config_options)))
+        end
+      end
+
+      # :nodoc:
+      module LosslessConfigOptionList
+        include ConfigOptionList
+
+        # Representable fields on the advertised configuration options.
+        def config_options : Array(JSON::Any)
+          @config_options_wire.value.not_nil!.as_a
+        end
+
+        # Replaces the full advertised list.
+        def config_options=(options : Array(JSON::Any)) : Array(JSON::Any)
+          @config_options_wire = PreservedJson.new(JSON::Any.new(options))
+          options
+        end
+
+        # The configuration option objects with their exact JSON values.
+        def config_options_raw : RawJson
+          @config_options_wire.raw
         end
       end
 
@@ -338,22 +449,22 @@ module ACP
       # Replaces the configuration options advertised for a session.
       struct ConfigOptionUpdate
         include JSON::Serializable
-        include ConfigOptionList
+        include LosslessConfigOptionList
+        include LosslessMetadata
+
+        ConfigOptionArray.guard_envelope
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "config_option_update"
 
-        # Complete list of the session's configuration options.
-        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
-        property config_options : Array(JSON::Any)
-
-        # Extension metadata scoped to the update.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::RequiredConfigOptionArray)]
+        @config_options_wire : PreservedJson
 
         # Creates an update with replacement configuration options.
-        def initialize(@config_options : Array(JSON::Any), @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(config_options : Array(JSON::Any), meta : Hash(String, JSON::Any)? = nil)
+          @config_options_wire = PreservedJson.new(JSON::Any.new(config_options))
+          self.meta = meta
         end
       end
     end
