@@ -4261,3 +4261,285 @@ describe "ACP v2 exact upsert metadata" do
     end
   end
 end
+
+describe "ACP v2 identified plan updates" do
+  it "skips invalid checklist entries while retaining valid open statuses in order" do
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[{"content":"first","priority":"high","status":"cancelled"},false,{"content":"missing status","priority":"low"},{"content":"wrong type","priority":1,"status":"pending"},{"content":"null priority","priority":null,"status":"pending"},{"content":"null status","priority":"low","status":null},{"content":"last","priority":"future","status":"_queued"}]}}))
+    plan = update.typed.as(ACP::Protocol::V2::PlanUpdate).plan.typed.as(ACP::Protocol::PlanItems)
+
+    plan.entries.map(&.content).should eq(["first", "last"])
+    plan.entries.map(&.priority).should eq(["high", "future"])
+    plan.entries.map(&.status).should eq(["cancelled", "_queued"])
+  end
+
+  it "keeps open replacements with wide fields and rejects malformed known plans" do
+    wire = %({"sessionUpdate":"plan_update","plan":{"type":"future","planId":"p","nodes":[18446744073709551615],"precision":0.1234567890123456789}})
+    plan = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::PlanUpdate).plan
+    plan.plan_id.should eq("p")
+    plan.typed.should be_nil
+    plan.raw.field("nodes").not_nil!.elements?.not_nil!.first.json.should eq(UInt64::MAX.to_s)
+    plan.raw.field("precision").not_nil!.json.should eq("0.1234567890123456789")
+    [
+      %({"type":"items","planId":"p"}),
+      %({"type":"items","planId":"p","entries":{}}),
+      %({"type":"markdown","planId":"p","content":false}),
+      %({"type":"items","type":"future","planId":"p"}),
+      %({"type":"future","planId":"first","planId":"last"}),
+    ].each do |plan|
+      update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_update","plan":#{plan}}))
+      update.typed.should be_nil
+    end
+  end
+
+  it "preserves plan and entry metadata and exposes only absolute Markdown paths" do
+    meta = %({"example.test/wide":18446744073709551615,"example.test/precision":0.1234567890123456789})
+    plan = %({"type":"items","planId":"p","entries":[{"content":"step","priority":"medium","status":"pending","_meta":#{meta}}],"_meta":#{meta}})
+    wire = %({"sessionUpdate":"plan_update","plan":#{plan},"_meta":#{meta}})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::PlanUpdate)
+    update.meta_raw.not_nil!.json.should eq(meta)
+    update.plan.meta_raw.not_nil!.json.should eq(meta)
+    items = update.plan.typed.as(ACP::Protocol::PlanItems)
+    items.meta_raw.not_nil!.json.should eq(meta)
+    items.entries.first.meta_raw.not_nil!.json.should eq(meta)
+
+    [
+      {"/work/PLAN.md".to_json, "/work/PLAN.md"},
+      {"C:/work/PLAN.md".to_json, "C:/work/PLAN.md"},
+      {"PLAN.md".to_json, nil},
+      {"false", nil},
+    ].each do |path_json, expected|
+      wire = %({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"p","content":"# New plan","path":#{path_json}}})
+      markdown = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::PlanUpdate).plan.typed.as(ACP::Protocol::PlanMarkdown)
+      markdown.content.should eq("# New plan")
+      markdown.path.should eq(expected)
+    end
+
+    removal = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_removed","planId":"p","_meta":#{meta}})).typed.as(ACP::Protocol::PlanRemovedUpdate)
+    removal.meta_raw.not_nil!.json.should eq(meta)
+  end
+
+  it "ignores unknown removals and tracks repeated replacements by session before callbacks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(12)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "a")
+
+      invalid = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":null}})
+      items = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}})
+      open_plan = %({"sessionUpdate":"plan_update","plan":{"type":"_graph","planId":"p","nodes":[18446744073709551615]}})
+      removal = %({"sessionUpdate":"plan_removed","planId":"p"})
+      ambiguous = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]},"plan":{"type":"future","planId":"p"}})
+      [{"a", removal}, {"a", invalid}, {"a", ambiguous}, {"a", removal}, {"a", items},
+       {"b", items}, {"b", removal}, {"a", open_plan}, {"a", removal}, {"a", removal},
+       {"a", %({"sessionUpdate":"_barrier"})}].each do |sid, update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{sid.to_json},"update":#{update}}})
+      end
+
+      delivered = [] of ACP::Protocol::V2::SessionUpdateParams
+      loop do
+        note = next_exact_session_update(observed)
+        break if note.update.session_update == "_barrier"
+        delivered << note
+      end
+      delivered.map { |note| {note.session_id, note.update.session_update} }.should eq([
+        {"a", "plan_update"}, {"a", "plan_update"}, {"a", "plan_removed"},
+      ])
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "filters the raw callback and drops remembered plans when a session is closed" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/close"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    observed = [] of String
+    client.on_notification = ->(method : String, params : JSON::Any?) do
+      observed << params.not_nil!["update"]["sessionUpdate"].as_s if method == "session/update"
+      nil
+    end
+    removal = %({"sessionUpdate":"plan_removed","planId":"p"})
+    transport.update("s", removal)
+    transport.update("s", %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}}))
+    client.session_close("s")
+    transport.update("s", %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}}))
+    transport.update("s", removal)
+    choice_state_barrier(client, transport)
+    observed.should eq(["plan_update"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps replayed plans when an older close reply arrives before the new resume reply" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    observed = [] of String
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed << note.update.session_update
+      nil
+    end
+
+    closed = Channel(Nil).new(1)
+    spawn do
+      client.session_close("s")
+      closed.send(nil)
+    end
+    close = next_answer(transport)
+    close["method"].as_s.should eq("session/close")
+
+    resumed = Channel(Nil).new(1)
+    spawn do
+      params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      client.session_resume(params)
+      resumed.send(nil)
+    end
+    resume_call = next_answer(transport)
+    resume_call["method"].as_s.should eq("session/resume")
+
+    transport.update("s", %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"replayed","entries":[]}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    transport.update("s", %({"sessionUpdate":"replay_complete"}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume_call["id"]},"result":{}}))
+    transport.update("s", %({"sessionUpdate":"plan_removed","planId":"replayed"}))
+    choice_state_barrier(client, transport)
+
+    observed.should eq(["plan_update", "replay_complete", "plan_removed"])
+    select
+    when closed.receive
+    when timeout(2.seconds)
+      fail "close result was not delivered"
+    end
+    select
+    when resumed.receive
+    when timeout(2.seconds)
+      fail "resume result was not delivered"
+    end
+  ensure
+    client.try(&.close)
+  end
+
+  it "ignores raw-only removals for plans that cannot be delivered as JSON::Any" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(String).new(6)
+      client.on_notification = ->(method : String, params : JSON::Any?) do
+        observed.send(params.not_nil!["update"]["sessionUpdate"].as_s) if method == "session/update"
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      [
+        %({"sessionUpdate":"plan_update","plan":{"type":"future","planId":"wide","number":18446744073709551615}}),
+        %({"sessionUpdate":"plan_removed","planId":"wide"}),
+        %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"known","entries":[]}}),
+        %({"sessionUpdate":"plan_removed","planId":"known"}),
+        %({"sessionUpdate":"_barrier"}),
+      ].each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      delivered = [] of String
+      loop do
+        select
+        when kind = observed.receive
+          break if kind == "_barrier"
+          delivered << kind
+        when timeout(2.seconds)
+          fail "plan notifications did not reach the generic handler"
+        end
+      end
+      delivered.should eq(["plan_update", "plan_removed"])
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "adopts early plans only for the session confirmed by the setup response" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"confirmed"})
+    plan = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}})
+    removal = %({"sessionUpdate":"plan_removed","planId":"p"})
+    transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      if method == "session/new"
+        transport.update("confirmed", plan)
+        transport.update("unconfirmed", plan)
+      end
+      nil
+    end
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+
+    observed = [] of Tuple(String, String)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed << {note.session_id, note.update.session_update}
+      nil
+    end
+
+    client.session_new("/work")
+    transport.update("confirmed", removal)
+    transport.update("unconfirmed", removal)
+    choice_state_barrier(client, transport)
+    observed.should eq([
+      {"confirmed", "plan_update"}, {"unconfirmed", "plan_update"}, {"confirmed", "plan_removed"},
+    ])
+  ensure
+    client.try(&.close)
+  end
+
+  it "bounds provisional plan IDs and keeps active sessions unrestricted" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    large_id = "p" * (64 * 1024)
+    large_plan = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":#{large_id.to_json},"entries":[]}})
+    transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      if method == "session/new"
+        transport.update("s", large_plan)
+        66.times do |index|
+          plan = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p#{index}","entries":[]}})
+          transport.update("s", plan)
+        end
+      end
+      nil
+    end
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+
+    seen = [] of String
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      if plan = note.update.typed.as?(ACP::Protocol::V2::PlanUpdate)
+        seen << plan.plan.plan_id
+      end
+      nil
+    end
+
+    client.session_new("/work")
+    seen.should eq(Array.new(64) { |index| "p#{index}" })
+    transport.update("s", large_plan)
+    choice_state_barrier(client, transport)
+    seen.last.should eq(large_id)
+  ensure
+    client.try(&.close)
+  end
+end

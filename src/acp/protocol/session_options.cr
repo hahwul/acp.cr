@@ -9,6 +9,23 @@ module ACP
     end
 
     # :nodoc:
+    module OptionalAbsolutePath
+      def self.from_json(pull : JSON::PullParser) : String?
+        if pull.kind.string?
+          value = pull.read_string
+          return value if Protocol.absolute_path?(value)
+        else
+          pull.skip
+        end
+        nil
+      end
+
+      def self.to_json(value : String, json : JSON::Builder) : Nil
+        json.string(value)
+      end
+    end
+
+    # :nodoc:
     def self.absolute_workspace?(cwd : String, directories : Array(String)?) : Bool
       absolute_path?(cwd) && (directories.nil? || directories.all? { |path| absolute_path?(path) })
     end

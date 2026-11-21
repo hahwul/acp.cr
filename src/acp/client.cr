@@ -271,6 +271,8 @@ module ACP
     @session_lifecycle_order = 0_u64
     @late_session_retirements = {} of String => LateSessionRetirement
     private MAX_LATE_SESSION_RETIREMENTS = 128
+    private MAX_EARLY_PLAN_IDS           =  64
+    private MAX_EARLY_PLAN_ID_SIZE       = 64 * 1024
 
     # V1 session IDs learned through successful setup, guarded by @pending_mutex.
     @known_session_ids = Set(String).new
@@ -303,9 +305,9 @@ module ACP
     @v2_contract_unknown = Atomic(Bool).new(false)
     @auth_status_supported = false
 
-    # IDs announced through plan_update, grouped by session. Guarded by
-    # @pending_mutex so forgetting a session or disconnecting can clear them.
-    @plan_ids = {} of String => Set(String)
+    # Plan IDs and their attachment order, grouped by session. Guarded by @pending_mutex.
+    @plan_ids = {} of String => Hash(String, UInt64)
+    @early_plan_sessions = Set(String).new
 
     # Optional child sessions and their setup lifecycle. Guarded by @pending_mutex.
     @subagent_registry : SubagentRegistry?
@@ -1028,6 +1030,7 @@ module ACP
     def forget_session(session_id : String) : Bool
       @pending_mutex.synchronize do
         @plan_ids.delete(session_id)
+        @early_plan_sessions.delete(session_id)
         @session_choices.drop(session_id)
         @subagent_registry.try(&.drop_runtime(session_id))
         forget_active_session(session_id)
@@ -1582,6 +1585,7 @@ module ACP
           @initialize_request = nil if @initialize_request == id_str
           @suggestion_loads.delete(id_str)
           @subagent_registry.try(&.request_finished(id_str))
+          settle_early_plan_sessions if creating_session
           @cursor_registry.try(&.finish_replay(id_str))
         end
         raise ex
@@ -1773,6 +1777,7 @@ module ACP
         @session_choices.clear
         @suggestion_loads.clear
         @plan_ids.clear
+        @early_plan_sessions.clear
         @subagent_registry.try(&.clear)
         @cursor_registry.try(&.clear)
       end
@@ -1820,6 +1825,7 @@ module ACP
               @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
             end
             @subagent_registry.try(&.request_timed_out(id))
+            settle_early_plan_sessions if pending.creating_session
             initialization = v2_wire? && @initialize_request == id
             @v2_contract_unknown.set(true) if initialization
           end
@@ -2066,6 +2072,7 @@ module ACP
               observer.call(result)
             end
           end
+          settle_early_plan_sessions if request.creating_session
           if (session_id = request.closing_session) && closes_session?(msg, request.close_on_missing)
             if (closed_sessions = apply_retirement(session_id, request.retirement_order)) && !v2_wire?
               cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
@@ -2126,13 +2133,15 @@ module ACP
 
     private def apply_retirement(session_id : String, order : UInt64?) : Array(String)?
       unless retirement_applies?(session_id, order)
-        @subagent_registry.try(&.discard_old_entity_grants(session_id, order.not_nil!))
+        registry = @subagent_registry.not_nil!
+        registry.discard_old_entity_grants(session_id, order.not_nil!)
+        registry.runtime_session_ids(session_id).each { |sid| retire_plan_ids(sid, order) }
         return
       end
 
       closed_sessions = @subagent_registry.try(&.close_runtime(session_id, order)) || [session_id]
       closed_sessions.each do |sid|
-        @plan_ids.delete(sid)
+        retire_plan_ids(sid, order)
         @session_choices.drop(sid)
       end
       forget_active_session(session_id)
@@ -2617,13 +2626,17 @@ module ACP
     end
 
     private def deliver_raw_session_update(params : JSON::Any?, params_json : String?) : Nil
-      return unless @on_notification
+      return unless @on_notification && raw_session_update_representable?(params_json)
 
-      # Exact parameters can also have a representable JSON::Any view.
-      JSON.parse(params_json) if params_json
       deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+    end
+
+    # A wide routing projection cannot be delivered as application data.
+    private def raw_session_update_representable?(params_json : String?) : Bool
+      JSON.parse(params_json) if params_json
+      true
     rescue JSON::ParseException
-      # A wide routing projection cannot be delivered as application data.
+      false
     end
 
     # Handles a `session/update` notification by parsing it and
@@ -2716,7 +2729,7 @@ module ACP
         update_params.before_load_response = @session_choices.loading?(update_params.session_id)
       end
       if plan_operation && @client_capabilities.plan
-        return unless track_plan_operation(update_params)
+        return unless track_plan_operation(update_params.session_id, update_params.update)
       end
       if registry = @subagent_registry
         update_params = observe_subagent_update(registry, update_params) || return
@@ -2823,22 +2836,73 @@ module ACP
     end
 
     # Tracks announced IDs even for raw handlers so an unknown removal has no effect.
-    private def track_plan_operation(params : Protocol::SessionUpdateParams) : Bool
+    protected def track_plan_operation(session_id : String, update : Protocol::SessionUpdate | Protocol::V2::PlanUpdate) : Bool
       @pending_mutex.synchronize do
         return false if @disconnected
 
-        case update = params.update
-        when Protocol::IdentifiedPlanUpdate
-          ids = @plan_ids[params.session_id] ||= Set(String).new
-          ids.add(update.plan.plan_id)
+        plan_id = update.is_a?(Protocol::V2::PlanUpdate) ? update.plan.plan_id : nil
+        order = v2_wire? ? plan_update_order(session_id, plan_id) : 0_u64
+        return false unless order
+
+        case update
+        when Protocol::IdentifiedPlanUpdate, Protocol::V2::PlanUpdate
+          ids = @plan_ids[session_id] ||= {} of String => UInt64
+          ids[update.plan.plan_id] = order
         when Protocol::PlanRemovedUpdate
-          return false unless ids = @plan_ids[params.session_id]?
+          return false unless ids = @plan_ids[session_id]?
           return false unless ids.delete(update.plan_id)
 
-          @plan_ids.delete(params.session_id) if ids.empty?
+          if ids.empty?
+            @plan_ids.delete(session_id)
+            @early_plan_sessions.delete(session_id)
+          end
         end
         true
       end
+    end
+
+    # Tracks only sessions whose update scope is attached, attaching, or being allocated.
+    private def plan_update_order(session_id : String, plan_id : String?) : UInt64?
+      registry = @subagent_registry.not_nil!
+      if order = registry.plan_update_order(session_id)
+        return order
+      end
+      return unless registry.accepts_early_plan_updates?(session_id)
+      return 0_u64 if @early_plan_sessions.includes?(session_id) && (!plan_id || @plan_ids[session_id].has_key?(plan_id))
+      return unless plan_id && session_id.bytesize.to_i64 + plan_id.bytesize <= MAX_EARLY_PLAN_ID_SIZE
+      return unless @early_plan_sessions.sum { |sid| @plan_ids[sid].size } < MAX_EARLY_PLAN_IDS
+
+      @early_plan_sessions.add(session_id)
+      0_u64
+    end
+
+    private def settle_early_plan_sessions : Nil
+      return if @early_plan_sessions.empty?
+
+      registry = @subagent_registry.not_nil!
+      creating = registry.creating_session?
+      @early_plan_sessions.reject! do |sid|
+        if order = registry.plan_update_order(sid)
+          @plan_ids[sid]?.try(&.transform_values! { order })
+          true
+        elsif !creating
+          @plan_ids.delete(sid)
+          true
+        else
+          false
+        end
+      end
+    end
+
+    # Removes plans from the retired attachment while keeping any newer replay.
+    private def retire_plan_ids(session_id : String, order : UInt64?) : Nil
+      if order && (ids = @plan_ids[session_id]?)
+        ids.reject! { |_, updated| updated < order }
+        @plan_ids.delete(session_id) if ids.empty?
+      else
+        @plan_ids.delete(session_id)
+      end
+      @early_plan_sessions.delete(session_id)
     end
 
     # Delivers `elicitation/complete` to `on_elicitation_complete`, or to
