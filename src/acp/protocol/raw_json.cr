@@ -142,7 +142,10 @@ module ACP
       end
 
       def initialize(pull : JSON::PullParser, *, project_object_members : Bool = false, project_array_objects : Bool = false)
-        source = RawJson.new(pull)
+        initialize(RawJson.new(pull), project_object_members: project_object_members, project_array_objects: project_array_objects)
+      end
+
+      def initialize(source : RawJson, *, project_object_members : Bool = false, project_array_objects : Bool = false)
         @source = source
         if project_array_objects && (elements = source.elements?)
           @value = project_blocks(elements)

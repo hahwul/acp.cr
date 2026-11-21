@@ -142,7 +142,7 @@ module ACP
 
         # Parses a skill reference from exact JSON.
         def self.from_content_block(block : RawJson) : self?
-          return unless block.field("type").try(&.as_s?) == "skill"
+          return unless block.field("type").try(&.as_s?) == "skill" && WireFrame.unique_members?(block.json)
 
           decode_reference(block.json)
         rescue JSON::Error

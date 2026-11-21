@@ -127,10 +127,24 @@ existing `size` accessor retains the signed view used by ACP v1. Pass
 The v2 client sends exact prompt content with `StdioTransport`. Custom
 transports can override `send_wire` to support exact prompt frames.
 
-V2 full messages and session-directed messages expose `content_blocks` for
-standard typed content and `content_raw` for the complete replacement.
-Message chunks expose `content_raw` as well as `to_content_chunk`. The
-mutable `JSON::Any` views expose representable fields. Updating or
+Use `ContentBlock.from_v2_json` to decode ACP v2 display content directly.
+Custom and future types yield an `UnknownContentBlock`. Its `type`,
+`custom?`, and `raw` accessors expose the discriminator, the extension
+namespace check, and the complete JSON payload. Standard types use their
+typed decoders. User-message skill references use the dedicated
+`skill_reference` and `skill_references` methods.
+[ACP v2 content types](https://agentclientprotocol.com/protocol/v2/content#content-types)
+
+V2 full messages and session-directed messages expose `content_blocks`
+for display blocks and `content_raw` for the complete replacement.
+Message and compaction summary chunks provide `to_content_chunk` with
+exact `meta_raw`. Read a serialized v2 wrapper with
+`ContentChunk.from_v2_json`. Message chunks also expose `content_raw`.
+Tool results and summary chunks provide `content_block`. Compaction
+updates expose `typed_summary` and `summary_raw`. List helpers skip
+malformed blocks and keep the usable blocks in wire order.
+
+The mutable `JSON::Any` views expose representable fields. Updating or
 reordering existing blocks preserves their other exact fields. A replacement
 block uses the supplied `JSON::Any` value.
 

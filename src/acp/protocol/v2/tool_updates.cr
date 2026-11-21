@@ -123,12 +123,12 @@ module ACP
           nil
         end
 
-        # Standard content block for a recognized content item.
+        # Open ACP v2 display block for a content item.
         def content_block : Protocol::ContentBlock?
           return unless @content_type == "content" && (content = exact_unmapped_json("content"))
 
-          Protocol::ContentBlock.from_json(content)
-        rescue JSON::ParseException
+          Protocol::ContentBlock.from_v2_json(content)
+        rescue JSON::Error
           nil
         end
 

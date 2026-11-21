@@ -4003,3 +4003,138 @@ describe "ACP v2 resource link icons" do
     blocks.last.as(ACP::Protocol::TextContentBlock).text.should eq("next")
   end
 end
+
+describe "ACP v2 open content blocks" do
+  it "retains unrecognized blocks between standard blocks in a full message" do
+    custom = %({"type":"_example.test/chart","series":[18446744073709551615,0.1234567890123456789],"empty":null})
+    future = %({"type":"future_content","opaque":{"nested":true}})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"agent_message","messageId":"m","content":[{"type":"text","text":"before"},#{custom},{"type":"image","mimeType":"image/png"},#{future},{"type":"text","text":"after"}]}))
+    blocks = update.typed.as(ACP::Protocol::V2::MessageUpdate).content_blocks.not_nil!
+    blocks.map(&.type).should eq(["text", "_example.test/chart", "future_content", "text"])
+    extension = blocks[1].as(ACP::Protocol::UnknownContentBlock)
+    extension.custom?.should be_true
+    extension.raw.json.should eq(custom)
+    extension.to_json.should eq(custom)
+    reserved = blocks[2].as(ACP::Protocol::UnknownContentBlock)
+    reserved.custom?.should be_false
+    ACP::Protocol::UnknownContentBlock.from_json(future).raw.json.should eq(future)
+  end
+
+  it "converts an open message chunk and tool result without narrowing their payload" do
+    block = %({"type":"_example.test/chart","value":18446744073709551615})
+    meta = %({"example.test/large":18446744073709551615,"example.test/precise":0.1234567890123456789})
+    message = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"agent_message_chunk","messageId":"m","content":#{block},"_meta":#{meta}}))
+    chunk = message.typed.as(ACP::Protocol::V2::MessageChunkUpdate).to_content_chunk.not_nil!
+    chunk.content.to_json.should eq(block)
+    chunk.to_json.should contain(%("_meta":#{meta}))
+    restored = ACP::Protocol::ContentChunk.from_v2_json(chunk.to_json)
+    restored.message_id.should eq("m")
+    restored.content.to_json.should eq(block)
+    restored.meta_raw.not_nil!.json.should eq(meta)
+    expect_raises(JSON::ParseException) { ACP::Protocol::ContentChunk.from_json(chunk.to_json) }
+
+    tool = ACP::Protocol::V2::ToolCallContent.from_json(%({"type":"content","content":#{block}}))
+    tool.content_block.not_nil!.to_json.should eq(block)
+  end
+
+  it "validates the fallback envelope and handles malformed known types without falling back" do
+    [
+      "[]",
+      %({"payload":true}),
+      %({"type":42}),
+      %({"type":"image","mimeType":"image/png"}),
+      %({"type":"image","type":"future_content","mimeType":"image/png"}),
+      %({"type":"skill","name":42}),
+      %({"type":"resource","resource":{"uri":"file:///work/no-body"}}),
+    ].each do |invalid|
+      expect_raises(JSON::ParseException) { ACP::Protocol::ContentBlock.from_v2_json(invalid) }
+    end
+    expect_raises(JSON::ParseException) { ACP::Protocol::UnknownContentBlock.from_json(%({"type":"text","text":"known"})) }
+    expect_raises(JSON::ParseException) { ACP::Protocol::ContentBlock.from_json(%({"type":"future_content","name":"open only in v2"})) }
+
+    block = ACP::Protocol::ContentBlock.from_v2_json(%({"type":"text","text":"standard","_meta":{"example.test/sequence":18446744073709551615}}))
+    typed = block.as(ACP::Protocol::TextContentBlock)
+    typed.text.should eq("standard")
+    typed.meta_raw.not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+  end
+
+  it "ignores ambiguous skill references in user messages and chunks" do
+    ambiguous_type = %({"type":"other","type":"skill","name":"ambiguous"})
+    ambiguous_name = %({"type":"skill","name":"ambiguous","name":"duplicate"})
+    valid = %({"type":"skill","name":"notes"})
+    full = ACP::Protocol::V2::MessageUpdate.from_json(%({"sessionUpdate":"user_message","messageId":"m","content":[#{ambiguous_type},#{valid},#{ambiguous_name}]}))
+    full.skill_references.map(&.name).should eq(["notes"])
+    [ambiguous_type, ambiguous_name].each do |block|
+      chunk = ACP::Protocol::V2::MessageChunkUpdate.from_json(%({"sessionUpdate":"user_message_chunk","messageId":"m","content":#{block}}))
+      chunk.skill_reference.should be_nil
+    end
+  end
+
+  it "keeps display blocks and the surrounding metadata in stdio callbacks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(4)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      custom = %({"type":"future_content","empty":null,"value":18446744073709551615})
+      decimals = %({"example.test/precise":0.1234567890123456789})
+      resource = %({"type":"resource","resource":{"uri":"file:///work/notes","text":"body","_meta":{"example.test/sequence":18446744073709551615}}})
+      outer = %({"example.test/count":18446744073709551615,"example.test/label":"compacted"})
+      updates = [
+        %({"sessionUpdate":"session_message","messageId":"m","content":[#{custom},#{resource}]}),
+        %({"sessionUpdate":"compaction_update","compactionId":"c","summary":[#{custom},#{resource}],"_meta":#{outer}}),
+        %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":#{custom},"_meta":#{decimals}}),
+        %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"content","content":#{custom}}}),
+      ]
+      updates.each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      message = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+      content = message.content_blocks.not_nil!
+      content.first.as(ACP::Protocol::UnknownContentBlock).raw.json.should eq(custom)
+      embedded = content.last.as(ACP::Protocol::ResourceContentBlock)
+      embedded.text.should eq("body")
+      embedded.resource_raw.field("_meta").not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+
+      compaction = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::CompactionUpdate)
+      compaction.summary_present?.should be_true
+      compaction.meta_raw.not_nil!.json.should eq(outer)
+      compaction.typed_summary.not_nil!.map(&.type).should eq(["future_content", "resource"])
+      compaction.typed_summary.not_nil!.first.to_json.should eq(custom)
+
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::CompactionSummaryChunkUpdate)
+      chunk.meta_raw.not_nil!.json.should eq(decimals)
+      restored = ACP::Protocol::ContentChunk.from_v2_json(chunk.to_content_chunk.not_nil!.to_json)
+      restored.message_id.should be_nil
+      restored.content.to_json.should eq(custom)
+      restored.meta_raw.not_nil!.json.should eq(decimals)
+      tool = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+      tool.content.content_block.not_nil!.to_json.should eq(custom)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "distinguishes compaction summary omission, clear, and replacement" do
+    compact = ACP::Protocol::V2::CompactionUpdate.from_json(%({"compactionId":"c"}))
+    compact.summary_present?.should be_false
+    compact.typed_summary.should be_nil
+
+    cleared = ACP::Protocol::V2::CompactionUpdate.from_json(%({"compactionId":"c","summary":null}))
+    cleared.summary_present?.should be_true
+    cleared.typed_summary.should be_nil
+    cleared.to_json.should contain(%("summary":null))
+
+    malformed = ACP::Protocol::V2::CompactionUpdate.from_json(%({"compactionId":"c","summary":false,"status":"running"}))
+    malformed.summary_present?.should be_false
+    malformed.to_json.should_not contain(%("summary"))
+    compact.summary = [] of JSON::Any
+    compact.summary_present?.should be_true
+    compact.typed_summary.should eq([] of ACP::Protocol::ContentBlock)
+  end
+end

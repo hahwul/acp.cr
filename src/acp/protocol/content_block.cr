@@ -62,6 +62,44 @@ module ACP
     end
 
     # :nodoc:
+    module ProjectedContent
+      def self.from_json(pull : JSON::PullParser) : PreservedJson
+        location = pull.location
+        content = PreservedJson.new(pull, project_object_members: true)
+        unless content.value
+          raise JSON::ParseException.new("Content must be representable or a JSON object", *location)
+        end
+        content
+      end
+
+      def self.to_json(content : PreservedJson, builder : JSON::Builder) : Nil
+        content.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module LosslessContentField
+      @[JSON::Field(key: "content", converter: ::ACP::Protocol::ProjectedContent)]
+      @content_wire : PreservedJson
+
+      # Content fields representable in JSON::Any.
+      def content : JSON::Any
+        @content_wire.value.not_nil!
+      end
+
+      # Replaces the content of this chunk.
+      def content=(value : JSON::Any) : JSON::Any
+        @content_wire = PreservedJson.new(value)
+        value
+      end
+
+      # Exact content JSON, including extension values.
+      def content_raw : RawJson
+        @content_wire.raw
+      end
+    end
+
+    # :nodoc:
     module ContentBlockArray
       def self.from_json(pull : JSON::PullParser) : PreservedJson
         unless pull.kind.begin_array?
@@ -164,23 +202,93 @@ module ACP
       include JSON::Serializable
 
       # Reads a standard block at the transport's JSON nesting limit.
-      def self.new(pull : JSON::PullParser)
-        location = pull.location
-        block = RawJson.new(pull)
+      def self.new(pull : JSON::PullParser) : ContentBlock
+        line, column = pull.location
+        decode(RawJson.new(pull), line, column, allow_unknown: false)
+      end
+
+      # Reads ACP v2 display content, including custom and future block types.
+      def self.from_v2_json(json : String) : ContentBlock
+        from_v2_json(RawJson.from_json(json))
+      end
+
+      # Reads ACP v2 display content from exact JSON.
+      def self.from_v2_json(block : RawJson) : ContentBlock
+        decode(block, 1, 1, allow_unknown: true)
+      end
+
+      # Reads usable v2 display blocks from an array in wire order.
+      # :nodoc:
+      def self.decode_v2_array(array : RawJson) : Array(ContentBlock)?
+        array.elements?.try &.compact_map do |block|
+          from_v2_json(block)
+        rescue JSON::Error
+          nil
+        end
+      end
+
+      private def self.decode(block : RawJson, line : Int32, column : Int32, *, allow_unknown : Bool) : ContentBlock
         type = block.field("type").try(&.as_s?)
+        if allow_unknown && !WireFrame.unique_members?(block.json)
+          raise JSON::SerializableError.new("Ambiguous ACP v2 content fields", to_s, "type", line, column, nil)
+        end
+
         case type
         when "text"          then TextContentBlock.from_json(block.json)
         when "image"         then ImageContentBlock.from_json(block.json)
         when "audio"         then AudioContentBlock.from_json(block.json)
-        when "resource"      then ResourceContentBlock.from_json(block.json)
         when "resource_link" then ResourceLinkContentBlock.from_json(block.json)
+        when "resource"
+          resource = ResourceContentBlock.from_json(block.json)
+          if allow_unknown && !(resource.uri && (resource.text || resource.blob))
+            raise JSON::SerializableError.new("Malformed embedded resource", to_s, "resource", line, column, nil)
+          end
+          resource
         else
-          raise JSON::SerializableError.new("Unknown or missing content type #{type.inspect}", to_s, "type", *location, nil)
+          # Skill references have a separate user-message API.
+          if allow_unknown && type && type != "skill"
+            return UnknownContentBlock.from_wire(block, type)
+          end
+          raise JSON::SerializableError.new("Unknown or missing content type #{type.inspect}", to_s, "type", line, column, nil)
         end
       end
 
       # The discriminator field present on every content block.
       getter type : String
+    end
+
+    # An ACP v2 display block with an unrecognized discriminator.
+    struct UnknownContentBlock < ContentBlock
+      # The complete block as exact JSON.
+      getter raw : RawJson
+
+      private def initialize(@raw : RawJson, @type : String)
+      end
+
+      # Creates the fallback after checking the wire discriminator.
+      # :nodoc:
+      protected def self.from_wire(raw : RawJson, type : String) : self
+        new(raw, type)
+      end
+
+      # Reads an unrecognized v2 block.
+      def self.new(pull : JSON::PullParser) : self
+        line, column = pull.location
+        block = ContentBlock.from_v2_json(RawJson.new(pull))
+        return block if block.is_a?(UnknownContentBlock)
+
+        raise JSON::SerializableError.new("Expected an unrecognized ACP v2 content type", to_s, "type", line, column, nil)
+      end
+
+      # Whether the type uses the namespace reserved for extensions.
+      def custom? : Bool
+        @type.starts_with?('_')
+      end
+
+      # Writes the original opaque content.
+      def to_json(builder : JSON::Builder) : Nil
+        @raw.to_json(builder)
+      end
     end
 
     # ─── Text Content Block ───────────────────────────────────────────
@@ -193,6 +301,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/content#text-content
     struct TextContentBlock < ContentBlock
       include JSON::Serializable
+      include LosslessMetadata
 
       # Always "text" for this block type.
       getter type : String = "text"
@@ -201,14 +310,12 @@ module ACP
       property text : String
 
       # Optional metadata about how the content should be used or displayed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@text : String, @annotations : Annotations? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@text : String, @annotations : Annotations? = nil, meta : Hash(String, JSON::Any)? = nil)
         @type = "text"
+        self.meta = meta
       end
 
       # Alias for backward compatibility (previously named `content`).
@@ -224,6 +331,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/content#image-content
     struct ImageContentBlock < ContentBlock
       include JSON::Serializable
+      include LosslessMetadata
 
       # Always "image" for this block type.
       getter type : String = "image"
@@ -236,23 +344,22 @@ module ACP
       property mime_type : String
 
       # Optional URI reference for the image source.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property uri : String?
 
       # Optional metadata about how the content should be used or displayed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @data : String,
         @mime_type : String = "image/png",
         @uri : String? = nil,
         @annotations : Annotations? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @type = "image"
+        self.meta = meta
       end
     end
 
@@ -263,6 +370,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/content#audio-content
     struct AudioContentBlock < ContentBlock
       include JSON::Serializable
+      include LosslessMetadata
 
       # Always "audio" for this block type.
       getter type : String = "audio"
@@ -275,19 +383,17 @@ module ACP
       property mime_type : String
 
       # Optional metadata about how the content should be used or displayed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @data : String,
         @mime_type : String = "audio/wav",
         @annotations : Annotations? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @type = "audio"
+        self.meta = meta
       end
     end
 
@@ -357,27 +463,26 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/content#embedded-resource
     struct ResourceContentBlock < ContentBlock
       include JSON::Serializable
+      include LosslessMetadata
 
       # Always "resource" for this block type.
       getter type : String = "resource"
 
-      # The embedded resource contents. Can be either a TextResourceContents
-      # or BlobResourceContents. Stored as JSON::Any for flexible parsing.
-      property resource : JSON::Any
+      @[JSON::Field(key: "resource", converter: ::ACP::Protocol::ProjectedContent)]
+      @resource_wire : PreservedJson
 
       # Optional metadata about how the content should be used or displayed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
-        @resource : JSON::Any,
+        resource : JSON::Any,
         @annotations : Annotations? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @type = "resource"
+        @resource_wire = PreservedJson.new(resource)
+        self.meta = meta
       end
 
       # Creates a ResourceContentBlock with text resource contents.
@@ -398,24 +503,40 @@ module ACP
         new(resource: JSON::Any.new(resource_hash))
       end
 
+      # Embedded text or blob resource fields representable in JSON::Any.
+      def resource : JSON::Any
+        @resource_wire.value.not_nil!
+      end
+
+      # Replaces the embedded resource.
+      def resource=(value : JSON::Any) : JSON::Any
+        @resource_wire = PreservedJson.new(value)
+        value
+      end
+
+      # Exact embedded resource JSON.
+      def resource_raw : RawJson
+        @resource_wire.raw
+      end
+
       # Helper: get the URI from the embedded resource.
       def uri : String?
-        @resource.as_h?.try { |hash| hash["uri"]?.try(&.as_s?) }
+        resource.as_h?.try { |hash| hash["uri"]?.try(&.as_s?) }
       end
 
       # Helper: get the text from the embedded resource (nil if blob).
       def text : String?
-        @resource.as_h?.try { |hash| hash["text"]?.try(&.as_s?) }
+        resource.as_h?.try { |hash| hash["text"]?.try(&.as_s?) }
       end
 
       # Helper: get the blob from the embedded resource (nil if text).
       def blob : String?
-        @resource.as_h?.try { |hash| hash["blob"]?.try(&.as_s?) }
+        resource.as_h?.try { |hash| hash["blob"]?.try(&.as_s?) }
       end
 
       # Helper: get the MIME type from the embedded resource.
       def resource_mime_type : String?
-        @resource.as_h?.try { |hash| hash["mimeType"]?.try(&.as_s?) }
+        resource.as_h?.try { |hash| hash["mimeType"]?.try(&.as_s?) }
       end
     end
 

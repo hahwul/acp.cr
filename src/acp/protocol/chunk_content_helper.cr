@@ -12,12 +12,13 @@ module ACP
     module ChunkContentHelper
       # Helper to get the actual text content regardless of wrapping.
       def text : String
-        if (h = @content.as_h?) && h["text"]?
-          h["text"].as_s? || @content.to_json
-        elsif s = @content.as_s?
+        value = content
+        if (h = value.as_h?) && h["text"]?
+          h["text"].as_s? || value.to_json
+        elsif s = value.as_s?
           s
         else
-          @content.to_json
+          value.to_json
         end
       end
 
