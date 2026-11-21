@@ -12,6 +12,15 @@ module ACP
       # Name, version, display title and metadata for either peer.
       alias Implementation = Protocol::ClientInfo
 
+      # Parameters of the draft auth/status query.
+      alias AuthStatusParams = Protocol::AuthStatusParams
+
+      # Authentication status returned by the draft query.
+      alias AuthStatusResult = Protocol::AuthStatusResult
+
+      # Authentication status delivered by a draft update notification.
+      alias AuthStatusUpdateParams = Protocol::AuthStatusUpdateParams
+
       # Presence advertises support for a feature with no named fields.
       struct Capability
         include JSON::Serializable
@@ -173,6 +182,11 @@ module ACP
           @auth : Capability? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
         )
+        end
+
+        # Whether the Agent advertised the draft auth/status capability.
+        def auth_status? : Bool
+          !@auth.try(&.json_unmapped["status"]?).try(&.as_h?).nil?
         end
       end
 

@@ -156,6 +156,15 @@ client.logout : ACP::Protocol::LogoutResult
 
 Ends the authenticated state (`logout`). Only call it when `agent_capabilities.try(&.auth).try(&.logout?)` is true. Active sessions may start failing with auth errors afterwards.
 
+### `#auth_status` (draft)
+
+On v1 and v2, `client.auth_status` reads the Agent's authentication state
+when the `auth.status` capability is advertised. Register
+`on_auth_status_update` to receive changes from the Agent. `state` maps
+future values to `unknown`, and `raw_state` preserves the wire value.
+`accounts` describes the accounts for display.
+[ACP Authentication State Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/get-auth-state.mdx)
+
 ### `#close`
 
 ```crystal

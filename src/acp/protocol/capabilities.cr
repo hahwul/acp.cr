@@ -8,6 +8,7 @@
 # Reference: https://agentclientprotocol.com/protocol/initialization
 
 require "json"
+require "./auth_status"
 
 module ACP
   module Protocol
@@ -587,6 +588,10 @@ module ACP
       # When present (non-null), the agent supports `logout`.
       property logout : LogoutCapabilities?
 
+      # When present, the Agent supports the draft auth/status method.
+      @[JSON::Field(converter: ::ACP::Protocol::AuthStatusCapabilities)]
+      property status : AuthStatusCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -594,6 +599,7 @@ module ACP
       def initialize(
         @logout : LogoutCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @status : AuthStatusCapabilities? = nil,
       )
       end
 

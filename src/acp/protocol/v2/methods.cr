@@ -6,6 +6,7 @@ module ACP
         INITIALIZE                = "initialize"
         AUTH_LOGIN                = "auth/login"
         AUTH_LOGOUT               = "auth/logout"
+        AUTH_STATUS               = Protocol::AgentMethod::AUTH_STATUS
         SESSION_NEW               = "session/new"
         SESSION_SET_CONFIG_OPTION = "session/set_config_option"
         SESSION_PROMPT            = "session/prompt"
@@ -24,6 +25,7 @@ module ACP
         SESSION_UPDATE             = "session/update"
         ELICITATION_CREATE         = "elicitation/create"
         ELICITATION_COMPLETE       = "elicitation/complete"
+        AUTH_STATUS_UPDATE         = Protocol::ClientMethod::AUTH_STATUS_UPDATE
       end
 
       # Methods and notifications shared by ACP v2 Preview peers.

@@ -65,7 +65,7 @@ module ACP
     # transport redacts these from DEBUG-level frame logs so a session
     # with debug logging enabled does not write credentials/tokens to log
     # files. Add to this set if new methods carry secrets.
-    SENSITIVE_METHODS = Set{"authenticate"}
+    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update"}
 
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).
@@ -258,9 +258,12 @@ module ACP
         return parsed.to_json
       end
 
-      if (result = parsed["result"]?.try(&.as_h?)) && result.has_key?("authMethods")
-        result["authMethods"] = JSON::Any.new("[REDACTED]")
-        return parsed.to_json
+      if result = parsed["result"]?.try(&.as_h?)
+        has_methods = result.has_key?("authMethods")
+        has_accounts = result.has_key?("state") && result.has_key?("accounts")
+        result["authMethods"] = JSON::Any.new("[REDACTED]") if has_methods
+        result["accounts"] = JSON::Any.new("[REDACTED]") if has_accounts
+        return parsed.to_json if has_methods || has_accounts
       end
 
       line

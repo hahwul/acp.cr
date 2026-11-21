@@ -155,6 +155,9 @@ module ACP
       # Callback for advertised elicitation modes and their URL completion.
       delegate on_create_elicitation, :"on_create_elicitation=", on_elicitation_complete, :"on_elicitation_complete=", to: @connection
 
+      # Callback for draft authentication status changes from the Agent.
+      delegate on_auth_status_update, :"on_auth_status_update=", to: @connection
+
       # Closes this connection and its transport.
       delegate close, closed?, to: @connection
 
@@ -208,6 +211,15 @@ module ACP
         raise InvalidStateError.new("The Agent advertised no auth methods") if ready.auth_methods.empty?
 
         request(AgentMethod::AUTH_LOGOUT, Wire::AuthLogoutParams.new, Wire::AuthLogoutResult)
+      end
+
+      # Queries the Agent's draft authentication status when it advertises support.
+      def auth_status(params : Wire::AuthStatusParams = Wire::AuthStatusParams.new) : Wire::AuthStatusResult
+        unless ready.capabilities.auth_status?
+          raise InvalidStateError.new("The Agent did not advertise auth.status")
+        end
+
+        request(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
       end
 
       # Runs the approved terminal auth flow and returns the reinitialized client.
@@ -453,6 +465,7 @@ module ACP
         replacement.on_extension_request = on_extension_request
         replacement.on_create_elicitation = on_create_elicitation
         replacement.on_elicitation_complete = on_elicitation_complete
+        replacement.on_auth_status_update = on_auth_status_update
         begin
           replacement.initialize_connection
           close
