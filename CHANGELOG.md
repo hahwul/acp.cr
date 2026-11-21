@@ -33,6 +33,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add draft ACP v1 and v2 session status queries, with optional foreground state in v2.
 - Add draft ACP v1 and v2 authentication status queries and updates, with account details redacted from transport logs.
 - Decode ACP v2 permission subjects, apply their tool-call patches in receive order, and expose the request ID to permission callbacks.
 - Add `ACP.connect_negotiated` for automatic ACP v2 Preview selection and v1 fallback.

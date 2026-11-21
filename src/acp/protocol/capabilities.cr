@@ -9,6 +9,7 @@
 
 require "json"
 require "./auth_status"
+require "./session_status"
 
 module ACP
   module Protocol
@@ -521,6 +522,10 @@ module ACP
       @[JSON::Field(key: "systemPrompt")]
       property system_prompt : SessionSystemPromptCapabilities?
 
+      # When present, the Agent supports the draft session/status query.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionStatusCapabilities)]
+      property status : SessionStatusCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -533,6 +538,7 @@ module ACP
         @delete : SessionDeleteCapabilities? = nil,
         @additional_directories : SessionAdditionalDirectoriesCapabilities? = nil,
         @system_prompt : SessionSystemPromptCapabilities? = nil,
+        @status : SessionStatusCapabilities? = nil,
       )
       end
 

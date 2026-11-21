@@ -77,7 +77,7 @@ module ACP
         end
       end
 
-      # A state snapshot embedded in a child-session announcement.
+      # A state snapshot embedded in a session announcement or response.
       struct StateSnapshot < SessionState
       end
 

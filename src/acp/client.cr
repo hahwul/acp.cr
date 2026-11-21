@@ -610,6 +610,17 @@ module ACP
       decode_result(Protocol::SessionListResult, raw_result, Protocol::AgentMethod::SESSION_LIST)
     end
 
+    # Queries a session without attaching to it. Requires draft status support.
+    def session_status(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionStatusResult
+      method = Protocol::AgentMethod::SESSION_STATUS
+      ensure_state(ClientState::Initialized, method)
+      unless @agent_capabilities.try(&.session_capabilities).try(&.status)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.status")
+      end
+
+      send_typed_request(method, Protocol::SessionStatusParams.new(session_id, meta), Protocol::SessionStatusResult)
+    end
+
     # Resumes an existing session by ID without replaying conversation history.
     #
     # Unlike `session/load`, the agent will NOT emit `session/update`
@@ -956,7 +967,17 @@ module ACP
       timeout : Float64? = @request_timeout,
     ) : JSON::Any
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      send_and_await_response(method, message_builder, timeout)
+      response_result(send_and_await_response(method, message_builder, timeout), method)
+    end
+
+    # Decodes a typed response using original JSON when JSON::Any cannot hold it.
+    protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
+      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
+      response = send_and_await_response(method, message_builder)
+      if response.is_a?(Protocol::WireFrame) && !Protocol::WireFrame.field(response.json, "error")
+        return decode_result_json(type, Protocol::WireFrame.field(response.json, "result") || "null", method)
+      end
+      decode_result(type, response_result(response, method), method)
     end
 
     # Sends a JSON-RPC notification (no response expected).
@@ -988,7 +1009,7 @@ module ACP
       timeout : Float64? = @request_timeout,
     ) : JSON::Any
       message_builder = ->(id : Int64) { Protocol.build_request_raw(id, method, params) }
-      send_and_await_response(method, message_builder, timeout)
+      response_result(send_and_await_response(method, message_builder, timeout), method)
     end
 
     # Sends a JSON-RPC notification with raw JSON::Any params (no response expected).
@@ -1063,15 +1084,14 @@ module ACP
     #   the serialized message hash ready for transport.
     # - `timeout` — optional timeout in seconds (nil = no timeout).
     #
-    # Returns the `result` field from the response as JSON::Any.
-    # Raises `JsonRpcError` if the response contains an error.
+    # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
     # Raises `ConnectionClosedError` if the transport is closed.
     private def send_and_await_response(
       method : String,
       message_builder : Int64 -> Hash(String, JSON::Any),
       timeout : Float64? = @request_timeout,
-    ) : JSON::Any
+    ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
       # Generate a unique ID and build the frame before registering it.
@@ -1106,7 +1126,7 @@ module ACP
       ClientLog.debug { "Sent request id=#{id} method=#{method}" }
 
       # Wait for the response with optional timeout.
-      raw_response = begin
+      begin
         if timeout
           receive_with_timeout(response_channel, timeout, id)
         else
@@ -1116,7 +1136,9 @@ module ACP
         # `drain_pending_requests` closed it: the connection is gone.
         raise ConnectionClosedError.new("#{@user_closed ? "Client closed" : "Connection lost"} while waiting for response to #{method}")
       end
+    end
 
+    private def response_result(raw_response : PendingResponse, method : String) : JSON::Any
       if raw_response.is_a?(Protocol::WireFrame)
         raise ProtocolError.new("Response to '#{method}' contains a number outside the range of JSON::Any")
       end
@@ -1167,7 +1189,11 @@ module ACP
     # raises is an `ACP::Error`. Translate it into `ProtocolError`, keeping
     # the original as the cause.
     private def decode_result(type : T.class, raw : JSON::Any, method : String) : T forall T
-      T.from_json(raw.to_json)
+      decode_result_json(type, raw.to_json, method)
+    end
+
+    private def decode_result_json(type : T.class, json : String, method : String) : T forall T
+      T.from_json(json)
     rescue ex : JSON::ParseException
       raise ProtocolError.new(
         "Agent returned a malformed result for '#{method}': #{ex.message}",

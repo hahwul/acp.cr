@@ -246,6 +246,11 @@ module ACP
 
     # ─── State ────────────────────────────────────────────────────────
 
+    # Reads the Agent's session status, including after a local close.
+    def status(*, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionStatusResult
+      @client.session_status(@id, meta: meta)
+    end
+
     # Closes the session.
     #
     # If the agent advertised the `session/close` capability
