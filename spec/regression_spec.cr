@@ -3225,3 +3225,182 @@ describe "ACP v2 cancellation replies" do
     end
   end
 end
+
+private def next_permission_event(channel : Channel(T)) : T forall T
+  select
+  when value = channel.receive
+    value
+  when timeout(2.seconds)
+    fail "did not receive permission event"
+  end
+end
+
+describe "ACP v2 exact permission subjects" do
+  it "applies a wide tool-call subject before the permission handler and answers the request" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      events = Channel(String).new(3)
+      updates = Channel(ACP::Protocol::V2::ToolCallUpdate).new(2)
+      chunks = Channel(ACP::Protocol::V2::ToolCallContentChunk).new(1)
+      requests = Channel(ACP::Protocol::V2::RequestPermissionParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        case update = note.update.typed
+        when ACP::Protocol::V2::ToolCallUpdate
+          events.send("patch:#{update.tool_call_id}")
+          updates.send(update)
+        when ACP::Protocol::V2::ToolCallContentChunk
+          chunks.send(update)
+        end
+        nil
+      end
+      client.on_request_permission = ->(params : ACP::Protocol::V2::RequestPermissionParams) do
+        requests.send(params)
+        events.send("request:#{params.typed_subject.not_nil!.tool_call.not_nil!.tool_call_id}")
+        client.tool_call_cancel("s", "t")
+        ACP::Protocol::V2::RequestPermissionResult.selected(params.options.first.option_id)
+      end
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+
+      tool = %({"toolCallId":"t","title":null,"capabilities":{"cancel":{"_meta":{"wide":18446744073709551615}}},"rawInput":{"wide":18446744073709551615},"rawOutput":0.1234567890123456789,"_meta":{"wide":18446744073709551615,"label":"new","remove":null},"vendorExtra":0.11111111111111111111,"content":[{"type":"diff","changes":[{"operation":"create","path":"/work/file","vendor":0.22222222222222222222}],"patch":{"format":"unified","text":"+change","_meta":{"wide":18446744073709551615}}}]})
+      subject = %({"type":"tool_call","toolCall":#{tool},"extension":18446744073709551616})
+      feed.puts %({"jsonrpc":"2.0","id":"permission-wide","method":"session/request_permission","params":{"sessionId":"s","title":"Inspect metadata","description":false,"options":[{"optionId":"approve","name":"Approve","kind":"allow_once","_meta":{"wide":18446744073709551615}}],"subject":#{subject}}})
+      cancel = JSON.parse(outgoing.gets.not_nil!)
+      cancel["method"]?.try(&.as_s?).should eq("tool_call/cancel")
+      cancel["params"]["toolCallId"].as_s.should eq("t")
+      feed.puts %({"jsonrpc":"2.0","id":#{cancel["id"]},"result":{}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].as_s.should eq("permission-wide")
+      reply["result"]?.try(&.["outcome"].["optionId"].as_s).should eq("approve")
+      next_permission_event(events).should eq("patch:t")
+      next_permission_event(events).should eq("request:t")
+
+      request = next_permission_event(requests)
+      request.request_id.should eq("permission-wide")
+      request.description.should be_nil
+      request.subject.should be_nil
+      request.subject_raw.not_nil!.json.should eq(subject)
+      request.typed_subject.not_nil!.tool_call_raw.not_nil!.json.should eq(tool)
+
+      patch = next_permission_event(updates)
+      patch.title_present?.should be_true
+      patch.title.should be_nil
+      patch.raw_input_present?.should be_true
+      patch.raw_input.should be_nil
+      patch.raw_input_raw.not_nil!.field("wide").not_nil!.json.should eq("18446744073709551615")
+      patch.raw_output_raw.not_nil!.json.should eq("0.1234567890123456789")
+      patch.meta_raw.not_nil!.field("wide").not_nil!.json.should eq("18446744073709551615")
+      previous = JSON.parse(%({"wide":"old","label":"before","remove":"yes","preserve":"keep"})).as_h
+      patch.apply_metadata(previous).should eq(JSON.parse(%({"label":"new","preserve":"keep"})).as_h)
+      patch.meta.not_nil!["label"] = JSON::Any.new("edited")
+      patch.meta.not_nil!["label"].as_s.should eq("edited")
+      patch.meta_raw.not_nil!.field("wide").not_nil!.json.should eq("18446744073709551615")
+      patch.apply_metadata(previous).should eq(JSON.parse(%({"label":"edited","preserve":"keep"})).as_h)
+      diff = patch.content.not_nil!.first.diff.not_nil!
+      diff.changes.first.path.should eq("/work/file")
+      diff.patch.not_nil!.text.should eq("+change")
+      encoded = ACP::Protocol::WireFrame.encode(patch)
+      encoded.should contain(%("rawOutput":0.1234567890123456789))
+      encoded.should contain(%("vendorExtra":0.11111111111111111111))
+      encoded.should contain(%("vendor":0.22222222222222222222))
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"toolCallId":"t","vendorExtra":0.11111111111111111111,"sessionUpdate":"tool_call_update","rawInput":0.9876543210987654321}}})
+      next_permission_event(events).should eq("patch:t")
+      ordinary = next_permission_event(updates)
+      ordinary.raw_input_raw.not_nil!.json.should eq("0.9876543210987654321")
+      ACP::Protocol::WireFrame.encode(ordinary).should contain(%("vendorExtra":0.11111111111111111111))
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"_future","vendor":0.22222222222222222222}}}})
+      chunk = next_permission_event(chunks)
+      chunk.tool_call_id.should eq("t")
+      chunk.content.to_json.should contain(%("vendor":0.22222222222222222222))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "preserves exact decimals behind existing mutable subject and tool payload views" do
+    input = %({"sessionId":"s","title":"Permission","options":[{"optionId":"go","name":"Go","kind":"allow_once"}],"subject":{"type":"tool_call","toolCall":{"toolCallId":"t","rawInput":{"count":0.12345678901234567,"unchanged":[0.9876543210987654321]},"rawOutput":null}}})
+    request = ACP::Protocol::V2::RequestPermissionParams.from_json(input)
+    request.subject.should_not be_nil
+    request.subject_raw.not_nil!.json.should contain("0.12345678901234567")
+    patch = request.typed_subject.not_nil!.tool_call.not_nil!
+    patch.raw_input_raw.not_nil!.field("count").not_nil!.json.should eq("0.12345678901234567")
+    patch.raw_output_present?.should be_true
+    patch.raw_output.should be_nil
+
+    patch.raw_input.not_nil!.as_h["count"] = JSON::Any.new(8_i64)
+    patch.raw_input_raw.not_nil!.field("count").not_nil!.as_i64?.should eq(8)
+    patch.raw_input_raw.not_nil!.field("unchanged").not_nil!.json.should eq("[0.9876543210987654321]")
+    patch.to_json.should contain(%("rawOutput":null))
+
+    request.subject.not_nil!["toolCall"]["rawInput"].as_h["count"] = JSON::Any.new(9_i64)
+    changed_input = request.typed_subject.not_nil!.tool_call.not_nil!.raw_input_raw.not_nil!
+    changed_input.field("count").not_nil!.as_i64?.should eq(9)
+    changed_input.field("unchanged").not_nil!.json.should eq("[0.9876543210987654321]")
+
+    typed_subject = request.typed_subject.not_nil!
+    typed_subject.json_unmapped["toolCall"]["rawInput"].as_h["count"] = JSON::Any.new(10_i64)
+    changed_input = typed_subject.tool_call.not_nil!.raw_input_raw.not_nil!
+    changed_input.field("count").not_nil!.as_i64?.should eq(10)
+    changed_input.field("unchanged").not_nil!.json.should eq("[0.9876543210987654321]")
+    request.subject = JSON.parse(%({"type":"_replacement","note":true}))
+    request.typed_subject.not_nil!.type.should eq("_replacement")
+
+    array_patch = ACP::Protocol::V2::ToolCallUpdate.from_json(%({"toolCallId":"t","rawInput":[{"id":"first","value":0.1234567890123456701},{"id":"second","value":0.1234567890123456702}]}))
+    array_patch.raw_input.not_nil!.as_a.shift
+    array_patch.raw_input_raw.not_nil!.json.should eq(array_patch.raw_input.not_nil!.to_json)
+  end
+
+  it "decodes future subjects and optional command metadata" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::RequestPermissionParams).new(2)
+      client.on_request_permission = ->(request : ACP::Protocol::V2::RequestPermissionParams) do
+        observed.send(request)
+        ACP::Protocol::V2::RequestPermissionResult.cancelled
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      options = %([{"optionId":"no","name":"No","kind":"reject_once"}])
+      command = %({"type":"command","command":"true","cwd":"/work","toolCallId":false,"_meta":{"wide":18446744073709551615}})
+      future = %({"type":"_future","payload":18446744073709551615,"precise":0.12345678901234567})
+      {command, future}.each_with_index do |subject, index|
+        feed.puts %({"jsonrpc":"2.0","id":#{index},"method":"session/request_permission","params":{"sessionId":"s","title":"Review","options":#{options},"subject":#{subject}}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["result"]?.try(&.["outcome"].["outcome"].as_s).should eq("cancelled")
+        request = next_permission_event(observed)
+        request.subject_raw.not_nil!.json.should eq(subject)
+        if details = request.typed_subject.not_nil!.command
+          details.cwd.should eq("/work")
+          details.tool_call_id.should be_nil
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the v1 generic permission handler on representable stdio requests" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      observed = Channel(JSON::Any).new(1)
+      client.on_agent_request = ->(_method : String, params : JSON::Any) do
+        observed.send(params)
+        JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
+      end
+      feed.puts %({"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}})
+      answer = JSON.parse(outgoing.gets.not_nil!)
+      answer["result"]?.try(&.["outcome"].["outcome"].as_s).should eq("cancelled")
+      next_permission_event(observed)["toolCall"]["toolCallId"].as_s.should eq("t")
+    ensure
+      client.try(&.close)
+    end
+  end
+end

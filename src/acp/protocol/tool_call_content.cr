@@ -17,6 +17,7 @@
 
 require "json"
 require "./content_block"
+require "./optional_metadata"
 
 module ACP
   module Protocol
@@ -202,7 +203,7 @@ module ACP
       property line : UInt32?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(

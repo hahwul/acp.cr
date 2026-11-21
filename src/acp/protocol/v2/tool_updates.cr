@@ -2,6 +2,7 @@ require "base64"
 require "./initialization"
 require "./metadata_patch"
 require "../tool_call_content"
+require "../raw_json"
 
 module ACP
   module Protocol
@@ -11,10 +12,11 @@ module ACP
         include JSON::Serializable
 
         # A current marker authorizing a cancel request.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property cancel : Capability?
 
         # Extension metadata scoped to these capabilities.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates entity capabilities.
@@ -25,7 +27,11 @@ module ACP
       # One file operation in a structured diff.
       struct DiffChange
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
 
         # Open operation discriminator, such as modify, move, or copy.
         getter operation : String
@@ -66,7 +72,7 @@ module ACP
         property text : String
 
         # Extension metadata scoped to the patch.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a renderable patch.
@@ -85,7 +91,7 @@ module ACP
         property patch : DiffPatch?
 
         # Extension metadata scoped to the diff.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates the structured diff.
@@ -96,7 +102,11 @@ module ACP
       # Open content item belonging to a tool call.
       struct ToolCallContent
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
 
         # Content type such as content, diff, terminal, or session.
         @[JSON::Field(key: "type")]
@@ -108,16 +118,16 @@ module ACP
 
         # Typed diff for a recognized structured diff item.
         def diff : DiffContent?
-          DiffContent.from_json(@json_unmapped.to_json) if @content_type == "diff"
+          DiffContent.from_json(WireFrame.encode(self)) if @content_type == "diff"
         rescue JSON::ParseException
           nil
         end
 
         # Standard content block for a recognized content item.
         def content_block : Protocol::ContentBlock?
-          return unless @content_type == "content" && (content = @json_unmapped["content"]?)
+          return unless @content_type == "content" && (content = exact_unmapped_json("content"))
 
-          Protocol::ContentBlock.from_json(content.to_json)
+          Protocol::ContentBlock.from_json(content)
         rescue JSON::ParseException
           nil
         end
@@ -141,6 +151,11 @@ module ACP
       # Fields shared by tool-call updates and permission subjects.
       abstract struct ToolCallPatch
         include JSON::Serializable
+        include LosslessUnmapped
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
 
         # Tool call updated by this patch.
         @[JSON::Field(key: "toolCallId")]
@@ -154,12 +169,87 @@ module ACP
           status:       {String, "status"},
           content:      {Array(ToolCallContent), "content"},
           locations:    {Array(Protocol::ToolCallLocation), "locations"},
-          raw_input:    {JSON::Any, "rawInput"},
-          raw_output:   {JSON::Any, "rawOutput"},
           capabilities: {EntityCapabilities, "capabilities"},
-          meta:         {Hash(String, JSON::Any), "_meta"},
         })
         include MetadataPatch
+
+        macro raw_payload_field(name, wire_name)
+          @[JSON::Field(key: {{wire_name}}, presence: true, emit_null: true, ignore_serialize: !@{{name.id}}_wire_present)]
+          @{{name.id}}_wire : PreservedJson?
+
+          @[JSON::Field(ignore: true)]
+          @{{name.id}}_wire_present : Bool = false
+
+          # JSON::Any projection when the reported value is representable.
+          def {{name.id}} : JSON::Any?
+            @{{name.id}}_wire.try(&.value)
+          end
+
+          # Replaces the reported value. Assign nil to clear it explicitly.
+          def {{name.id}}=(value : JSON::Any?) : JSON::Any?
+            @{{name.id}}_wire_present = true
+            @{{name.id}}_wire = value.try { |supplied| PreservedJson.new(supplied) }
+            value
+          end
+
+          # Whether the patch supplies the field, including explicit null.
+          def {{name.id}}_present? : Bool
+            @{{name.id}}_wire_present
+          end
+
+          # Exact JSON for the supplied value when non-null.
+          def {{name.id}}_raw : RawJson?
+            @{{name.id}}_wire.try(&.raw)
+          end
+        end
+
+        raw_payload_field raw_input, "rawInput"
+        raw_payload_field raw_output, "rawOutput"
+
+        @[JSON::Field(key: "_meta", presence: true, emit_null: true, ignore_serialize: !meta_present?, converter: ::ACP::Protocol::PreservedMetadata)]
+        @metadata_wire : PreservedJson?
+
+        @[JSON::Field(ignore: true)]
+        @metadata_wire_present = false
+
+        # Extension metadata that can be represented as JSON::Any.
+        def meta : Hash(String, JSON::Any)?
+          @metadata_wire.try(&.value).try(&.as_h?)
+        end
+
+        # Replaces metadata. Assign nil to explicitly clear it.
+        def meta=(value : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
+          @metadata_wire_present = true
+          @metadata_wire = value.try { |fields| PreservedJson.new(JSON::Any.new(fields)) }
+          value
+        end
+
+        # Whether this patch supplies metadata or explicitly clears it.
+        def meta_present? : Bool
+          @metadata_wire_present && (!@metadata_wire || !!meta_raw)
+        end
+
+        # Exact metadata object when the patch supplies one.
+        def meta_raw : RawJson?
+          if raw = @metadata_wire.try(&.raw)
+            raw if raw.object?
+          end
+        end
+
+        # Applies this patch to a metadata map representable as JSON::Any.
+        def apply_metadata(previous : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
+          return super unless @metadata_wire.try(&.partial?) && (raw = meta_raw)
+
+          result = previous.try(&.dup) || {} of String => JSON::Any
+          raw.members?.not_nil!.each do |key, member|
+            if !member.null? && (value = member.to_json_any?)
+              result[key] = value
+            else
+              result.delete(key)
+            end
+          end
+          result
+        end
 
         # Creates a tool-call patch. Set a field to nil to explicitly clear it.
         def initialize(@tool_call_id : String)
@@ -189,7 +279,7 @@ module ACP
         property content : ToolCallContent
 
         # Extension metadata scoped to this chunk.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a tool-call content chunk.

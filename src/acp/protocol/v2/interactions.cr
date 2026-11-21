@@ -1,5 +1,6 @@
 require "./sessions"
 require "./tool_updates"
+require "../raw_json"
 
 module ACP
   module Protocol
@@ -20,15 +21,15 @@ module ACP
         property cwd : String
 
         # Associated tool call when known.
-        @[JSON::Field(key: "toolCallId")]
+        @[JSON::Field(key: "toolCallId", converter: ::ACP::Protocol::OptionalOptionDescription)]
         property tool_call_id : String?
 
         # Associated display terminal when known.
-        @[JSON::Field(key: "terminalId")]
+        @[JSON::Field(key: "terminalId", converter: ::ACP::Protocol::OptionalOptionDescription)]
         property terminal_id : String?
 
         # Extension metadata scoped to the command subject.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a command subject.
@@ -40,7 +41,7 @@ module ACP
       # An open permission subject with accessors for the standard variants.
       struct PermissionSubject
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Subject discriminator such as tool_call or command.
         getter type : String
@@ -51,12 +52,23 @@ module ACP
 
         # Decodes a tool-call patch. Raises JSON::ParseException for malformed fields.
         def tool_call : PermissionToolCall?
-          PermissionToolCall.from_json(@json_unmapped["toolCall"]?.to_json) if @type == "tool_call"
+          PermissionToolCall.from_json(exact_unmapped_json("toolCall") || "null") if @type == "tool_call"
+        end
+
+        # Exact tool-call patch, including extension data outside JSON::Any.
+        def tool_call_raw : RawJson?
+          if @type == "tool_call" && (json = exact_unmapped_json("toolCall"))
+            RawJson.new(JSON::PullParser.new(json))
+          end
+        end
+
+        protected def keep_exact_unmapped?(key : String) : Bool
+          true
         end
 
         # Decodes a command. Raises JSON::ParseException for malformed fields.
         def command : PermissionCommand?
-          PermissionCommand.from_json(to_json) if @type == "command"
+          PermissionCommand.from_json(WireFrame.encode(self)) if @type == "command"
         end
       end
 
@@ -81,13 +93,14 @@ module ACP
         property request_id : Protocol::RequestId?
 
         # Optional detail about the request.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalOptionDescription)]
         property description : String?
 
-        # Tagged subject, such as a tool call or command.
-        property subject : JSON::Any?
+        @[JSON::Field(key: "subject")]
+        @subject_wire : PreservedJson?
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates permission request parameters.
@@ -96,15 +109,32 @@ module ACP
           @title : String,
           @options : Array(Protocol::PermissionOption),
           @description : String? = nil,
-          @subject : JSON::Any? = nil,
+          subject : JSON::Any? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
         )
+          @subject_wire = subject.try { |value| PreservedJson.new(value) }
+        end
+
+        # JSON::Any view of the tagged subject when it is representable.
+        def subject : JSON::Any?
+          @subject_wire.try(&.value)
+        end
+
+        # Replaces the tagged subject.
+        def subject=(value : JSON::Any?) : JSON::Any?
+          @subject_wire = value.try { |present| PreservedJson.new(present) }
+          value
+        end
+
+        # Exact JSON for a standard or extension subject.
+        def subject_raw : RawJson?
+          @subject_wire.try(&.raw)
         end
 
         # Decodes a subject while retaining the payload of future variants.
         def typed_subject : PermissionSubject?
-          if raw = @subject
-            PermissionSubject.from_json(raw.to_json) unless raw.raw.nil?
+          if raw = subject_raw
+            PermissionSubject.from_json(raw.json) unless raw.null?
           end
         end
       end

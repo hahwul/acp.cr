@@ -1299,7 +1299,7 @@ module ACP
       property kind : String
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(

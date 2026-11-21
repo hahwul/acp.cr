@@ -285,6 +285,10 @@ module ACP
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
         # Returns the typed form of a recognized session update.
         def typed
           case @session_update
@@ -299,9 +303,9 @@ module ACP
           when "cursor_update"
             CursorUpdate.from_json(WireFrame.encode(self))
           when "tool_call_update"
-            ToolCallUpdate.from_json(to_json)
+            ToolCallUpdate.from_json(WireFrame.encode(self))
           when "tool_call_content_chunk"
-            ToolCallContentChunk.from_json(to_json)
+            ToolCallContentChunk.from_json(WireFrame.encode(self))
           when "terminal_update"
             TerminalUpdate.from_json(to_json)
           when "terminal_output_chunk"
