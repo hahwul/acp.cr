@@ -39,6 +39,14 @@ The prompt response acknowledges insertion. Foreground completion arrives
 in an idle `state_update`. Keep `on_update` callbacks short because they run
 on the dispatcher fiber.
 
+Use `note.raw` from the v2 update callback to store or forward notification
+parameters. It preserves unknown fields and exact JSON numbers over stdio,
+including in updates whose `typed` accessor returns `nil`. The notification's
+`meta` exposes fields representable as `JSON::Any`. Use `meta_raw` for the
+whole metadata object. Custom transports can supply `Protocol::WireFrame`
+from `receive_frame` to retain exact values.
+[ACP v2 Session Updates](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-updates)
+
 Use `session_state(session_id)` to read the latest foreground and background
 snapshot for an attached root session. A new session starts at `idle` until
 the Agent reports activity. A resume uses the Agent's current snapshot.

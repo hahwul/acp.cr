@@ -131,15 +131,36 @@ module ACP
       def self.from_json(pull : JSON::PullParser) : Array(T)
         candidates = [] of T
         pull.read_array do
-          raw = WireFrame.read_raw(pull)
-          begin
-            suggestion = T.from_json(raw)
-            candidates << suggestion if suggestion.usable?
-          rescue JSON::Error
-            # Keep the remaining suggestions when one cannot be used.
+          if suggestion = decode_usable(WireFrame.read_raw(pull))
+            candidates << suggestion
           end
         end
         candidates
+      end
+
+      def self.decode_usable(raw : String, *, unique_members : Bool = false) : T?
+        return if unique_members && !unique_members?(JSON::PullParser.new(raw))
+
+        suggestion = T.from_json(raw)
+        suggestion if suggestion.usable?
+      rescue JSON::Error
+        # Keep the remaining suggestions when one cannot be used.
+        nil
+      end
+
+      private def self.unique_members?(pull : JSON::PullParser) : Bool
+        case pull.kind
+        when .begin_object?
+          keys = Set(String).new
+          pull.read_object do |key|
+            return false unless keys.add?(key) && unique_members?(pull)
+          end
+        when .begin_array?
+          pull.read_array { return false unless unique_members?(pull) }
+        else
+          pull.skip
+        end
+        true
       end
 
       def self.to_json(values : Array(T), json : JSON::Builder) : Nil

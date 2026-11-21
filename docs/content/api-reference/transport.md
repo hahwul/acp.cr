@@ -39,11 +39,12 @@ Receives the next message from the agent. Blocks until a message is available. R
 transport.receive_frame : ACP::Transport::IncomingFrame?
 ```
 
-Returns a `JSON::Any` when possible, or a `Protocol::WireFrame` with exact
-JSON in `#json` when the message exceeds the numeric range of `JSON::Any`.
-The client uses this path to decode typed updates and incoming typed requests
-with full `UInt64` precision. Custom transports can implement `receive_frame`
-to provide exact frames. The default implementation calls `receive`.
+Returns a `JSON::Any` or a `Protocol::WireFrame` with exact JSON in
+`#json`. Even in ordinary mode, stdio retains exact session updates,
+some typed requests and responses, and frames outside the numeric range of
+`JSON::Any`. Use `receive` for the projected `JSON::Any` view. Custom transports
+can implement `receive_frame` to provide exact frames. The default
+implementation calls `receive`.
 Subclasses of `StdioTransport` or `ProcessTransport` that customize how the
 client reads frames should override `receive_frame`.
 

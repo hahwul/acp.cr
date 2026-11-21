@@ -1841,12 +1841,18 @@ ensure
   outgoing.try(&.close)
 end
 
-private def initialize_wide_v2(client : ACP::V2::Client, feed : IO, outgoing : IO)
+private def initialize_wide_v2(client : ACP::V2::Client, feed : IO, outgoing : IO, *, session_id : String? = nil)
   spawn do
     request = JSON.parse(outgoing.gets.not_nil!)
-    feed.puts %({"jsonrpc":"2.0","id":#{request["id"].to_json},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}}})
+    capabilities = session_id ? %(,"capabilities":{"session":{}}) : ""
+    feed.puts %({"jsonrpc":"2.0","id":#{request["id"].to_json},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}#{capabilities}}})
+    if session_id
+      setup = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{setup["id"].to_json},"result":{"sessionId":#{session_id.to_json}}})
+    end
   end
   client.initialize_connection
+  client.session_new("/work") if session_id
 end
 
 private def await_wide_update(updates : Channel(Nil))
@@ -3552,5 +3558,107 @@ describe "ACP stdio shutdown" do
     transport.wait.should eq(status)
   ensure
     transport.try(&.close)
+  end
+end
+
+private def next_exact_session_update(channel : Channel(ACP::Protocol::V2::SessionUpdateParams)) : ACP::Protocol::V2::SessionUpdateParams
+  select
+  when value = channel.receive
+    value
+  when timeout(2.seconds)
+    fail "did not receive the session update"
+  end
+end
+
+describe "ACP v2 exact session update delivery" do
+  it "keeps ordered custom and standard updates with exact extension numbers over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      extension = %({"details":{"fraction":0.1234567890123456789,"empty":null},"sessionUpdate":"_example.test/transcript_marker"})
+      terminal = %({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"YQ==","_meta":{"example.test/time":0.9876543210987654321}})
+      {extension, terminal}.each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      marker = next_exact_session_update(observed).update
+      marker.session_update.should eq("_example.test/transcript_marker")
+      marker.typed.should be_nil
+      marker.to_json.should contain(%("fraction":0.1234567890123456789))
+      marker.to_json.should contain(%("empty":null))
+
+      chunk = next_exact_session_update(observed).update
+      chunk.typed.as(ACP::Protocol::V2::TerminalOutputChunk).bytes.should eq("a".to_slice)
+      chunk.to_json.should contain(%("example.test/time":0.9876543210987654321))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "retains notification metadata and unknown fields at both levels" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      meta = %({"example.test/precise":0.3210987654321098765,"example.test/wide":18446744073709551615,"example.test/label":"initial","example.test/empty":null})
+      update = %({"sessionUpdate":"future_update","value":[1e1000,18446744073709551616]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","futureParam":0.4567890123456789123,"_meta":#{meta},"update":#{update}}})
+
+      note = next_exact_session_update(observed)
+      note.session_id.should eq("s")
+      note.update.typed.should be_nil
+      note.raw.field("futureParam").not_nil!.json.should eq("0.4567890123456789123")
+      note.meta_raw.not_nil!.json.should eq(meta)
+      note.raw.field("update").not_nil!.field("value").not_nil!.json.should eq("[1e1000,18446744073709551616]")
+
+      note.meta.not_nil!["example.test/label"] = JSON::Any.new("edited")
+      metadata = note.raw.field("_meta").not_nil!
+      metadata.field("example.test/label").not_nil!.as_s?.should eq("edited")
+      metadata.field("example.test/precise").not_nil!.json.should eq("0.3210987654321098765")
+      metadata.field("example.test/wide").not_nil!.json.should eq("18446744073709551615")
+      metadata.field("example.test/empty").not_nil!.null?.should be_true
+      note.meta = nil
+      note.raw.field("_meta").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps original JSON for suggestions that pass capability filtering" do
+    with_wide_stdio do |transport, feed, outgoing|
+      suggestions = ACP::Protocol::PromptSuggestionsCapabilities.new
+      caps = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: suggestions))
+      client = ACP::V2::Client.new(transport, capabilities: caps)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      allowed = %({"prompt":[{"type":"text","text":"Keep"}],"futureField":0.4321098765432109876,"_meta":{"example.test/count":18446744073709551615}})
+      disallowed = %({"prompt":[{"type":"image","mimeType":"image/png","data":"YQ=="}]})
+      ambiguous = %({"prompt":[{"type":"image","mimeType":"image/png","data":"YQ==","type":"text","text":"Ambiguous"}]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[#{allowed},#{disallowed},#{ambiguous}]}}})
+
+      filtered = next_exact_session_update(observed)
+      filtered.raw.field("update").not_nil!.field("suggestions").not_nil!.json.should eq("[#{allowed}]")
+      filtered.update.json_unmapped["suggestions"].should eq(JSON.parse(%([{"prompt":[{"type":"text","text":"Keep"}]}])))
+      surviving = filtered.update.typed.as(ACP::Protocol::V2::PromptSuggestionsUpdate).suggestions
+      surviving.map { |suggestion| suggestion.prompt.first["text"].as_s }.should eq(["Keep"])
+    ensure
+      client.try(&.close)
+    end
   end
 end
