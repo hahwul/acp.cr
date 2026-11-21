@@ -271,8 +271,18 @@ module ACP
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String
 
+        @[JSON::Field(ignore: true)]
+        @duplicate_config_options = false
+
         # Creates an update with its variant payload.
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+        end
+
+        protected def on_unknown_json_attribute(pull, key, key_location)
+          if key == "configOptions"
+            @duplicate_config_options = true if @json_unmapped.has_key?(key) || raw_field(key)
+          end
+          super
         end
 
         protected def keep_exact_unmapped?(_key : String) : Bool
@@ -347,7 +357,7 @@ module ACP
           when "available_commands_update"
             AvailableCommandsUpdate.from_json(WireFrame.encode(self))
           when "config_option_update"
-            ConfigOptionUpdate.from_json(to_json)
+            ConfigOptionUpdate.from_json(WireFrame.encode(self)) unless @duplicate_config_options
           when "prompt_suggestions_update"
             PromptSuggestionsUpdate.from_json(WireFrame.encode(self))
           end

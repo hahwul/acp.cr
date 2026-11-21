@@ -33,17 +33,7 @@ module ACP
       end
 
       def v2_options : Array(Protocol::V2::ConfigOption)
-        entries = @options.try(&.elements?) || return [] of Protocol::V2::ConfigOption
-        entries.compact_map do |wire|
-          option = Protocol::V2::ConfigOption.from_json(wire.json)
-          case option.type
-          when "select"  then option if option.selected_value && option.select_options
-          when "boolean" then option unless option.boolean_value.nil?
-          else                option
-          end
-        rescue JSON::Error
-          nil
-        end
+        Protocol::V2::ConfigOption.decode_list(@options)
       end
 
       def replace(modes : Raw?, options : Raw?) : Nil
@@ -90,13 +80,17 @@ module ACP
         end
 
         option = matches.first
+        if @v2
+          validate_v2_option(option, value_type, value)
+          return
+        end
         unless option.field("name").try(&.as_s?)
           raise InvalidStateError.new("The Agent did not offer a usable session configuration option")
         end
 
         raw_type = option.field("type")
         type = raw_type.try(&.as_s?)
-        type ||= "select" unless @v2 || raw_type
+        type ||= "select" unless raw_type
         case type
         when "select"
           selected = value.as_s?
@@ -114,26 +108,31 @@ module ACP
             raise ArgumentError.new("This configuration option requires a boolean value")
           end
         else
-          # V2 can carry extension-defined option and value discriminators.
-          unless @v2 && type && !type.empty?
-            raise InvalidStateError.new("Unsupported session configuration option type")
+          raise InvalidStateError.new("Unsupported session configuration option type")
+        end
+      end
+
+      private def validate_v2_option(raw : Raw, value_type : String, value : JSON::Any) : Nil
+        option = Protocol::V2::ConfigOption.decode_usable(raw)
+        unless option && !option.type.empty?
+          raise InvalidStateError.new("The Agent did not offer a usable session configuration option")
+        end
+
+        case option.type
+        when "select"
+          selected = value.as_s?
+          unless value_type == "id" && selected && option.selectable_values.try(&.any? { |item| item.value == selected })
+            raise ArgumentError.new("Choose an advertised value ID for this select option")
+          end
+        when "boolean"
+          unless value_type == "boolean" && !value.as_bool?.nil?
+            raise ArgumentError.new("This configuration option requires a boolean value")
           end
         end
       end
 
       private def selectable?(option : Raw, value : String) : Bool
-        if @v2
-          case choices = Protocol::V2::ConfigOption.from_json(option.json).select_options
-          when Array(Protocol::ConfigOptionValue)
-            choices.any? { |item| item.value == value }
-          when Array(Protocol::V2::ConfigOptionGroup)
-            choices.any? { |group| group.values.any? { |item| item.value == value } }
-          else
-            false
-          end
-        else
-          Protocol::ConfigOption.from_json(option.json).all_values.any? { |item| item.value == value }
-        end
+        Protocol::ConfigOption.from_json(option.json).all_values.any? { |item| item.value == value }
       rescue JSON::Error
         false
       end
@@ -199,7 +198,7 @@ module ACP
     def replace(session_id : String, result : String, *, reattach : Bool) : Nil
       modes = field(result, "modes") unless @v2
       modes = nil unless modes.try(&.object?)
-      options = array_field(result, "configOptions")
+      options = array_field(result, "configOptions", unique: @v2)
       if @v2
         @commands[session_id] = Commands.new(array_field(result, "availableCommands") || EMPTY_COMMANDS)
       end
@@ -305,7 +304,7 @@ module ACP
       if mode = change.mode
         Protocol::SessionSetModeResult.from_json(result)
         change.snapshot.confirm_mode(mode, change.revision, change.write)
-      elsif options = array_field(result, "configOptions")
+      elsif options = array_field(result, "configOptions", unique: @v2)
         change.snapshot.options = options
       end
     rescue JSON::Error
@@ -337,7 +336,7 @@ module ACP
     end
 
     def observe_options(session_id : String, update : String) : Nil
-      if (state = @sessions[session_id]?) && !replaying?(session_id) && (options = array_field(update, "configOptions"))
+      if (state = @sessions[session_id]?) && !replaying?(session_id) && (options = array_field(update, "configOptions", unique: @v2))
         state.options = options
       end
     end
@@ -391,13 +390,13 @@ module ACP
       !!@attaching[session_id]?.try { |id| @attachments[id]?.try(&.replaying) }
     end
 
-    private def array_field(wire : String, name : String) : Raw?
-      value = field(wire, name)
+    private def array_field(wire : String, name : String, *, unique : Bool = false) : Raw?
+      value = field(wire, name, unique: unique)
       value if value.try(&.array?)
     end
 
-    private def field(wire : String, name : String) : Raw?
-      if raw = Protocol::WireFrame.field(wire, name)
+    private def field(wire : String, name : String, *, unique : Bool = false) : Raw?
+      if raw = Protocol::WireFrame.field(wire, name, unique: unique)
         Raw.new(JSON::PullParser.new(raw))
       end
     rescue JSON::Error

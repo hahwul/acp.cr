@@ -4657,3 +4657,201 @@ describe "ACP exact notices and replay completion" do
     end
   end
 end
+
+describe "ACP v2 exact configuration options" do
+  it "preserves full-width configuration options in every typed wrapper" do
+    meta = %({"example.test/sequence":18446744073709551615,"example.test/precision":0.1234567890123456789})
+    group = %({"groupId":"provider","name":"Provider","value":"unknown-field","_meta":#{meta},"options":[false,{"value":"small","name":"Small","_meta":#{meta}}]})
+    select_option = %({"type":"select","configId":"model","name":"Model","currentValue":"small","options":[#{group}]})
+    opaque = %({"type":"future","configId":"custom","name":"Custom","currentValue":{"wide":18446744073709551615}})
+    config = "[false,#{select_option},#{opaque}]"
+    fields = %("configOptions":#{config},"_meta":#{meta})
+
+    created = ACP::Protocol::V2::SessionNewResult.from_json(%({"sessionId":"s",#{fields}}))
+    resumed = ACP::Protocol::V2::SessionResumeResult.from_json(%({#{fields}}))
+    preview = ACP::Protocol::V2::SessionOptionsResult.from_json(%({#{fields}}))
+    changed = ACP::Protocol::V2::SessionSetConfigOptionResult.from_json(%({#{fields}}))
+    updated = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"config_option_update",#{fields}})).typed.as(ACP::Protocol::V2::ConfigOptionUpdate)
+
+    [created, resumed, preview, changed, updated].each do |wrapper|
+      wrapper.typed_config_options.map(&.config_id).should eq(["model", "custom"])
+      wrapper.config_options_raw.json.should eq(config)
+      wrapper.config_options.size.should eq(2)
+      wrapper.meta_raw.not_nil!.json.should eq(meta)
+      wrapper.to_json.should contain(%("configOptions":#{config}))
+      typed = wrapper.typed_config_options
+      group = typed.first.select_options.as(Array(ACP::Protocol::V2::ConfigOptionGroup)).first
+      group.meta_raw.not_nil!.json.should eq(meta)
+      group.options.size.should eq(1)
+      group.options_raw.elements?.not_nil!.first.json.should eq("false")
+      group.values.first.meta_raw.not_nil!.json.should eq(meta)
+      typed.last.raw.field("currentValue").not_nil!.field("wide").not_nil!.json.should eq(UInt64::MAX.to_s)
+    end
+  end
+
+  it "omits unusable selectors and ambiguous configuration IDs" do
+    wire = <<-JSON
+      {"configOptions":[
+        {"type":"select","configId":"missing-current","name":"Missing","currentValue":"absent","options":[{"value":"present","name":"Present"}]},
+        {"type":"select","configId":"duplicate-value","name":"Duplicate","currentValue":"x","options":[{"value":"x","name":"First"},{"value":"x","name":"Second"}]},
+        {"type":"select","configId":"duplicate-group","name":"Duplicate group","currentValue":"a","options":[{"groupId":"same","name":"First","options":[{"value":"a","name":"A"}]},{"groupId":"same","name":"Second","options":[{"value":"b","name":"B"}]}]},
+        {"type":"select","configId":"mixed","name":"Mixed","currentValue":"a","options":[{"value":"a","name":"A"},{"groupId":"g","name":"Group","value":"shadow","options":[{"value":"b","name":"B"}]}]},
+        {"type":"select","configId":"cross-group","name":"Cross group","currentValue":"a","options":[{"groupId":"g1","name":"First","options":[{"value":"a","name":"A"}]},{"groupId":"g2","name":"Second","options":[{"value":"a","name":"Again"}]}]},
+        {"type":"boolean","configId":"repeated","name":"First","currentValue":true},
+        {"type":"boolean","configId":"repeated","name":"Second","currentValue":false},
+        {"type":"boolean","configId":"usable","name":"Usable","currentValue":false},
+        {"type":"select","configId":"flat-with-extensions","name":"Flat","currentValue":"b","options":[{"value":"a","name":"A"},{"value":"b","name":"B","groupId":false,"options":false}]}]}
+      JSON
+    preview = ACP::Protocol::V2::SessionOptionsResult.from_json(wire)
+    preview.typed_config_options.map(&.config_id).should eq(["usable", "flat-with-extensions"])
+  end
+
+  it "keeps exact option fields when editing or reordering the representable list" do
+    wide = %({"configId":"wide","name":"Wide","type":"future","currentValue":18446744073709551615})
+    precise = %({"configId":"precise","name":"Precise","type":"future","currentValue":0.1234567890123456789})
+    result = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"configOptions":[#{wide},false,#{precise}]}))
+    result.config_options.map { |option| option["configId"].as_s }.should eq(["wide", "precise"])
+    result.config_options.first.as_h["name"] = JSON::Any.new("Edited")
+    result.config_options.reverse!
+    values = result.typed_config_options
+    values.map(&.name).should eq(["Precise", "Edited"])
+    values.first.raw.field("currentValue").not_nil!.json.should eq("0.1234567890123456789")
+    values.last.raw.field("currentValue").not_nil!.json.should eq(UInt64::MAX.to_s)
+
+    result.config_options = [] of JSON::Any
+    result.config_options_raw.json.should eq("[]")
+    result.typed_config_options.should be_empty
+  end
+
+  it "uses the same exact configuration in stdio results, updates, and value validation" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+
+      meta = %({"example.test/sequence":18446744073709551615,"example.test/ratio":0.1234567890123456789})
+      custom = %({"configId":"future","name":"Future","type":"_range","currentValue":{"number":18446744073709551615}})
+      values = %([{"value":"small","name":"Small"},{"value":"large","name":"Large","_meta":#{meta}}])
+      selection = %({"configId":"model","name":"Model","type":"select","currentValue":"small","options":#{values}})
+      valid = "[#{custom},#{selection}]"
+
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}}})
+        create = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{create["id"]},"result":{"sessionId":"s","configOptions":#{valid}}})
+      end
+      client.initialize_connection
+      created = client.session_new("/work")
+      created.config_options_raw.json.should eq(valid)
+      client.session_config_options("s").not_nil!.map(&.config_id).should eq(["future", "model"])
+
+      invalid = selection.sub(%("currentValue":"small"), %("currentValue":"missing"))
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":[#{invalid}]}}})
+      update = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ConfigOptionUpdate)
+      update.typed_config_options.should be_empty
+      client.session_config_options("s").not_nil!.should be_empty
+      params = ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "large")
+      expect_raises(ACP::InvalidStateError) { client.session_set_config_option(params) }
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":#{valid},"_meta":#{meta}}}})
+      update = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ConfigOptionUpdate)
+      update.config_options_raw.json.should eq(client.session_config_options_raw("s").not_nil!.json)
+      update.typed_config_options.map(&.config_id).should eq(client.session_config_options("s").not_nil!.map(&.config_id))
+
+      sent = Channel(JSON::Any).new(1)
+      spawn do
+        change = JSON.parse(outgoing.gets.not_nil!)
+        sent.send(change)
+        chosen = selection.sub(%("currentValue":"small"), %("currentValue":"large"))
+        feed.puts %({"jsonrpc":"2.0","id":#{change["id"]},"result":{"configOptions":[#{chosen}],"_meta":#{meta}}})
+      end
+      changed = client.session_set_config_option(params)
+      sent.receive["params"]["value"].as_s.should eq("large")
+      changed.meta_raw.not_nil!.json.should eq(meta)
+      changed.typed_config_options.first.selected_value.should eq("large")
+      changed.typed_config_options.first.selectable_values.not_nil!.last.meta_raw.not_nil!.json.should eq(meta)
+      client.session_config_options_raw("s").not_nil!.json.should eq(changed.config_options_raw.json)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "retains precise decimals even when the stdio response fits in JSON::Any" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      decimal = "0.1234567890123456789"
+      original = %([{"configId":"review","name":"Review","type":"boolean","currentValue":false,"_meta":{"example.test/ratio":#{decimal}}}])
+      changed = original.sub("false", "true")
+
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"options":{}}}}})
+        preview = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{preview["id"]},"result":{"configOptions":#{original}}})
+        empty_preview = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{empty_preview["id"]},"result":{"_meta":{"example.test/ratio":#{decimal}}}})
+        create = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{create["id"]},"result":{"sessionId":"s","configOptions":#{original}}})
+        change = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{change["id"]},"result":{"configOptions":#{changed}}})
+      end
+      client.initialize_connection
+      client.session_options("/work").config_options_raw.json.should eq(original)
+      empty_preview = client.session_options("/work")
+      empty_preview.typed_config_options.should be_empty
+      empty_preview.meta_raw.not_nil!.field("example.test/ratio").not_nil!.json.should eq(decimal)
+      client.session_new("/work").config_options_raw.json.should eq(original)
+      params = ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "review", true)
+      result = client.session_set_config_option(params)
+      result.config_options_raw.json.should eq(changed)
+      result.typed_config_options.first.meta_raw.not_nil!.field("example.test/ratio").not_nil!.json.should eq(decimal)
+      client.session_config_options_raw("s").not_nil!.json.should eq(changed)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects duplicate configuration lists without replacing the cached choices" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      original = %([{"configId":"review","name":"Review","type":"boolean","currentValue":false}])
+      duplicate = %("configOptions":false,"configOptions":[])
+
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionNewResult.from_json(%({"sessionId":"s",#{duplicate}})) }
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionSetConfigOptionResult.from_json(%({#{duplicate}})) }
+
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}}})
+        create = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{create["id"]},"result":{"sessionId":"s","configOptions":#{original}}})
+        change = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{change["id"]},"result":{#{duplicate}}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"config_option_update",#{duplicate}}}})
+      next_exact_session_update(observed).update.typed.should be_nil
+      client.session_config_options_raw("s").not_nil!.json.should eq(original)
+
+      params = ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "review", true)
+      expect_raises(ACP::ProtocolError) { client.session_set_config_option(params) }
+      client.session_config_options_raw("s").not_nil!.json.should eq(original)
+    ensure
+      client.try(&.close)
+    end
+  end
+end

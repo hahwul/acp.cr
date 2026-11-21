@@ -24,8 +24,8 @@ module ACP
           v2_initialization_result
         end
 
-        def request_typed(method : String, params : JSON::Serializable, type : T.class) : T forall T
-          send_typed_request(method, params, type)
+        def request_typed(method : String, params : JSON::Serializable, type : T.class, *, exact_response : Bool = false) : T forall T
+          send_typed_request(method, params, type, exact_response: exact_response)
         end
 
         def retire_session(method : String, params : JSON::Serializable, type : T.class) : T forall T
@@ -605,7 +605,7 @@ module ACP
             raise ArgumentError.new("ACP v2 session directories must be absolute")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult)
+          @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult, exact_response: true)
         end
       end
 
