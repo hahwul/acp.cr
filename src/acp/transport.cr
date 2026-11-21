@@ -35,6 +35,14 @@ module ACP
     # Sends a JSON-RPC message (Hash serialized to JSON + newline).
     abstract def send(message : Hash(String, JSON::Any)) : Nil
 
+    # Runs a preflight before sending. Transports with a write queue can
+    # override this method to run it under the write lock immediately before IO.
+    # A preflight that raises leaves the message unsent.
+    def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+      preflight.call
+      send(message)
+    end
+
     # Receives the next incoming JSON message, blocking until one arrives.
     # Returns nil if the transport is closed.
     abstract def receive : JSON::Any?
@@ -145,6 +153,15 @@ module ACP
     # dispatcher fiber replies to an agent-initiated request) can never
     # interleave their bytes within a line.
     def send(message : Hash(String, JSON::Any)) : Nil
+      write_message(message)
+    end
+
+    # Runs a preflight immediately before writing a complete frame.
+    def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+      write_message(message, preflight)
+    end
+
+    private def write_message(message : Hash(String, JSON::Any), preflight : (-> Nil)? = nil) : Nil
       raise ConnectionClosedError.new if @closed
 
       # Build the complete frame — payload *and* delimiter — before touching
@@ -159,6 +176,7 @@ module ACP
         # Re-check under the lock: the transport may have been closed while
         # we were queued behind another sender.
         raise ConnectionClosedError.new if @closed
+        preflight.try(&.call)
 
         begin
           @writer.print(frame)

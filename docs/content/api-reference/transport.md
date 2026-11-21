@@ -18,6 +18,13 @@ transport.send(message : Hash) : Nil
 
 Sends a JSON-RPC message to the agent.
 
+### `#send_checked`
+
+Runs a check before sending a message with a cursor. Custom transports that
+queue writes can override this method to call the supplied block just before
+writing the frame. If the block raises, leave the frame unsent. The default
+implementation calls the block before delegating to `send`.
+
 ### `#receive`
 
 ```crystal

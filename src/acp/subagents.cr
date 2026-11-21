@@ -92,19 +92,20 @@ module ACP
 
       cwd ||= root.cwd
       additional_directories ||= root.additional_directories
-      return unless absolute_workspace_path?(cwd) && additional_directories.all? { |directory| absolute_workspace_path?(directory) }
+      return unless Protocol.absolute_workspace?(cwd, additional_directories)
 
       SessionWorkspace.new(cwd, additional_directories.dup)
-    end
-
-    private def absolute_workspace_path?(path : String) : Bool
-      @v2 ? Protocol::V2.absolute_path?(path) : Path[path].absolute?
     end
 
     def cancel?(session_id : String) : Bool
       return false if setup_for(session_id)
 
       !@children[session_id]?.try(&.capabilities).try(&.cancel).nil?
+    end
+
+    def known_session?(session_id : String) : Bool
+      @workspace.has_key?(session_id) || @children.has_key?(session_id) ||
+        @closed_roots.includes?(session_id) || @setup_by_session.has_key?(session_id)
     end
 
     def request_sent(id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
@@ -128,7 +129,7 @@ module ACP
           raise InvalidStateError.new("A session setup is already pending for #{sid.inspect}")
         end
         clear_descendant_runtime(sid)
-      when Protocol::AgentMethod::SESSION_NEW
+      when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
       when Protocol::AgentMethod::SESSION_DELETE
         return unless @v2
       else
@@ -166,8 +167,8 @@ module ACP
         else
           clear_descendant_runtime(sid)
         end
-      when Protocol::AgentMethod::SESSION_NEW
-        if workspace && (created_id = created_session_id(Protocol::WireFrame.result_json(response, frame)))
+      when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
+        if workspace && (created_id = created_session_id(Protocol::WireFrame.result_json(response, frame))) && created_id != sid
           @workspace[created_id] = workspace
         end
       when Protocol::AgentMethod::SESSION_DELETE

@@ -267,6 +267,20 @@ module ACP
         @connection.request_typed(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
       end
 
+      # Forks a session and returns the new active session's initial state.
+      def session_fork(params : Wire::SessionForkParams) : Wire::SessionForkResult
+        caps = session_capabilities
+        raise InvalidStateError.new("The Agent did not advertise session.fork") unless caps.fork
+
+        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+        @connection.request_typed(AgentMethod::SESSION_FORK, params, Wire::SessionForkResult)
+      end
+
+      # Forks a source session into the given working directory.
+      def session_fork(session_id : String, cwd : String, *, cursor_id : String? = nil) : Wire::SessionForkResult
+        session_fork(Wire::SessionForkParams.new(session_id, cwd, cursor_id: cursor_id))
+      end
+
       # Lists available sessions using the provided filter and cursor.
       def session_list(params : Wire::SessionListParams = Wire::SessionListParams.new) : Wire::SessionListResult
         caps = session_capabilities
