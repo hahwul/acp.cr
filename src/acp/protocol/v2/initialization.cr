@@ -184,10 +184,15 @@ module ACP
         property args : Array(String) = [] of String
 
         # Variables overlaid on the configured Agent environment.
-        property env : Hash(String, String) = {} of String => String
+        property env : Array(Protocol::EnvVariable) = [] of Protocol::EnvVariable
 
         # Creates terminal launch settings.
-        def initialize(@args : Array(String) = [] of String, @env : Hash(String, String) = {} of String => String)
+        def initialize(@args : Array(String) = [] of String, @env : Array(Protocol::EnvVariable) = [] of Protocol::EnvVariable)
+        end
+
+        # Environment overlay for process launch. Later entries override earlier ones.
+        def environment : Hash(String, String)
+          @env.to_h { |entry| {entry.name, entry.value} }
         end
       end
 

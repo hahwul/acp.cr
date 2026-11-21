@@ -34,7 +34,7 @@ describe "ACP v2 Preview initialization" do
         },
         "authMethods": [
           {"type":"agent","methodId":"desktop","name":"Desktop sign-in"},
-          {"type":"terminal","methodId":"local","name":"Terminal sign-in","args":["--login"],"env":{"MODE":"login"}},
+          {"type":"terminal","methodId":"local","name":"Terminal sign-in","args":["--login"],"env":[{"name":"MODE","value":"base"},{"name":"MODE","value":"login"}]},
           {"type":"_future","methodId":"later","name":"Future sign-in","description":{"details":true},"payload":[1,2]}
         ]
       }
@@ -50,7 +50,8 @@ describe "ACP v2 Preview initialization" do
     result.auth_methods[0].agent?.should be_true
     terminal = result.auth_methods[1].terminal_settings.not_nil!
     terminal.args.should eq(["--login"])
-    terminal.env.should eq({"MODE" => "login"})
+    terminal.env.map(&.value).should eq(["base", "login"])
+    terminal.environment.should eq({"MODE" => "login"})
     result.auth_methods[2].terminal_settings.should be_nil
     JSON.parse(result.to_json).should eq(wire)
   end
@@ -5942,5 +5943,278 @@ describe "Edge Cases" do
 
       client.close
     end
+  end
+end
+
+# The Agent side of a v2 connection, driven by scripted responses and updates.
+private class V2TestTransport < TestTransport
+  getter outgoing = Channel(JSON::Any).new(64)
+  getter replies = {} of String => String
+  property before_reply : (String -> Nil)?
+  property after_reply : (String -> Nil)?
+
+  def initialize
+    super
+    @replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+  end
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    super
+    @outgoing.send(JSON::Any.new(message))
+    if (method = message["method"]?.try(&.as_s?)) && (id = message["id"]?) && (payload = @replies[method]?)
+      @before_reply.try(&.call(method))
+      inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},#{payload}}))
+      @after_reply.try(&.call(method))
+    end
+  end
+
+  def update(session_id : String, fields : String) : Nil
+    inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{session_id.to_json},"update":#{fields}}}))
+  end
+end
+
+private def take_v2_frame(channel : Channel(T)) : T forall T
+  select
+  when item = channel.receive
+    item
+  when timeout(2.seconds)
+    raise "expected v2 protocol frame"
+  end
+end
+
+describe ACP::V2::Client do
+  it "rejects Agent requests before the successful initialize response" do
+    transport = V2TestTransport.new
+    transport.before_reply = ->(method : String) do
+      if method == "initialize"
+        transport.inject_raw(%({"jsonrpc":"2.0","id":"early","method":"_early","params":{}}))
+      end
+    end
+    transport.after_reply = ->(method : String) do
+      if method == "initialize"
+        transport.inject_raw(%({"jsonrpc":"2.0","id":"later","method":"_early","params":{}}))
+      end
+    end
+    client = ACP::V2::Client.new(transport)
+    client.on_extension_request = ->(_method : String, _params : JSON::Any) do
+      JSON::Any.new(client.initialization_result.not_nil!.info.name)
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)["method"].should eq("initialize")
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32600)
+    take_v2_frame(transport.outgoing)["result"].should eq("agent")
+    transport.inject_raw(%({"jsonrpc":"1.0","id":"invalid","method":"_early","params":{}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32600)
+  ensure
+    client.try(&.close)
+  end
+
+  it "negotiates v2 and acknowledges prompt insertion separately from foreground completion" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/prompt"] = %("result":{"messageId":"m"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.prompt_timeout = 2.0
+    updates = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      updates.send(note)
+      nil
+    end
+    expect_raises(ACP::InvalidStateError) { client.session_new("/work") }
+
+    client.initialize_connection.protocol_version.should eq(2_u16)
+    initialize = take_v2_frame(transport.outgoing)
+    initialize["params"]["protocolVersion"].should eq(2)
+    initialize["params"]["info"]["name"].should eq("acp-crystal")
+    initialize["params"]["capabilities"].should eq(JSON.parse("{}"))
+
+    session = client.session_new("/work")
+    session.session_id.should eq("s")
+    client.session_workspace("s").not_nil!.cwd.should eq("/work")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/new")
+    transport.before_reply = ->(method : String) do
+      transport.update("s", %({"sessionUpdate":"state_update","state":"running"})) if method == "session/prompt"
+    end
+    acknowledgement = client.session_prompt_text("s", "hello", "insert-once")
+    acknowledgement.message_id.should eq("m")
+    take_v2_frame(transport.outgoing)["params"]["idempotencyKey"].should eq("insert-once")
+    take_v2_frame(updates).update.typed.as(ACP::Protocol::V2::StateUpdate).state.should eq("running")
+    transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}))
+    take_v2_frame(updates).update.typed.as(ACP::Protocol::V2::StateUpdate).stop_reason.should eq("end_turn")
+  ensure
+    client.try(&.close)
+  end
+
+  it "reports the negotiated version on a v1 response without trying to decode v2 info" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{}})
+    client = ACP::V2::Client.new(transport)
+    mismatch = expect_raises(ACP::VersionMismatchError) { client.initialize_connection }
+    mismatch.agent_version.should eq(1_u16)
+    transport.closed?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "uses the v2 list, configuration, close, and optional delete operations" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"delete":{}}}})
+    transport.replies["session/list"] = %("result":{"sessions":[{"sessionId":"s","cwd":"/work"}],"nextCursor":"next"})
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[{"configId":"model","name":"Model","type":"select","currentValue":"fast","options":[]}]})
+    transport.replies["session/close"] = %("result":{})
+    transport.replies["session/delete"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    listing = client.session_list
+    listing.sessions.first.cwd.should eq("/work")
+    listing.next_cursor.should eq("next")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/list")
+    updated = client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "fast"))
+    updated.config_options.first["currentValue"].should eq("fast")
+    take_v2_frame(transport.outgoing)["params"]["type"].should eq("id")
+    client.session_close("s")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/close")
+    client.session_delete("s")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/delete")
+  ensure
+    client.try(&.close)
+  end
+
+  it "uses v2 auth method IDs and the v2 permission request shape" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":[{"type":"agent","methodId":"credentials","name":"Agent login"},{"type":"terminal","methodId":"terminal","name":"Terminal login"}]})
+    transport.replies["auth/login"] = %("result":{})
+    transport.replies["auth/logout"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.on_request_permission = ->(params : ACP::Protocol::V2::RequestPermissionParams) do
+      params.session_id.should eq("child")
+      params.title.should eq("Review access")
+      params.subject.not_nil!["type"].should eq("_future")
+      ACP::Protocol::V2::RequestPermissionResult.selected(params.options.first.option_id)
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    expect_raises(ACP::InvalidStateError) { client.auth_login("terminal") }
+    expect_raises(ACP::InvalidStateError) { client.session_new("/work") }
+    client.auth_login("credentials")
+    take_v2_frame(transport.outgoing)["params"]["methodId"].should eq("credentials")
+    client.auth_logout
+    take_v2_frame(transport.outgoing)["method"].should eq("auth/logout")
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"child","title":"Review access","subject":{"type":"_future"},"options":[{"optionId":"ok","name":"Allow","kind":"allow_once"}]}}))
+    take_v2_frame(transport.outgoing)["result"]["outcome"]["optionId"].should eq("ok")
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"removed","method":"fs/read_text_file","params":{}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32601)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/update","params":{}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32600)
+  ensure
+    client.try(&.close)
+  end
+
+  it "applies child and entity capabilities only after their replay boundaries" do
+    transport = V2TestTransport.new
+    transport.replies["session/resume"] = %("result":{})
+    transport.replies["tool_call/cancel"] = %("result":{})
+    transport.replies["terminal/cancel"] = %("result":{})
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+        transport.update("child", %({"sessionUpdate":"tool_call_update","toolCallId":"historical","capabilities":{"cancel":{}}}))
+        transport.update("root", %({"sessionUpdate":"replay_complete"}))
+        transport.update("child", %({"sessionUpdate":"replay_complete"}))
+        transport.update("child", %({"sessionUpdate":"tool_call_update","toolCallId":"live","capabilities":{"cancel":{}}}))
+        transport.update("child", %({"sessionUpdate":"terminal_update","terminalId":"term","capabilities":{"cancel":{}}}))
+      end
+    end
+
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    take_v2_frame(transport.outgoing)["params"]["replayFrom"]["type"].should eq("start")
+    client.subagent("child").not_nil!.parent_session_id.should eq("root")
+    client.subagent("child").not_nil!.cancel?.should be_false
+    client.session_workspace("child").not_nil!.cwd.should eq("/work")
+
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+    expect_raises(ACP::InvalidStateError) { client.session_prompt_text("child", "hello") }
+    expect_raises(ACP::InvalidStateError) { client.tool_call_cancel("child", "historical") }
+    client.tool_call_cancel("child", "live")
+    take_v2_frame(transport.outgoing)["params"]["toolCallId"].should eq("live")
+    client.terminal_cancel("child", "term")
+    take_v2_frame(transport.outgoing)["params"]["terminalId"].should eq("term")
+
+    updates = Channel(Nil).new(1)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      updates.send(nil)
+      nil
+    end
+    transport.update("child", %({"sessionUpdate":"terminal_update","terminalId":"term","capabilities":null}))
+    take_v2_frame(updates)
+    expect_raises(ACP::InvalidStateError) { client.terminal_cancel("child", "term") }
+  ensure
+    client.try(&.close)
+  end
+
+  it "answers only the individual permission cancelled by the Agent" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    entered = Channel(String).new(2)
+    release = Channel(Nil).new(2)
+    client.on_request_permission = ->(params : ACP::Protocol::V2::RequestPermissionParams) do
+      entered.send(params.title)
+      release.receive
+      ACP::Protocol::V2::RequestPermissionResult.selected("ok")
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    {"stopped", "kept"}.each do |id|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"method":"session/request_permission","params":{"sessionId":"s","title":#{id.to_json},"options":[]}}))
+    end
+    [take_v2_frame(entered), take_v2_frame(entered)].sort.should eq(["kept", "stopped"])
+    client.session_cancel("s")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/cancel")
+
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"stopped"}}))
+    stopped = take_v2_frame(transport.outgoing)
+    stopped["id"].should eq("stopped")
+    stopped["result"]["outcome"]["outcome"].should eq("cancelled")
+    2.times { release.send(nil) }
+    kept = take_v2_frame(transport.outgoing)
+    kept["id"].should eq("kept")
+    kept["result"]["outcome"]["optionId"].should eq("ok")
+  ensure
+    release.try(&.close)
+    client.try(&.close)
+  end
+
+  it "checks v2 elicitation capabilities and replies with cancel to a pending elicitation" do
+    transport = V2TestTransport.new
+    caps = ACP::Protocol::V2::ClientCapabilities.new(elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new))
+    client = ACP::V2::Client.new(transport, capabilities: caps)
+    entered = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+      entered.send(nil)
+      release.receive
+      ACP::Protocol::CreateElicitationResult.decline
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"mode","method":"elicitation/create","params":{"sessionId":"s","mode":"url","message":"Open","elicitationId":"url","url":"https://example.test"}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32602)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"scope","method":"elicitation/create","params":{"requestId":null,"mode":"form","message":"Answer","requestedSchema":{"type":"object","properties":{}}}}))
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32602)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"question","method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Answer","requestedSchema":{"type":"object","properties":{}}}}))
+    take_v2_frame(entered)
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"question"}}))
+    take_v2_frame(transport.outgoing)["result"]["action"].should eq("cancel")
+  ensure
+    release.try(&.close)
+    client.try(&.close)
   end
 end

@@ -6,7 +6,45 @@ weight = 1
 
 ## Overview
 
-`ACP::Client` is the core class that manages the ACP protocol lifecycle. It handles request correlation, dispatches incoming messages via a background fiber, and provides methods for all ACP protocol operations.
+`ACP::Client` manages the ACP v1 lifecycle. It handles request correlation and dispatches incoming messages via a background fiber.
+
+## ACP v2 Preview
+
+Use `ACP::V2::Client` with an existing transport, or `ACP::V2.connect` to start
+and initialize an Agent subprocess. Use `ACP::Client` or `ACP.connect` for
+v1 Agents. A v2 connection raises `VersionMismatchError` when the Agent
+selects a different version.
+
+```crystal
+client = ACP::V2::Client.new(ACP::ProcessTransport.new("my-agent"))
+client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+  if chunk = note.update.typed.as?(ACP::Protocol::V2::MessageChunkUpdate)
+    print chunk.to_content_chunk.try(&.text)
+  end
+  nil
+end
+
+begin
+  client.initialize_connection
+  session = client.session_new(Dir.current)
+  inserted = client.session_prompt_text(session.session_id, "Summarize this project")
+  puts "Inserted message #{inserted.message_id}"
+  # Continue reading session updates until your application is done.
+ensure
+  client.close
+end
+```
+
+The prompt response acknowledges insertion. Foreground completion arrives
+in an idle `state_update`. Keep `on_update` callbacks short because they run
+on the dispatcher fiber.
+
+The v2 client supports session creation, listing, resume and replay, prompts,
+configuration changes, close and delete. Register `on_request_permission`
+and `on_create_elicitation` to handle Agent requests. Authentication is
+available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
+Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
+current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 
 ## Constructor
 

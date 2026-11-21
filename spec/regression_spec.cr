@@ -800,15 +800,17 @@ describe "ACP::JsonRpcError.from_json_any (out-of-range code)" do
   end
 
   it "surfaces as a JsonRpcError from a request" do
-    transport = TestTransport.new
+    transport = SignalingTransport.new
     client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
     spawn do
-      transport.inject_raw(%({"jsonrpc":"2.0","id":1,"error":{"code":-99999999999,"message":"boom"}}))
+      id = transport.written.receive["id"]
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"error":{"code":-99999999999,"message":"boom"}}))
     end
 
     expect_raises(ACP::JsonRpcError, "boom") { client.initialize_connection }
-
-    client.close
+  ensure
+    client.try(&.close)
   end
 end
 

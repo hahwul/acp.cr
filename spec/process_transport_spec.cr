@@ -183,3 +183,60 @@ describe "ACP terminal authentication" do
     Dir.delete(directory) if directory && Dir.exists?(directory)
   end
 end
+
+describe "ACP v2 terminal authentication" do
+  it "applies the ordered environment overlay and reinitializes the v2 connection" do
+    directory = File.join(Dir.tempdir, "acp-v2-terminal-auth-#{Random::Secure.hex(8)}")
+    Dir.mkdir(directory)
+    script = File.join(directory, "agent.sh")
+    marker = File.join(directory, "authorized")
+    File.write(script, <<-'SH')
+      #!/bin/sh
+      [ "$1" = "base argument" ] || exit 4
+      if [ "$2" = "--login" ]; then
+        [ "$3" = "two words" ] && [ "$ACP_V2_SPEC_LOGIN" = "interactive" ] || exit 5
+        printf approved > authorized
+        exit 0
+      fi
+      [ "$ACP_V2_SPEC_LOGIN" = "base" ] || exit 6
+      while IFS= read -r wire; do
+        case "$wire" in
+          *'"method":"initialize"'*)
+            case "$wire" in
+              *'"protocolVersion":2'*'"terminal":{}'*) ;;
+              *) exit 7 ;;
+            esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}},"authMethods":[{"type":"terminal","methodId":"login","name":"Terminal login","args":["--login","two words"],"env":[{"name":"ACP_V2_SPEC_LOGIN","value":"previous"},{"name":"ACP_V2_SPEC_LOGIN","value":"interactive"}]}]}}'
+            ;;
+          *'"method":"session/new"'*)
+            [ -f authorized ] || exit 8
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"logged-in"}}'
+            ;;
+        esac
+      done
+      SH
+
+    caps = ACP::Protocol::V2::ClientCapabilities.new(
+      auth: ACP::Protocol::V2::ClientAuthCapabilities.new(
+        terminal: ACP::Protocol::V2::Capability.new
+      )
+    )
+    client = ACP::V2.connect("/bin/sh", [script, "base argument"], env: {"ACP_V2_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps)
+    client.request_timeout = 2.0
+    expect_raises(ACP::AuthenticationError, /declined/) { client.authenticate_terminal("login") { false } }
+    File.exists?(marker).should be_false
+    replacement = client.authenticate_terminal("login") do |method|
+      method.terminal_settings.not_nil!.environment["ACP_V2_SPEC_LOGIN"].should eq("interactive")
+      true
+    end
+    client.closed?.should be_true
+    replacement.initialization_result.not_nil!.protocol_version.should eq(2_u16)
+    replacement.session_new(directory).session_id.should eq("logged-in")
+  ensure
+    replacement.try(&.close)
+    client.try(&.close)
+    File.delete(marker) if marker && File.exists?(marker)
+    File.delete(script) if script && File.exists?(script)
+    Dir.delete(directory) if directory && Dir.exists?(directory)
+  end
+end
