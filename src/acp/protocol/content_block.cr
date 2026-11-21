@@ -18,59 +18,166 @@
 #
 # Reference: https://agentclientprotocol.com/protocol/content
 #
-# Uses Crystal's `use_json_discriminator` to automatically deserialize
-# the correct subtype based on the "type" field.
+# Selects the concrete subtype from the "type" field.
 
 require "json"
 require "uri"
+require "./raw_json"
 
 module ACP
   module Protocol
+    # :nodoc:
+    module OptionalContentValue(T)
+      def self.from_json(pull : JSON::PullParser) : T?
+        T.from_json(WireFrame.read_raw(pull))
+      rescue JSON::ParseException
+        nil
+      end
+
+      def self.to_json(value : T, builder : JSON::Builder) : Nil
+        value.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module OptionalContentList(T)
+      def self.from_json(pull : JSON::PullParser) : Array(T)?
+        unless pull.kind.begin_array?
+          pull.skip
+          return nil
+        end
+
+        values = [] of T
+        pull.read_array do
+          if value = OptionalContentValue(T).from_json(pull)
+            values << value
+          end
+        end
+        values
+      end
+
+      def self.to_json(values : Array(T), builder : JSON::Builder) : Nil
+        values.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module ContentBlockArray
+      def self.from_json(pull : JSON::PullParser) : PreservedJson
+        unless pull.kind.begin_array?
+          raise JSON::ParseException.new("Content blocks must be a JSON array", *pull.location)
+        end
+        PreservedJson.new(pull, project_array_objects: true)
+      end
+
+      def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+        value.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module ResourceLinkSize
+      def self.from_json(pull : JSON::PullParser) : Int64 | UInt64 | Nil
+        if pull.kind.int?
+          value = pull.read_raw
+          value.to_i64? || value.to_u64?
+        else
+          pull.skip
+          nil
+        end
+      end
+
+      def self.to_json(value : Int64 | UInt64, builder : JSON::Builder) : Nil
+        value.to_json(builder)
+      end
+    end
+
+    # An open icon theme, such as light or dark.
+    alias IconTheme = String
+
+    # Display metadata for a resource-link icon.
+    struct Icon
+      include JSON::Serializable
+      include LosslessUnmapped
+      include LosslessMetadata
+
+      # URI supplied by the peer.
+      property src : String
+
+      # Optional media type override for the icon.
+      @[JSON::Field(key: "mimeType", converter: ::ACP::Protocol::OptionalContentValue(String))]
+      property mime_type : String?
+
+      # Supported display sizes, such as "48x48" or "any".
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentList(String))]
+      property sizes : Array(String)?
+
+      # Optional background theme. Unknown themes retain their wire strings.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
+      property theme : IconTheme?
+
+      # Creates an icon without resolving its URI.
+      def initialize(@src : String, @mime_type : String? = nil, @sizes : Array(String)? = nil,
+                     @theme : IconTheme? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
+      end
+
+      protected def keep_exact_unmapped?(_key : String) : Bool
+        true
+      end
+    end
+
     # ─── Annotations ──────────────────────────────────────────────────
 
     # Optional annotations for content blocks. The client can use
     # annotations to inform how objects are used or displayed.
     struct Annotations
       include JSON::Serializable
+      include LosslessMetadata
 
       # Describes who the intended audience of this content is.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentList(String))]
       property audience : Array(String)?
 
       # An ISO 8601 datetime string indicating when the content was last modified.
-      @[JSON::Field(key: "lastModified")]
+      @[JSON::Field(key: "lastModified", converter: ::ACP::Protocol::OptionalContentValue(String))]
       property last_modified : String?
 
       # A priority hint for the content (0.0 to 1.0).
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(Float64))]
       property priority : Float64?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @audience : Array(String)? = nil,
         @last_modified : String? = nil,
         @priority : Float64? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
     # ─── Abstract Content Block Base ──────────────────────────────────
 
-    # Abstract base for all content block types. Deserialization is
-    # dispatched via the "type" JSON field using Crystal's built-in
-    # discriminator support.
+    # Abstract base for all standard content block types.
     abstract struct ContentBlock
       include JSON::Serializable
 
-      use_json_discriminator "type", {
-        "text"          => TextContentBlock,
-        "image"         => ImageContentBlock,
-        "audio"         => AudioContentBlock,
-        "resource"      => ResourceContentBlock,
-        "resource_link" => ResourceLinkContentBlock,
-      }
+      # Reads a standard block at the transport's JSON nesting limit.
+      def self.new(pull : JSON::PullParser)
+        location = pull.location
+        block = RawJson.new(pull)
+        type = block.field("type").try(&.as_s?)
+        case type
+        when "text"          then TextContentBlock.from_json(block.json)
+        when "image"         then ImageContentBlock.from_json(block.json)
+        when "audio"         then AudioContentBlock.from_json(block.json)
+        when "resource"      then ResourceContentBlock.from_json(block.json)
+        when "resource_link" then ResourceLinkContentBlock.from_json(block.json)
+        else
+          raise JSON::SerializableError.new("Unknown or missing content type #{type.inspect}", to_s, "type", *location, nil)
+        end
+      end
 
       # The discriminator field present on every content block.
       getter type : String
@@ -320,6 +427,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/content#resource-link
     struct ResourceLinkContentBlock < ContentBlock
       include JSON::Serializable
+      include LosslessUnmapped
+      include LosslessMetadata
 
       # Always "resource_link" for this block type.
       getter type : String = "resource_link"
@@ -331,24 +440,27 @@ module ACP
       property name : String
 
       # The MIME type of the resource.
-      @[JSON::Field(key: "mimeType")]
+      @[JSON::Field(key: "mimeType", converter: ::ACP::Protocol::OptionalContentValue(String))]
       property mime_type : String?
 
       # Optional display title for the resource.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property title : String?
 
       # Optional description of the resource contents.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property description : String?
 
-      # Optional size of the resource in bytes.
-      property size : Int64?
+      @[JSON::Field(key: "size", converter: ::ACP::Protocol::ResourceLinkSize)]
+      @wire_size : Int64 | UInt64 | Nil
 
       # Optional metadata about how the content should be used or displayed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Optional icons provided for this link in ACP v2.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentList(::ACP::Protocol::Icon))]
+      property icons : Array(Icon)?
 
       def initialize(
         @uri : String,
@@ -356,11 +468,44 @@ module ACP
         @mime_type : String? = nil,
         @title : String? = nil,
         @description : String? = nil,
-        @size : Int64? = nil,
+        size : Int64? = nil,
         @annotations : Annotations? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
+        *,
+        @icons : Array(Icon)? = nil,
+        size_bytes : UInt64? = nil,
       )
         @type = "resource_link"
+        @wire_size = size_bytes || size
+        self.meta = meta
+      end
+
+      # Size in the signed range for existing callers and ACP v1.
+      def size : Int64?
+        if (value = @wire_size) && value <= Int64::MAX
+          value.to_i64
+        end
+      end
+
+      # Replaces the size using the ACP v1 signed field.
+      def size=(value : Int64?) : Int64?
+        @wire_size = value
+      end
+
+      # Non-negative size across the full ACP v2 range.
+      def size_bytes : UInt64?
+        if (value = @wire_size) && value >= 0
+          value.to_u64
+        end
+      end
+
+      # Replaces the size using the ACP v2 unsigned field.
+      def size_bytes=(value : UInt64?) : UInt64?
+        @wire_size = value
+      end
+
+      protected def keep_exact_unmapped?(_key : String) : Bool
+        true
       end
 
       # Creates a resource link from an absolute file path.
@@ -368,10 +513,10 @@ module ACP
       # The path is percent-encoded, so paths containing spaces, `#`, `?`, or
       # `%` produce a valid URI rather than one a strict parser rejects or
       # truncates at the first `#`. `path` reverses the encoding.
-      def self.from_path(path : String, mime_type : String? = nil) : ResourceLinkContentBlock
+      def self.from_path(path : String, mime_type : String? = nil, *, icons : Array(Icon)? = nil) : ResourceLinkContentBlock
         uri = path.starts_with?("/") ? "file://#{URI.encode_path(path)}" : path
         name = File.basename(path)
-        new(uri: uri, name: name, mime_type: mime_type)
+        new(uri: uri, name: name, mime_type: mime_type, icons: icons)
       end
 
       # Helper to extract the file path from a `file://` URI.
@@ -418,8 +563,8 @@ module ACP
       end
 
       # Creates a resource link content block.
-      def self.resource_link(uri : String, name : String, mime_type : String? = nil) : ResourceLinkContentBlock
-        ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type)
+      def self.resource_link(uri : String, name : String, mime_type : String? = nil, *, icons : Array(Icon)? = nil) : ResourceLinkContentBlock
+        ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type, icons: icons)
       end
     end
   end

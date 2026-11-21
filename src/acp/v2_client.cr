@@ -196,11 +196,14 @@ module ACP
           raise JsonRpcError.new(code.to_i32, message, data, received: true)
         end
 
-        def submit_prompt(params : JSON::Any, skill_names : Array(String)?) : Wire::SessionPromptResult
+        def submit_prompt(params : Protocol::RawJson, skill_names : Array(String)?) : Wire::SessionPromptResult
           method = AgentMethod::SESSION_PROMPT
-          builder = ->(id : Int64) { Protocol.build_request_raw(id, method, params) }
+          session_id = params.field("sessionId").not_nil!.as_s?.not_nil!
+          projection = params.to_json_any?
+          wire_params = params unless projection && Protocol::WireFrame.encode(projection) == params.json
+          routing_params = projection || JSON::Any.new({"sessionId" => JSON::Any.new(session_id)})
+          builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_params) }
           if skill_names && !skill_names.empty?
-            session_id = params["sessionId"].as_s
             check_skills = -> do
               @pending_mutex.synchronize do
                 raise ConnectionClosedError.new if @disconnected
@@ -215,7 +218,7 @@ module ACP
               end
             end
           end
-          response = send_and_await_response(method, builder, prompt_timeout, before_send: check_skills)
+          response = send_and_await_response(method, builder, prompt_timeout, before_send: check_skills, wire_params: wire_params)
           decode_typed_response(method, response, Wire::SessionPromptResult)
         end
 
@@ -648,8 +651,11 @@ module ACP
           end
           # Validate the same detached payload that will be sent, even if an
           # extension resolver yields or edits the caller's original blocks.
-          payload = JSON.parse(Protocol::WireFrame.encode(params))
-          skills = validate_prompt(caps.prompt, payload["prompt"].as_a)
+          payload = Protocol::RawJson.new(JSON::PullParser.new(Protocol::WireFrame.encode(params)))
+          unless Protocol::WireFrame.unique_members?(payload.json)
+            raise ArgumentError.new("ACP v2 prompt content must have unique JSON member names")
+          end
+          skills = validate_prompt(caps.prompt, payload.field("prompt").not_nil!.elements?.not_nil!)
           # The Agent resolves keyed retries even if the command list has changed
           # since insertion or since an earlier connection.
           @connection.submit_prompt(payload, retry_submission ? nil : skills)
@@ -874,13 +880,13 @@ module ACP
         raise ArgumentError.new("ACP v2 MCP HTTP servers require an absolute HTTP(S) URL")
       end
 
-      private def validate_prompt(caps : Wire::PromptCapabilities?, blocks : Array(JSON::Any)) : Array(String)
+      private def validate_prompt(caps : Wire::PromptCapabilities?, blocks : Array(Protocol::RawJson)) : Array(String)
         raise ArgumentError.new("ACP v2 prompts require at least one content block") if blocks.empty?
 
         skills = [] of String
         resolve = @on_prompt_content_type
         blocks.each_with_index do |block, index|
-          kind = block.as_h?.try(&.["type"]?).try(&.as_s?) ||
+          kind = block.field("type").try(&.as_s?) ||
                  raise ArgumentError.new("ACP v2 prompt content blocks require a type")
           case kind
           when "text", "resource_link"
@@ -915,8 +921,8 @@ module ACP
         skills
       end
 
-      private def validate_standard_prompt_block(block : JSON::Any) : Nil
-        case content = Protocol::ContentBlock.from_json(Protocol::WireFrame.encode(block))
+      private def validate_standard_prompt_block(block : Protocol::RawJson) : Nil
+        case content = Protocol::ContentBlock.from_json(block.json)
         when Protocol::ImageContentBlock
           if (uri = content.uri) && !valid_prompt_uri?(uri)
             raise ArgumentError.new("ACP v2 image prompts require an absolute URI when one is supplied")
@@ -927,6 +933,9 @@ module ACP
         when Protocol::ResourceLinkContentBlock
           unless valid_prompt_uri?(content.uri)
             raise ArgumentError.new("ACP v2 resource links require an absolute URI")
+          end
+          if (size = block.field("size")) && !size.null? && content.size_bytes.nil?
+            raise ArgumentError.new("ACP v2 resource link sizes must be non-negative UInt64 integers")
           end
         when Protocol::ResourceContentBlock
           uri = content.uri

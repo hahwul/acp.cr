@@ -1440,6 +1440,7 @@ module ACP
     # - `on_result` — internal cache update from a successful result's JSON.
     # - `on_response` — internal observer for a correlated response envelope.
     # - `validate_choice` — checks advertised choices just before a setter is written.
+    # - `wire_params` — exact params to send alongside a separate JSON::Any routing view.
     #
     # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
@@ -1454,6 +1455,7 @@ module ACP
       check_fork_cursor : Bool = false,
       validate_choice : Bool = false,
       before_send : (-> Nil)? = nil,
+      wire_params : Protocol::RawJson? = nil,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1469,6 +1471,20 @@ module ACP
       end
       id_str = id.to_s
       message = message_builder.call(id)
+      if wire_params
+        envelope = JSON.build do |json|
+          json.object do
+            message.each do |key, value|
+              if key == "params"
+                json.field(key, wire_params)
+              else
+                json.field(key, value)
+              end
+            end
+          end
+        end
+        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true)
+      end
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
       close_on_missing = method == Protocol::AgentMethod::SESSION_CLOSE ||
@@ -1525,8 +1541,8 @@ module ACP
               @v2_initialize_armed = true
             end
           end
-        elsif fork_cursor || arm_at_write || before_send || mcp_servers
-          @transport.send_checked(message) do
+        elsif wire_frame || fork_cursor || arm_at_write || before_send || mcp_servers
+          preflight = -> do
             refresh_fork_grant(id_str, params) if fork_cursor
             before_send.try(&.call)
             @mcp_provider.publish(mcp_servers) if mcp_servers
@@ -1548,6 +1564,11 @@ module ACP
               end
             end
             mark_v2_request_sent if v2_request
+          end
+          if wire_frame
+            @transport.send_wire(wire_frame, &preflight)
+          else
+            @transport.send_checked(message, &preflight)
           end
         else
           mark_v2_request_sent if v2_request

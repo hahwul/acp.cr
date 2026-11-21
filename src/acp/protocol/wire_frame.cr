@@ -1,4 +1,5 @@
 require "json"
+require "set"
 
 module ACP
   module Protocol
@@ -122,6 +123,27 @@ module ACP
         JSON.parse(source)
       rescue JSON::ParseException
         nil
+      end
+
+      # Whether all JSON objects use distinct member names.
+      # :nodoc:
+      def self.unique_members?(source : String) : Bool
+        unique_members?(JSON::PullParser.new(source))
+      end
+
+      private def self.unique_members?(pull : JSON::PullParser) : Bool
+        case pull.kind
+        when .begin_object?
+          keys = Set(String).new
+          pull.read_object do |key|
+            return false unless keys.add?(key) && unique_members?(pull)
+          end
+        when .begin_array?
+          pull.read_array { return false unless unique_members?(pull) }
+        else
+          pull.skip
+        end
+        true
       end
 
       # Returns the exact payload of a successful JSON-RPC response.
