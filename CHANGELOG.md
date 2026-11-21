@@ -29,6 +29,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add `ACP.connect_negotiated` for automatic ACP v2 Preview selection and v1 fallback.
 - Decode ACP v2 configuration options and advertised commands in session updates and responses.
 - Decode ACP v2 subagents, inter-session messages, execution plans, session info, usage, notices, and compaction updates.
 - Decode ACP v2 tool-call and display terminal updates, structured diffs, and streamed terminal bytes.
