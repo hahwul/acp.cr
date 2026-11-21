@@ -179,20 +179,19 @@ module ACP
       abstract struct SessionSetupResult
         include JSON::Serializable
         include LosslessConfigOptionList
-        include AvailableCommandList
+        include LosslessAvailableCommandList
         include LosslessMetadata
 
-        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::ConfigOptionArray)]
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::AdvertisementArray)]
         @config_options_wire : PreservedJson = PreservedJson.new(JSON::Any.new([] of JSON::Any))
 
-        # Available slash commands, including open command variants.
         @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::V2::AvailableCommandsJson)]
-        property available_commands : Array(JSON::Any) = [] of JSON::Any
+        @available_commands_wire : PreservedJson = PreservedJson.new(JSON::Any.new([] of JSON::Any))
       end
 
       # A newly created v2 session and its initial configuration.
       struct SessionNewResult < SessionSetupResult
-        ConfigOptionArray.guard_envelope
+        AdvertisementArray.guard_envelope "configOptions", "availableCommands"
 
         # Unique ID assigned by the Agent.
         @[JSON::Field(key: "sessionId")]
@@ -202,25 +201,27 @@ module ACP
         def initialize(
           @session_id : String,
           config_options : Array(JSON::Any) = [] of JSON::Any,
-          @available_commands : Array(JSON::Any) = [] of JSON::Any,
+          available_commands : Array(JSON::Any) = [] of JSON::Any,
           meta : Hash(String, JSON::Any)? = nil,
         )
           self.config_options = config_options
+          self.available_commands = available_commands
           self.meta = meta
         end
       end
 
       # Configuration returned when resuming a v2 session.
       struct SessionResumeResult < SessionSetupResult
-        ConfigOptionArray.guard_envelope
+        AdvertisementArray.guard_envelope "configOptions", "availableCommands"
 
         # Creates a resume result.
         def initialize(
           config_options : Array(JSON::Any) = [] of JSON::Any,
-          @available_commands : Array(JSON::Any) = [] of JSON::Any,
+          available_commands : Array(JSON::Any) = [] of JSON::Any,
           meta : Hash(String, JSON::Any)? = nil,
         )
           self.config_options = config_options
+          self.available_commands = available_commands
           self.meta = meta
         end
       end
@@ -236,15 +237,16 @@ module ACP
 
       # Advisory options and commands for a proposed v2 session.
       struct SessionOptionsResult < SessionSetupResult
-        ConfigOptionArray.guard_envelope
+        AdvertisementArray.guard_envelope "configOptions", "availableCommands"
 
         # Creates an options and commands preview.
         def initialize(
           config_options : Array(JSON::Any) = [] of JSON::Any,
-          @available_commands : Array(JSON::Any) = [] of JSON::Any,
+          available_commands : Array(JSON::Any) = [] of JSON::Any,
           meta : Hash(String, JSON::Any)? = nil,
         )
           self.config_options = config_options
+          self.available_commands = available_commands
           self.meta = meta
         end
       end
@@ -376,7 +378,7 @@ module ACP
         include LosslessConfigOptionList
         include LosslessMetadata
 
-        ConfigOptionArray.guard_envelope
+        AdvertisementArray.guard_envelope "configOptions"
 
         @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::V2::RequiredConfigOptionArray)]
         @config_options_wire : PreservedJson

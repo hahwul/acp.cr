@@ -5,20 +5,22 @@ module ACP
   module Protocol
     module V2
       # :nodoc:
-      module ConfigOptionArray
-        # Validates the option-list field before JSON::Serializable can collapse repeated members.
-        macro guard_envelope
+      module AdvertisementArray
+        # Validates list fields before JSON::Serializable can collapse repeated members.
+        macro guard_envelope(*members)
           def self.new(pull : JSON::PullParser) : self
             wire = ::ACP::Protocol::WireFrame.read_raw(pull)
-            ::ACP::Protocol::WireFrame.field(wire, "configOptions", unique: true)
+            {% for member in members %}
+              ::ACP::Protocol::WireFrame.field(wire, {{member}}, unique: true)
+            {% end %}
             previous_def(JSON::PullParser.new(wire))
           end
         end
 
-        def self.from_json(pull : JSON::PullParser) : PreservedJson
+        def self.from_json(pull : JSON::PullParser, *, project_nested_objects : Bool = false) : PreservedJson
           if pull.kind.begin_array?
             wire = RawJson.new(pull)
-            PreservedJson.new(wire, project_array_objects: true, object_entries_only: true)
+            PreservedJson.new(wire, project_array_objects: true, object_entries_only: true, project_nested_objects: project_nested_objects)
           else
             WireFrame.read_raw(pull)
             PreservedJson.new(JSON::Any.new([] of JSON::Any))
@@ -36,7 +38,7 @@ module ACP
           unless pull.kind.begin_array?
             raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
           end
-          ConfigOptionArray.from_json(pull)
+          AdvertisementArray.from_json(pull)
         end
 
         def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
@@ -56,7 +58,7 @@ module ACP
         # User-visible group label.
         getter name : String
 
-        @[JSON::Field(key: "options", converter: ::ACP::Protocol::V2::ConfigOptionArray)]
+        @[JSON::Field(key: "options", converter: ::ACP::Protocol::V2::AdvertisementArray)]
         @options_wire : PreservedJson
 
         # Creates a group with its selectable values.
@@ -88,7 +90,7 @@ module ACP
       # An open ACP v2 configuration option with typed access to known selectors.
       struct ConfigOption
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
 
         # Option discriminator, such as select or boolean.
         @[JSON::Field(key: "type")]
@@ -105,22 +107,6 @@ module ACP
         def initialize(@type : String, @config_id : String, @name : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
-        protected def keep_exact_unmapped?(_key : String) : Bool
-          true
-        end
-
-        # The original option fields, including exact extension data.
-        def raw : RawJson
-          RawJson.new(JSON::PullParser.new(WireFrame.encode(self)))
-        end
-
-        # Exact extension metadata scoped to this option.
-        def meta_raw : RawJson?
-          if metadata = exact_unmapped_json("_meta")
-            RawJson.new(JSON::PullParser.new(metadata)) if metadata.starts_with?('{')
-          end
-        end
-
         # User-visible description when supplied.
         def description : String?
           @json_unmapped["description"]?.try(&.as_s?)
@@ -129,11 +115,6 @@ module ACP
         # Optional semantic category, including future categories.
         def category : String?
           @json_unmapped["category"]?.try(&.as_s?)
-        end
-
-        # Extension metadata scoped to the option.
-        def meta : Hash(String, JSON::Any)?
-          @json_unmapped["_meta"]?.try(&.as_h?)
         end
 
         # Selected value for a select option.
@@ -231,7 +212,7 @@ module ACP
       # An open input specification for an advertised command.
       struct CommandInput
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
 
         # Input discriminator, including the standard text kind.
         @[JSON::Field(key: "type")]
@@ -245,17 +226,12 @@ module ACP
         def text_hint : String?
           @json_unmapped["hint"]?.try(&.as_s?) if @type == "text"
         end
-
-        # Extension metadata scoped to the input specification.
-        def meta : Hash(String, JSON::Any)?
-          @json_unmapped["_meta"]?.try(&.as_h?)
-        end
       end
 
       # An advertised command, including open variants that are not slash commands.
       struct AvailableCommand
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
 
         # Command discriminator, such as command for slash commands.
         @[JSON::Field(key: "type")]
@@ -280,27 +256,20 @@ module ACP
         def skill : Skill?
           return unless @type == "skill" && Skill.valid_name?(@name)
 
-          path = @json_unmapped["path"]?.try(&.as_s?)
-          Skill.new(@name, @description, path, meta)
+          Skill.from_json(WireFrame.encode(self))
         end
 
         # Input specification for a recognized slash command, when available.
         def input : CommandInput?
           return unless slash_command?
 
-          raw = raw_field("input")
-          raw ||= @json_unmapped["input"]?.try(&.as_h?).try { |value| WireFrame.encode(value) }
-          return unless raw
+          raw = exact_unmapped_json("input")
+          return unless raw && WireFrame.unique_members?(raw, recursive: false)
 
           input = CommandInput.from_json(raw)
           input if input.type != "text" || input.text_hint
         rescue JSON::Error
           nil
-        end
-
-        # Extension metadata scoped to the command.
-        def meta : Hash(String, JSON::Any)?
-          @json_unmapped["_meta"]?.try(&.as_h?)
         end
       end
 
@@ -338,88 +307,87 @@ module ACP
         end
       end
 
-      # Typed access to advertised commands while retaining their raw values.
+      # Typed access to advertised commands.
       module AvailableCommandList
-        # Parses entries that carry a v2 command discriminator, name, and description.
+        # Parses unambiguous commands in the Agent's order.
         def typed_available_commands : Array(AvailableCommand)
-          available_commands.compact_map { |raw| AvailableCommandsJson.typed_command(WireFrame.encode(raw)) }
+          AvailableCommandsJson.decode_list(available_commands_raw)
         end
 
-        # Parses skill entries whose names are unique across the command list.
+        # Parses unambiguous skill entries.
         def typed_available_skills : Array(Skill)
-          AvailableCommandsJson.unique(typed_available_commands).compact_map(&.skill)
+          typed_available_commands.compact_map(&.skill)
+        end
+
+        # The advertised command array as JSON.
+        def available_commands_raw : RawJson
+          RawJson.new(JSON::PullParser.new(WireFrame.encode(available_commands)))
+        end
+      end
+
+      # :nodoc:
+      module LosslessAvailableCommandList
+        include AvailableCommandList
+
+        # Representable command fields, including available input hints.
+        def available_commands : Array(JSON::Any)
+          @available_commands_wire.value.not_nil!.as_a
+        end
+
+        # Replaces the advertised list.
+        def available_commands=(commands : Array(JSON::Any)) : Array(JSON::Any)
+          @available_commands_wire = PreservedJson.new(JSON::Any.new(commands))
+          commands
+        end
+
+        # The exact advertised list, including extension values.
+        def available_commands_raw : RawJson
+          @available_commands_wire.raw
         end
       end
 
       # :nodoc:
       module AvailableCommandsJson
-        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
-          commands = [] of JSON::Any
-          unless pull.kind.begin_array?
-            pull.skip
-            return commands
-          end
-          pull.read_array do
-            if pull.kind.begin_object?
-              command = parse_command(WireFrame.read_raw(pull))
-              commands << command if command
-            else
-              pull.skip
-            end
-          end
-          commands
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          AdvertisementArray.from_json(pull, project_nested_objects: true)
         end
 
-        def self.typed_command(raw : String) : AvailableCommand?
+        def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
+          value.to_json(json)
+        end
+
+        def self.decode_list(raw : RawJson) : Array(AvailableCommand)
+          entries = raw.elements? || return [] of AvailableCommand
+          names = entries.compact_map { |entry| entry.field("name").try(&.as_s?) }.tally
+          entries.compact_map do |entry|
+            command = typed_command(entry.json)
+            command if command && names[command.name] == 1
+          end
+        end
+
+        private def self.typed_command(raw : String) : AvailableCommand?
+          return unless WireFrame.unique_members?(raw, recursive: false)
+
           command = AvailableCommand.from_json(raw)
           return unless Skill.valid_name?(command.name)
           return if command.slash_command? && command.name.starts_with?('/')
-          return if command.type == "skill" && !command.skill
 
           command
         rescue JSON::Error
           nil
         end
-
-        def self.unique(commands : Array(AvailableCommand)) : Array(AvailableCommand)
-          names = commands.map(&.name).tally
-          commands.select { |command| names[command.name] == 1 }
-        end
-
-        private def self.parse_command(raw : String) : JSON::Any?
-          JSON.parse(raw)
-        rescue JSON::Error
-          # Keep a typed view when only an optional field is outside JSON::Any.
-          # The session's exact list still retains all of the original fields.
-          if command = typed_command(raw)
-            fields = command.json_unmapped.dup
-            fields["type"] = JSON::Any.new(command.type)
-            fields["name"] = JSON::Any.new(command.name)
-            fields["description"] = JSON::Any.new(command.description)
-            if (input = command.input) && !fields.has_key?("input")
-              attributes = input.json_unmapped.dup
-              attributes["type"] = JSON::Any.new(input.type)
-              fields["input"] = JSON::Any.new(attributes)
-            end
-            JSON::Any.new(fields)
-          end
-        end
-
-        def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
-          value.to_json(json)
-        end
       end
 
       # :nodoc:
       module RequiredAvailableCommands
-        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
           unless pull.kind.begin_array?
             raise JSON::ParseException.new("Available commands must be an array", *pull.location)
           end
           AvailableCommandsJson.from_json(pull)
         end
 
-        def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+        def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
           AvailableCommandsJson.to_json(value, json)
         end
       end
@@ -427,22 +395,22 @@ module ACP
       # Replaces the available commands advertised for a session.
       struct AvailableCommandsUpdate
         include JSON::Serializable
-        include AvailableCommandList
+        include LosslessAvailableCommandList
+        include LosslessMetadata
+
+        AdvertisementArray.guard_envelope "availableCommands"
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "available_commands_update"
 
-        # Complete list of currently advertised commands.
         @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::V2::RequiredAvailableCommands)]
-        property available_commands : Array(JSON::Any)
-
-        # Extension metadata scoped to the update.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        @available_commands_wire : PreservedJson
 
         # Creates an update with replacement command advertisements.
-        def initialize(@available_commands : Array(JSON::Any), @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(available_commands : Array(JSON::Any), meta : Hash(String, JSON::Any)? = nil)
+          @available_commands_wire = PreservedJson.new(JSON::Any.new(available_commands))
+          self.meta = meta
         end
       end
 
@@ -452,7 +420,7 @@ module ACP
         include LosslessConfigOptionList
         include LosslessMetadata
 
-        ConfigOptionArray.guard_envelope
+        AdvertisementArray.guard_envelope "configOptions"
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]

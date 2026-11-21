@@ -8575,7 +8575,8 @@ describe "ACP v2 draft agent skills" do
       skills[1].path.should be_nil
       skills[2].path.should be_nil
       skills[2].meta.should be_nil
-      value.typed_available_commands.select(&.slash_command?).map(&.name).should eq(["shared"])
+      value.typed_available_commands.select(&.slash_command?).should be_empty
+      value.available_commands_raw.elements?.not_nil!.count { |entry| entry.field("name").try(&.as_s?) == "shared" }.should eq(2)
       value.typed_available_commands.find!(&.type.==("_future")).json_unmapped["futureField"].should eq(true)
     end
   end

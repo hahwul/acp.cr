@@ -66,6 +66,7 @@ module ACP
       # A selectable Agent skill advertised as a session command.
       struct Skill
         include JSON::Serializable
+        include LosslessMetadata
 
         # :nodoc:
         alias OptionalPath = Protocol::OptionalAbsolutePath
@@ -83,13 +84,15 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::V2::Skill::OptionalPath)]
         getter path : String?
 
-        # Extension metadata scoped to the entry.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Creates an advertised skill.
-        def initialize(@name : String, @description : String, path : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@name : String, @description : String, path : String? = nil, meta : Hash(String, JSON::Any)? = nil)
           @path = path if path && Protocol.absolute_path?(path)
+          self.meta = meta
+        end
+
+        # Extension metadata when the complete object fits in JSON::Any.
+        def meta : Hash(String, JSON::Any)?
+          super unless @metadata_wire.try(&.partial?)
         end
 
         # Whether a name can identify a skill in a v2 command list.
