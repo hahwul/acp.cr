@@ -25,19 +25,22 @@ module ACP
           true
         end
 
-        private def handle_session_update(params : JSON::Any?) : Nil
+        private def handle_session_update(params : JSON::Any?, params_json : String?) : Nil
           if params
             begin
-              update = Protocol::V2::SessionUpdateParams.from_json(params.to_json)
-              return unless observe_v2_session_update(update.session_id, params["update"].as_h)
+              update = Protocol::V2::SessionUpdateParams.from_json(params_json || params.to_json)
+              if params_json && update.update.session_update.in?("state_update", "subagent_update")
+                update_json = Protocol::WireFrame.field(params_json, "update")
+              end
+              return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
             rescue ex : JSON::ParseException
               ClientLog.warn { "Failed to parse v2 session/update: #{ex.message}" }
-              deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params)
+              deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
               return
             end
             return if deliver_update(update)
           end
-          deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params)
+          deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
         end
 
         private def deliver_update(update : Wire::SessionUpdateParams) : Bool
@@ -51,10 +54,10 @@ module ACP
           true
         end
 
-        private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?) : (-> AgentReply)?
+        private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?) : (-> AgentReply)?
           return super unless method_name == ClientMethod::SESSION_REQUEST_PERMISSION
 
-          input = Wire::RequestPermissionParams.from_json(params.to_json)
+          input = Wire::RequestPermissionParams.from_json(params_json || params.to_json)
           input.request_id = id
           subject = input.typed_subject
           if command = subject.try(&.command)
@@ -91,7 +94,7 @@ module ACP
           handler_error_reply(ex, "Permission handler error: #{ex.message}")
         end
 
-        private def route_agent_request(method_name : String, params : JSON::Any?) : JSON::Any | Protocol::JsonRpcErrorObject
+        private def route_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : JSON::Any | Protocol::JsonRpcErrorObject
           if method_name == Protocol::V2::ClientMethod::ELICITATION_CREATE ||
              Protocol::ExtensionMethod.extension?(method_name)
             return super

@@ -1,4 +1,5 @@
 require "./initialization"
+require "../wire_frame"
 require "./configuration"
 require "./session_updates"
 require "./tool_updates"
@@ -35,7 +36,7 @@ module ACP
       # are retained for forward compatibility.
       abstract struct SessionState
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Foreground state, e.g. running, requires_action, idle, or unknown.
         getter state : String
@@ -193,7 +194,7 @@ module ACP
       # unknown variants and for fields beyond the typed projection.
       struct SessionUpdate
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]

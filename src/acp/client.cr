@@ -224,7 +224,8 @@ module ACP
     # When we send a request, we create a channel and store it here.
     # The dispatcher fiber sends the response into the channel when
     # it arrives, unblocking the caller.
-    @pending : Hash(String, Channel(JSON::Any)) = Hash(String, Channel(JSON::Any)).new
+    private alias PendingResponse = JSON::Any | Protocol::WireFrame
+    @pending = {} of String => Channel(PendingResponse)
 
     # Mutex for thread-safe access to @pending (though Crystal fibers
     # are cooperative, this protects against unexpected scheduling).
@@ -1075,7 +1076,7 @@ module ACP
 
       # Generate a unique ID and build the frame before registering it.
       # Serialization can fail without leaving a request or setup pending.
-      response_channel = Channel(JSON::Any).new(1)
+      response_channel = Channel(PendingResponse).new(1)
 
       id = @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
@@ -1114,6 +1115,10 @@ module ACP
       rescue Channel::ClosedError
         # `drain_pending_requests` closed it: the connection is gone.
         raise ConnectionClosedError.new("#{@user_closed ? "Client closed" : "Connection lost"} while waiting for response to #{method}")
+      end
+
+      if raw_response.is_a?(Protocol::WireFrame)
+        raise ProtocolError.new("Response to '#{method}' contains a number outside the range of JSON::Any")
       end
 
       # Check for errors in the response.
@@ -1202,10 +1207,10 @@ module ACP
 
     # Waits for a response on the given channel with a timeout.
     private def receive_with_timeout(
-      channel : Channel(JSON::Any),
+      channel : Channel(PendingResponse),
       timeout_seconds : Float64,
       request_id : Int64,
-    ) : JSON::Any
+    ) : PendingResponse
       timeout_span = timeout_seconds.seconds
 
       select
@@ -1251,12 +1256,16 @@ module ACP
         break unless @dispatcher_running
         break if @transport.closed?
 
-        msg = @transport.receive
-        break if msg.nil?
+        frame = @transport.receive_frame
+        break if frame.nil?
 
         begin
           # An agent request's outcome is recorded by its handler fiber.
-          @consecutive_dispatch_errors.set(0) unless dispatch_message(msg)
+          handling_request = case frame
+                             in Protocol::WireFrame then dispatch_message(frame.project_for_routing, frame)
+                             in JSON::Any           then dispatch_message(frame)
+                             end
+          @consecutive_dispatch_errors.set(0) unless handling_request
         rescue ex
           record_dispatch_failure(ex)
         end
@@ -1301,7 +1310,7 @@ module ACP
 
     # Routes a single incoming message to the appropriate handler. Returns
     # true for an agent request, whose handler fiber records the outcome.
-    private def dispatch_message(msg : JSON::Any) : Bool
+    private def dispatch_message(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil) : Bool
       # Every JSON-RPC 2.0 message is an object. ACP does not use batch
       # (array) requests, so a top-level array — or a bare number, string,
       # bool, or null — is not routable. Probing it for "id"/"method" would
@@ -1337,15 +1346,15 @@ module ACP
         # serializers write `"id": null` on notifications, so don't turn
         # those into a -32601 answer and lose the update.
         if obj["id"].raw.nil? && obj["method"].as_s == Protocol::AgentMethod::SESSION_UPDATE
-          handle_notification(msg)
+          handle_notification(msg, wire_frame.try(&.params_json))
         else
-          return handle_agent_request(msg)
+          return handle_agent_request(msg, wire_frame.try(&.params_json))
         end
       when Protocol::MessageKind::Response
-        handle_response(msg)
+        handle_response(msg, wire_frame.try(&.wide_response?) ? wire_frame : nil)
       when Protocol::MessageKind::Notification
         if obj["method"]?.try(&.as_s?)
-          handle_notification(msg)
+          handle_notification(msg, wire_frame.try(&.params_json))
         elsif obj.has_key?("method") || !(obj.has_key?("result") || obj.has_key?("error"))
           # Neither a call nor a response (`{}`, a non-string method): an
           # Invalid Request. An id-less response has nothing to answer.
@@ -1371,7 +1380,7 @@ module ACP
 
     # Handles a response to one of our pending requests.
     # Finds the corresponding channel by ID and sends the response into it.
-    private def handle_response(msg : JSON::Any) : Nil
+    private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil) : Nil
       id = Protocol.extract_id(msg)
       unless id
         ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
@@ -1389,9 +1398,9 @@ module ACP
         if response_channel = @pending.delete(id_str)
           if @initialize_request == id_str
             @initialize_request = nil
-            observe_initialize_response(msg)
+            observe_initialize_response(msg) unless wire_frame
           end
-          closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg))
+          closed_sessions = @subagent_registry.try(&.request_finished(id_str, wire_frame ? nil : msg))
           if closed_sessions && !v2_wire?
             cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
           end
@@ -1402,7 +1411,7 @@ module ACP
         begin
           answer_cancelled_session_inputs(cancelled_inputs) if cancelled_inputs
         ensure
-          channel.send(msg)
+          channel.send(wire_frame || msg)
         end
       else
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
@@ -1445,7 +1454,7 @@ module ACP
     #   3. Method-not-found error
     #
     # Returns true when a handler fiber was started (it records the outcome).
-    private def handle_agent_request(msg : JSON::Any) : Bool
+    private def handle_agent_request(msg : JSON::Any, params_json : String? = nil) : Bool
       # A nil `id` here is either `"id": null` — a valid, if discouraged,
       # request ID that we echo back — or a value we cannot represent
       # (fractional, out of range, bool, container). Echoing a coerced ID
@@ -1476,9 +1485,9 @@ module ACP
         @pending_mutex.synchronize { @in_flight[id] = entry }
       end
 
-      prepared = prepare_agent_request(id, method_name, params)
+      prepared = prepare_agent_request(id, method_name, params, params_json)
       spawn(name: "acp-agent-request") do
-        reply = prepared ? prepared.call : route_agent_request(method_name, params)
+        reply = prepared ? prepared.call : route_agent_request(method_name, params, params_json)
         if claim_agent_request(id, entry)
           case reply
           in Protocol::JsonRpcErrorObject then respond_to_agent_error(id, reply.code, reply.message, reply.data)
@@ -1505,30 +1514,30 @@ module ACP
 
     # Allows version-specific request handling to observe wire-ordered state
     # on the dispatcher before running the user handler on its own fiber.
-    private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?) : (-> AgentReply)?
+    private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?) : (-> AgentReply)?
       nil
     end
 
     # Runs the handler for an agent request and returns its answer; the
     # caller sends it unless the request was already answered by a cancel.
-    private def route_agent_request(method_name : String, params : JSON::Any?) : AgentReply
+    private def route_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : AgentReply
       case method_name
       when Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-        handle_permission_request(params)
+        handle_permission_request(params, params_json)
       when Protocol::ClientMethod::FS_READ_TEXT_FILE
-        handle_typed_client_method(params, @on_read_text_file, Protocol::ReadTextFileParams, method_name)
+        handle_typed_client_method(params, @on_read_text_file, Protocol::ReadTextFileParams, method_name, params_json)
       when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
-        handle_typed_client_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name)
+        handle_typed_client_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_CREATE
-        handle_typed_client_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name)
+        handle_typed_client_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_OUTPUT
-        handle_typed_client_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name)
+        handle_typed_client_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_RELEASE
-        handle_typed_client_method(params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name)
+        handle_typed_client_method(params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT
-        handle_typed_client_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name)
+        handle_typed_client_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_KILL
-        handle_typed_client_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name)
+        handle_typed_client_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name, params_json)
       when Protocol::ClientMethod::ELICITATION_CREATE
         # elicitation#url-completion: "Requests using a mode the Client has
         # not advertised produce JSON-RPC -32602 (Invalid params)."
@@ -1563,9 +1572,9 @@ module ACP
               "Missing ACP v2 elicitation fields for #{mode.inspect}")
           end
         end
-        handle_typed_client_method(params, @on_create_elicitation, Protocol::CreateElicitationParams, method_name)
+        handle_typed_client_method(params, @on_create_elicitation, Protocol::CreateElicitationParams, method_name, params_json)
       else
-        handle_unknown_agent_request(method_name, params)
+        handle_unknown_agent_request(method_name, params, params_json)
       end
     end
 
@@ -1577,8 +1586,9 @@ module ACP
     # unknown method (extensibility#custom-requests: "If the receiving end
     # doesn't recognize the custom method name, it should respond with the
     # standard 'Method not found' error"), with the method name as `data`.
-    private def handle_unknown_agent_request(method_name : String, params : JSON::Any?) : AgentReply
+    private def handle_unknown_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : AgentReply
       if handler = @on_agent_request
+        return unrepresentable_request_params if params_json
         begin
           handler.call(method_name, params || JSON::Any.new(nil))
         rescue ex
@@ -1602,11 +1612,12 @@ module ACP
       handler,
       params_type,
       method_name : String,
+      params_json : String?,
     ) : AgentReply
-      return handle_unknown_agent_request(method_name, params) unless h = handler
+      return handle_unknown_agent_request(method_name, params, params_json) unless h = handler
 
       typed_params = begin
-        params_type.from_json((params || JSON::Any.new(nil)).to_json)
+        params_type.from_json(params_json || params.to_json)
       rescue ex
         ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
@@ -1626,8 +1637,9 @@ module ACP
 
     # Handles a `session/request_permission` request from the agent.
     # Delegates to the on_agent_request handler or auto-denies.
-    private def handle_permission_request(params : JSON::Any?) : AgentReply
+    private def handle_permission_request(params : JSON::Any?, params_json : String?) : AgentReply
       if handler = @on_agent_request
+        return unrepresentable_request_params if params_json
         begin
           handler.call("session/request_permission", params || JSON::Any.new(nil))
         rescue ex
@@ -1650,6 +1662,10 @@ module ACP
     end
 
     # The `cancelled` outcome for a `session/request_permission` request.
+    private def unrepresentable_request_params : Protocol::JsonRpcErrorObject
+      Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Request parameters cannot be represented as JSON::Any")
+    end
+
     private def cancelled_permission : JSON::Any
       JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
     end
@@ -1753,26 +1769,30 @@ module ACP
 
     # Tracks v2 child associations and per-entity cancel markers before the
     # next application callback sees the update.
-    protected def observe_v2_session_update(session_id : String, update : Hash(String, JSON::Any)) : Bool
+    protected def observe_v2_session_update(session_id : String, update : Hash(String, JSON::Any), update_json : String? = nil) : Bool
       @pending_mutex.synchronize do
         return false if @disconnected
 
-        @subagent_registry.not_nil!.observe_v2_update(session_id, update)
+        @subagent_registry.not_nil!.observe_v2_update(session_id, update, update_json)
       end
     end
 
     # Handles an incoming notification from the agent.
-    private def handle_notification(msg : JSON::Any) : Nil
+    private def handle_notification(msg : JSON::Any, params_json : String? = nil) : Nil
       method_name = msg["method"]?.try(&.as_s?)
       return unless method_name
 
       params = msg["params"]?
+      if params_json && method_name != Protocol::AgentMethod::SESSION_UPDATE
+        ClientLog.warn { "Ignoring notification with parameters outside the range of JSON::Any" }
+        return
+      end
 
       ClientLog.debug { "Notification: method=#{method_name}" }
 
       case method_name
       when Protocol::AgentMethod::SESSION_UPDATE
-        handle_session_update(params)
+        handle_session_update(params, params_json)
       when Protocol::ProtocolMethod::CANCEL_REQUEST
         handle_cancel_request(params)
       when Protocol::ClientMethod::ELICITATION_COMPLETE
@@ -1796,7 +1816,7 @@ module ACP
 
     # Handles a `session/update` notification by parsing it and
     # invoking the registered update handler.
-    private def handle_session_update(params : JSON::Any?) : Nil
+    private def handle_session_update(params : JSON::Any?, params_json : String?) : Nil
       return unless params
 
       # Params that aren't a usable object can't be typed, but they are still
@@ -1805,7 +1825,7 @@ module ACP
       raw_h = params.as_h?
       unless raw_h
         ClientLog.warn { "session/update params are not an object" }
-        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
         return
       end
 
@@ -1820,13 +1840,14 @@ module ACP
         update_h = update.as_h?
         unless update_h
           ClientLog.warn { "session/update `update` payload is not an object" }
-          deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+          deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
           return
         end
         update_h = update_h.dup
         if !update_h.has_key?("sessionUpdate") && update_h.has_key?("type")
           update_h["sessionUpdate"] = update_h["type"]
           raw_params["update"] = JSON::Any.new(update_h)
+          params_json = normalize_session_update_json(params_json, update_h["type"]) if params_json
         end
         kind = update_h["sessionUpdate"]?.try(&.as_s?)
         plan_operation = kind == "plan_update" || kind == "plan_removed"
@@ -1839,7 +1860,7 @@ module ACP
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
         # would otherwise never see any session updates at all.
-        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
         return
       end
 
@@ -1849,11 +1870,11 @@ module ACP
       # parse the update, re-delivering the same notification to
       # `on_notification` a second time.
       update_params = begin
-        Protocol::SessionUpdateParams.from_json(raw_params.to_json)
+        Protocol::SessionUpdateParams.from_json(params_json || raw_params.to_json)
       rescue ex : JSON::ParseException
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
-        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
         return
       end
 
@@ -1863,12 +1884,37 @@ module ACP
       if registry = @subagent_registry
         update_params = observe_subagent_update(registry, update_params) || return
       end
-      return deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless handler
+      unless handler
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
+        return
+      end
 
       begin
         handler.call(update_params)
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
+      end
+    end
+
+    # Adds the legacy discriminator while keeping every original number.
+    private def normalize_session_update_json(params_json : String, kind : JSON::Any) : String
+      pull = JSON::PullParser.new(params_json)
+      JSON.build do |json|
+        json.max_nesting = pull.max_nesting
+        json.object do
+          pull.read_object do |key|
+            if key == "update"
+              json.field(key) do
+                json.object do
+                  json.field("sessionUpdate", kind)
+                  pull.read_object { |field| json.field(field) { pull.read_raw(json) } }
+                end
+              end
+            else
+              json.field(key) { pull.read_raw(json) }
+            end
+          end
+        end
       end
     end
 

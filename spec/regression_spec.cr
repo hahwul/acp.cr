@@ -1662,3 +1662,188 @@ private def with_v2_request_client(session_capabilities : String = "{}", &)
 ensure
   client.try(&.close)
 end
+
+describe "ACP stdio messages with wide integers" do
+  it "distinguishes malformed frames from valid deeply nested wire JSON" do
+    with_wide_stdio do |transport, feed, outgoing|
+      ["1 2", "1:2"].each do |invalid|
+        feed.puts invalid
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(-32700)
+      end
+      payload = "[" * 110 + "18446744073709551615" + "]" * 110
+      valid = %({"jsonrpc":"2.0","method":"_wide","params":{"nested":#{payload}}})
+      feed.puts valid
+      frame = transport.receive_frame(2.seconds).as(ACP::Protocol::WireFrame)
+      frame.json.should eq(valid)
+      feed.puts %({"jsonrpc":"2.0","method":"_after"})
+      transport.receive(2.seconds).not_nil!["method"].should eq("_after")
+    end
+  end
+
+  it "delivers v1 usage updates with exact counts, including legacy discriminators" do
+    with_wide_stdio do |transport, feed, _outgoing|
+      client = ACP::Client.new(transport)
+      updates = Channel(ACP::Protocol::SessionUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        updates.send(note.update)
+        nil
+      end
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"type":"usage_update","used":9223372036854775808,"size":18446744073709551615}}})
+      select
+      when update = updates.receive
+        usage = update.as(ACP::Protocol::UsageUpdate)
+        usage.used.should eq(9223372036854775808_u64)
+        usage.size.should eq(UInt64::MAX)
+      when timeout(2.seconds)
+        fail "the wide v1 usage update was dropped"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "passes a full unsigned byte limit to the typed terminal handler" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+        ACP::Protocol::CreateTerminalResult.new(params.output_byte_limit.to_s)
+      end
+      feed.puts %({"jsonrpc":"2.0","id":"term","method":"terminal/create","params":{"sessionId":"s","command":"echo","outputByteLimit":18446744073709551615}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq("term")
+      reply["result"]["terminalId"].should eq("18446744073709551615")
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "delivers v2 usage updates and preserves their original numeric JSON" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(ACP::Protocol::V2::SessionUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(note.update)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"usage_update","used":9223372036854775808,"size":18446744073709551615}}})
+      select
+      when update = updates.receive
+        usage = update.typed.as(ACP::Protocol::V2::UsageUpdate)
+        usage.used.should eq(9223372036854775808_u64)
+        usage.size.should eq(UInt64::MAX)
+        update.raw_field("size").should eq("18446744073709551615")
+        update.to_json.should contain(%("size":18446744073709551615))
+      when timeout(2.seconds)
+        fail "the wide v2 usage update was dropped"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "decodes exact v2 form limits and rejects an out-of-range request ID" do
+    with_wide_stdio do |transport, feed, outgoing|
+      capabilities = ACP::Protocol::V2::ClientCapabilities.new(
+        elicitation: ACP::Protocol::ElicitationCapabilities.from_json(%({"form":{}})),
+      )
+      client = ACP::V2::Client.new(transport, capabilities: capabilities)
+      client.request_timeout = 2.0
+      limits = Channel(UInt64?).new(1)
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        limits.send(params.requested_schema.not_nil!.properties.not_nil!["choices"].max_items)
+        ACP::Protocol::CreateElicitationResult.decline
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      feed.puts %({"jsonrpc":"2.0","id":18446744073709551615,"method":"_test","params":{}})
+      rejection = JSON.parse(outgoing.gets.not_nil!)
+      rejection["id"].raw.should be_nil
+      rejection["error"]["code"].should eq(-32600)
+      feed.puts %({"jsonrpc":"2.0","id":"form","method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Choose","requestedSchema":{"type":"object","properties":{"choices":{"type":"array","items":{"type":"string","enum":["one"]},"maxItems":18446744073709551615}}}}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq("form")
+      reply["result"]["action"].should eq("decline")
+      select
+      when limit = limits.receive
+        limit.should eq(UInt64::MAX)
+      else
+        fail "the elicitation handler was not invoked"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "preserves rather than projects wide fields in cached v2 subagent state" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(Nil).new(2)
+      client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(nil)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"running","_meta":{"counter":18446744073709551615}}}}})
+      await_wide_update(updates)
+      first = client.subagent("child").not_nil!.state.not_nil!
+      first.state.should eq("running")
+      first.meta.should be_nil
+      first.raw_field("_meta").should eq(%({"counter":18446744073709551615}))
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child","update":{"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32603,"message":"Failed","data":{"counter":18446744073709551615}}}}})
+      await_wide_update(updates)
+      second = client.subagent("child").not_nil!.state.not_nil!
+      second.stop_reason.should eq("error")
+      second.error.should be_nil
+      second.raw_field("error").not_nil!.should contain(%("counter":18446744073709551615))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "reports a local representation error for a wide JSON::Any response and keeps dispatching" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      spawn do
+        wide = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{wide["id"].to_json},"result":18446744073709551615})
+        ordinary = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{ordinary["id"].to_json},"result":42})
+      end
+      expect_raises(ACP::ProtocolError, /outside the range/) { client.send_request_raw("_wide", JSON.parse("{}")) }
+      client.send_request_raw("_ordinary", JSON.parse("{}")).as_i.should eq(42)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+private def with_wide_stdio(&)
+  reader, feed = IO.pipe
+  outgoing, writer = IO.pipe
+  outgoing.read_timeout = 2.seconds
+  transport = ACP::StdioTransport.new(reader, writer)
+  yield transport, feed, outgoing
+ensure
+  transport.try(&.close)
+  feed.try(&.close)
+  outgoing.try(&.close)
+end
+
+private def initialize_wide_v2(client : ACP::V2::Client, feed : IO, outgoing : IO)
+  spawn do
+    request = JSON.parse(outgoing.gets.not_nil!)
+    feed.puts %({"jsonrpc":"2.0","id":#{request["id"].to_json},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}}})
+  end
+  client.initialize_connection
+end
+
+private def await_wide_update(updates : Channel(Nil))
+  select
+  when updates.receive
+  when timeout(2.seconds)
+    fail "the wide state update was dropped"
+  end
+end

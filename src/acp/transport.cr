@@ -13,6 +13,7 @@
 #     decoupling the read loop from message processing.
 
 require "json"
+require "./protocol/wire_frame"
 require "log"
 require "path"
 require "./errors"
@@ -28,12 +29,21 @@ module ACP
   # the raw read/write operations; the base class provides the JSON
   # parsing/serialization layer on top.
   abstract class Transport
+    # A frame already decoded as JSON::Any or preserved as exact wire JSON.
+    alias IncomingFrame = JSON::Any | Protocol::WireFrame
+
     # Sends a JSON-RPC message (Hash serialized to JSON + newline).
     abstract def send(message : Hash(String, JSON::Any)) : Nil
 
     # Receives the next incoming JSON message, blocking until one arrives.
     # Returns nil if the transport is closed.
     abstract def receive : JSON::Any?
+
+    # Receives a frame for typed dispatch. Existing transports can continue
+    # implementing receive alone.
+    def receive_frame : IncomingFrame?
+      receive
+    end
 
     # Closes the transport, releasing any underlying resources.
     abstract def close : Nil
@@ -69,7 +79,7 @@ module ACP
 
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).
-    getter incoming : Channel(JSON::Any?)
+    getter incoming : Channel(IncomingFrame?)
 
     # Whether the transport has been closed.
     @closed : Bool = false
@@ -123,7 +133,7 @@ module ACP
       # Clamp so the read loop's `@max_line_bytes + 1` can never overflow Int32
       # (and a pathological non-positive value can't disable line reads).
       @max_line_bytes = max_line_bytes.clamp(1, Int32::MAX - 1)
-      @incoming = Channel(JSON::Any?).new(buffer_size)
+      @incoming = Channel(IncomingFrame?).new(buffer_size)
       start_reader
     end
 
@@ -165,6 +175,16 @@ module ACP
     # message is available. Returns nil if the transport is closed
     # or the reader encountered EOF.
     def receive : JSON::Any?
+      loop do
+        case msg = receive_frame
+        when JSON::Any then return msg
+        when Nil       then return nil
+        end
+      end
+    end
+
+    # Receives JSON::Any or an exact frame for values outside its range.
+    def receive_frame : IncomingFrame?
       return if @closed
 
       begin
@@ -183,6 +203,19 @@ module ACP
     # Receives with a timeout. Returns nil if no message arrives
     # within the given duration.
     def receive(timeout : Time::Span) : JSON::Any?
+      deadline = Time.instant + timeout
+      loop do
+        remaining = deadline - Time.instant
+        case msg = receive_frame(Math.max(remaining, Time::Span.zero))
+        when JSON::Any           then return msg
+        when Nil                 then return nil
+        when Protocol::WireFrame then return nil if Time.instant >= deadline
+        end
+      end
+    end
+
+    # Receives an exact frame with a deadline.
+    def receive_frame(timeout : Time::Span) : IncomingFrame?
       return if @closed
 
       select
@@ -359,9 +392,13 @@ module ACP
         Log.debug { "<<< #{redact_raw_frame(line)}" }
 
         begin
-          parsed = JSON.parse(line)
+          parsed = begin
+            JSON.parse(line)
+          rescue JSON::ParseException
+            Protocol::WireFrame.new(line)
+          end
           @incoming.send(parsed)
-        rescue ex : JSON::ParseException
+        rescue ex : JSON::Error
           Log.warn { "Failed to parse incoming JSON: #{ex.message}" }
           # Don't log the raw line at any level — it may be a partially
           # received frame that contains sensitive data.
@@ -372,8 +409,8 @@ module ACP
           break
         end
       end
-
-      # Signal that the reader has stopped.
+    ensure
+      # Signal that the reader has stopped, even after a decoding error.
       unless @close_sent
         @close_sent = true
         begin

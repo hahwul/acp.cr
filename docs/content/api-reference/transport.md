@@ -26,6 +26,20 @@ transport.receive : JSON::Any?
 
 Receives the next message from the agent. Blocks until a message is available. Returns `nil` if the transport is closed.
 
+### `#receive_frame`
+
+```crystal
+transport.receive_frame : ACP::Transport::IncomingFrame?
+```
+
+Returns a `JSON::Any` when possible, or a `Protocol::WireFrame` with exact
+JSON in `#json` when the message exceeds the numeric range of `JSON::Any`.
+The client uses this path to decode typed updates and incoming typed requests
+with full `UInt64` precision. Custom transports can implement `receive_frame`
+to provide exact frames. The default implementation calls `receive`.
+Subclasses of `StdioTransport` or `ProcessTransport` that customize how the
+client reads frames should override `receive_frame`.
+
 ### `#close`
 
 ```crystal
@@ -72,7 +86,12 @@ transport.receive(timeout : Time::Span) : JSON::Any?
 
 Receives a message with a timeout. Returns `nil` if no message arrives within the specified duration.
 
-> The `StdioTransport` spawns a background reader fiber that continuously reads from the IO and pushes parsed JSON messages to a buffered channel.
+The stdio `receive` methods skip frames outside the range of `JSON::Any`.
+`receive_frame(timeout)` also accepts a timeout. The `incoming` channel carries
+both `JSON::Any` and `Protocol::WireFrame` values plus the `nil` EOF sentinel.
+
+Client request methods returning `JSON::Any` raise `ProtocolError` when a
+response payload exceeds that type's numeric range.
 
 ## ACP::ProcessTransport
 
