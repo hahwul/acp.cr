@@ -170,6 +170,15 @@ explicit `null` clears it. A `SubagentState` retains extension fields in
 `json_unmapped`, including any payload for a future state or stop reason.
 See [ACP Subagents](https://agentclientprotocol.com/protocol/v1/subagents).
 
+## ACP v2 Preview Wire Types
+
+`ACP::Protocol::V2` contains the preview wire types for initialization,
+capabilities, and authentication. It includes method names and structured
+unsupported-version error data. Unknown authentication variants preserve
+their payload for inspection or forwarding. The high-level `ACP::Client`
+currently negotiates ACP v1.
+See [ACP v2 Initialization](https://agentclientprotocol.com/protocol/v2/initialization).
+
 ## Capabilities
 
 ### ClientCapabilities
