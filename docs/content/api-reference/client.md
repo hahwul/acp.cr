@@ -60,6 +60,20 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Repeat initialization
+
+On a v2 connection, call `initialize_connection` again before your first
+other request. Wait for each initialization to return before calling it
+again. Use the optional `info`, `capabilities`, and `meta` arguments to
+update what you advertise. Omitted arguments reuse the last successful
+offer. Pass `meta: nil` to clear the initialization metadata.
+
+The latest successful handshake takes effect on the connection. A JSON-RPC
+error from the Agent leaves the previous successful handshake active. A
+timeout or malformed response closes the connection because the Agent may
+have already applied the new handshake.
+[ACP v2 Repeating Initialization](https://agentclientprotocol.com/protocol/v2/initialization#repeating-initialization)
+
 ## Automatic version negotiation
 
 Use `ACP.connect_negotiated` to try ACP v2 Preview first. If the Agent
