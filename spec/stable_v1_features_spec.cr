@@ -309,9 +309,11 @@ describe "ACP boolean config options" do
   end
 
   it "sets a boolean option with type: boolean, and a select one without a type" do
-    transport, client = v1_client
-    transport.replies["session/new"] = %("result":{"sessionId":"s1"})
-    transport.replies["session/set_config_option"] = %("result":{"configOptions":[#{bool_json}]})
+    options = ACP::Protocol::SessionConfigOptionsCapabilities.new(boolean: ACP::Protocol::BooleanConfigOptionCapabilities.new)
+    caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(config_options: options))
+    transport, client = v1_client(client_caps: caps)
+    transport.replies["session/new"] = %("result":{"sessionId":"s1","configOptions":[#{bool_json},#{select_json}]})
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":[#{bool_json},#{select_json}]})
     client.session_new("/w")
 
     client.session_set_config_option("brave", false)
@@ -320,8 +322,8 @@ describe "ACP boolean config options" do
     client.session_config_options.as(Array(ACP::Protocol::ConfigOption))[0].boolean_value.should be_true
 
     transport.clear_sent
-    client.session_set_config_option("model", "b")
-    sent(transport, "session/set_config_option")["params"].should eq(JSON.parse(%({"sessionId":"s1","configId":"model","value":"b"})))
+    client.session_set_config_option("model", "a")
+    sent(transport, "session/set_config_option")["params"].should eq(JSON.parse(%({"sessionId":"s1","configId":"model","value":"a"})))
     client.close
   end
 end

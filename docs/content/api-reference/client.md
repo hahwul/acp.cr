@@ -53,6 +53,14 @@ path for each stdio server. Invalid arguments raise `ArgumentError` before
 the client sends the request.
 [ACP v2 Session Setup](https://agentclientprotocol.com/protocol/v2/session-setup)
 
+Read the latest configuration with `session_config_options(session_id)`.
+It returns an empty list when an attached session offers no options, and
+`nil` when the client has no snapshot for that session. Use
+`session_config_options_raw(session_id)` for the exact option list, including
+extension fields and precise numbers. `session_set_config_option` checks the
+Agent's current option IDs and advertised select values before sending.
+[ACP v2 Session Config Options](https://agentclientprotocol.com/protocol/v2/session-config-options)
+
 In a permission callback, `typed_subject` exposes the optional tool-call patch
 or command details. Future subjects retain their raw fields. A tool-call
 patch from a permission request reaches `on_update` in receive order before
@@ -365,7 +373,10 @@ client.session_set_mode(
 ) : Nil
 ```
 
-Switches the session to a different mode.
+Switches the session to an advertised mode. Read the available modes and
+the current selection with `client.session_modes(session_id)`. Omit the
+session ID to read or change the active session.
+[ACP v1 Session Modes](https://agentclientprotocol.com/protocol/v1/session-modes)
 
 ### `#session_set_config_option`
 
@@ -377,7 +388,17 @@ client.session_set_config_option(
 ) : ACP::Protocol::SessionSetConfigOptionResult
 ```
 
-Changes a configuration option in the active session. Pass a value ID for a `select` option and a `Bool` for a `boolean` option (sent with `type: "boolean"`). Agents only send boolean options to clients that advertise `session.configOptions.boolean`; read them with `ConfigOption#boolean?` and `#boolean_value`.
+Changes an option in the given or active session. Read the latest list with
+`client.session_config_options(session_id)`. Pass an advertised value ID for
+a `select` option. To pass a `Bool` for a `boolean` option, advertise
+`session.configOptions.boolean` when initializing the client.
+
+Setup responses and configuration updates replace the session's option list
+as the client receives them. A successful configuration change also returns
+a complete list. Choice state is available until the session closes or the
+client forgets it. After a timed-out load, wait for the Agent's response or
+reconnect before requesting another load of the same session.
+[ACP v1 Session Config Options](https://agentclientprotocol.com/protocol/v1/session-config-options)
 
 ### `#cancel_request`
 

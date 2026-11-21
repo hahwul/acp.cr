@@ -532,7 +532,13 @@ module ACP
 
     private def decode_frame(line : String) : IncomingFrame
       value = JSON.parse(line)
-      if value.as_h?.try(&.["method"]?).try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
+      envelope = value.as_h?
+      method = envelope.try(&.["method"]?).try(&.as_s?)
+      update = envelope.try(&.["params"]?).try(&.as_h?).try(&.["update"]?).try(&.as_h?) if method == Protocol::AgentMethod::SESSION_UPDATE
+      exact_params = method == Protocol::ClientMethod::MCP_MESSAGE ||
+                     (update.try(&.["sessionUpdate"]?) || update.try(&.["type"]?)).try(&.as_s?).in?("config_option_update", "config_options_update")
+      config_result = envelope.try(&.["result"]?).try(&.as_h?).try(&.has_key?("configOptions"))
+      if exact_params || config_result
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value

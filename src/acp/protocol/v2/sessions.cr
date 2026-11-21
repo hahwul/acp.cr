@@ -368,7 +368,7 @@ module ACP
         include ConfigOptionList
 
         # All current configuration options, including extension variants.
-        @[JSON::Field(key: "configOptions")]
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
         property config_options : Array(JSON::Any)
 
         # Extension metadata.

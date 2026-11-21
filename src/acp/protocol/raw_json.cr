@@ -36,6 +36,16 @@ module ACP
         @json.starts_with?('[')
       end
 
+      # Reads the elements of an array without narrowing numbers.
+      def elements? : Array(RawJson)?
+        return unless array?
+
+        elements = [] of RawJson
+        pull = JSON::PullParser.new(@json)
+        pull.read_array { elements << RawJson.new(pull) }
+        elements
+      end
+
       # Whether the value is JSON null.
       def null? : Bool
         @json == "null"
