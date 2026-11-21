@@ -27,7 +27,7 @@ module ACP
       # Identifies work that can continue independently of the foreground.
       struct BackgroundWork
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Entity discriminator, e.g. terminal, tool_call, or subagent.
         @[JSON::Field(key: "type")]
@@ -77,29 +77,48 @@ module ACP
         def usage : Usage?
           return unless idle?
 
-          json = raw_field("usage") || @json_unmapped["usage"]?.try { |value| WireFrame.encode(value) }
+          json = field_json("usage")
           Usage::Optional.from_json(json) if json
         end
 
         # JSON-RPC error details for a failed foreground operation.
         def error : Protocol::JsonRpcErrorObject?
-          return unless stop_reason == "error" && (raw = @json_unmapped["error"]?)
+          return unless stop_reason == "error" && (json = field_json("error"))
 
-          Protocol::JsonRpcErrorObject.from_json(raw.to_json)
-        rescue JSON::ParseException
-          nil
+          Protocol::JsonRpcErrorObject.from_json(json)
+        rescue JSON::Error
+          # A valid error can carry data that is too wide for the typed view.
+          return unless json
+
+          object = RawJson.new(JSON::PullParser.new(json))
+          code = object.field("code").try(&.as_i64?)
+          message = object.field("message").try(&.as_s?)
+          if code && message && (Int32::MIN..Int32::MAX).includes?(code)
+            Protocol::JsonRpcErrorObject.new(code.to_i32, message)
+          end
         end
 
         # Complete reported background list, or nil when unreported.
         def background : Array(BackgroundWork)?
-          @json_unmapped["background"]?.try(&.as_a?).try &.map { |item| BackgroundWork.from_json(item.to_json) }
-        rescue JSON::ParseException
+          return unless (json = field_json("background")) && (entries = RawJson.new(JSON::PullParser.new(json)).elements?)
+
+          entries.map do |raw|
+            item = BackgroundWork.from_json(raw.json)
+            return if item.entity_type.in?("terminal", "tool_call", "subagent") && item.entity_id.nil?
+
+            item
+          end
+        rescue JSON::Error
           nil
         end
 
         # Extension metadata for this snapshot.
         def meta : Hash(String, JSON::Any)?
           @json_unmapped["_meta"]?.try(&.as_h?)
+        end
+
+        private def field_json(name : String) : String?
+          raw_field(name) || @json_unmapped[name]?.try { |value| WireFrame.encode(value) }
         end
       end
 
@@ -329,7 +348,7 @@ module ACP
         property update : SessionUpdate
 
         # Extension metadata scoped to the notification.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a notification payload.

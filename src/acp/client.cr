@@ -1490,7 +1490,8 @@ module ACP
       v2_request = v2_wire? && !initialize
       changes_choice = @session_choices.change_method?(method)
       v2_retirement_session = closing_session if v2_wire?
-      arm_at_write = changes_choice || !v2_retirement_session.nil?
+      state_setup = v2_wire? && method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
+      arm_at_write = changes_choice || state_setup || !v2_retirement_session.nil?
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         check_v2_request_order(initialize) if v2_wire?
@@ -1525,6 +1526,8 @@ module ACP
         elsif fork_cursor || arm_at_write || before_send || mcp_servers
           @transport.send_checked(message) do
             refresh_fork_grant(id_str, params) if fork_cursor
+            before_send.try(&.call)
+            @mcp_provider.publish(mcp_servers) if mcp_servers
             if arm_at_write
               @pending_mutex.synchronize do
                 raise ConnectionClosedError.new if @disconnected
@@ -1533,12 +1536,11 @@ module ACP
                   @session_choices.start_change(id_str, method, params, validate: validate_choice,
                     allow_boolean: v2_wire? || @v1_boolean_config_supported)
                 end
-                generation = v2_retirement_session.try { |sid| @session_choices.command_generation(sid) }
+                @subagent_registry.try(&.root_setup_written(id_str)) if state_setup
+                generation = v2_retirement_session.try { |sid| @subagent_registry.try(&.root_generation(sid)) }
                 @pending[id_str] = @pending[id_str].copy_with(armed: true, retirement_generation: generation)
               end
             end
-            before_send.try(&.call)
-            @mcp_provider.publish(mcp_servers) if mcp_servers
             mark_v2_request_sent if v2_request
           end
         else
@@ -1772,7 +1774,8 @@ module ACP
             @session_choices.expire_attachment(id)
             @session_choices.expire_change(id)
             if (session_id = pending.closing_session) && (generation = pending.retirement_generation)
-              if @session_choices.retirement_timed_out(session_id, generation)
+              if @subagent_registry.try(&.root_generation(session_id)) == generation
+                @session_choices.retirement_timed_out(session_id)
                 @late_session_retirements[id] = LateSessionRetirement.new(session_id, generation, pending.close_on_missing)
                 @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
               end
@@ -2016,7 +2019,7 @@ module ACP
             end
           end
           if (session_id = request.closing_session) && closes_session?(msg, request.close_on_missing)
-            if !v2_wire? || @session_choices.command_generation(session_id) == request.retirement_generation
+            if !v2_wire? || @subagent_registry.try(&.root_generation(session_id)) == request.retirement_generation
               closed_sessions = retire_session_runtime(session_id)
               cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true) unless v2_wire?
             end
@@ -2025,11 +2028,11 @@ module ACP
         elsif retirement = @late_session_retirements.delete(id_str)
           observed_reply = true
           session_id = retirement.session_id
-          if @session_choices.command_generation(session_id) == retirement.generation
+          if @subagent_registry.try(&.root_generation(session_id)) == retirement.generation
             if closes_session?(msg, retirement.close_on_missing)
               retire_session_runtime(session_id)
             elsif response_error_code(msg)
-              @session_choices.retirement_failed(session_id, retirement.generation)
+              @session_choices.retirement_failed(session_id)
             end
           end
           nil
@@ -2454,13 +2457,19 @@ module ACP
             @cursor_registry.try(&.include_child(session_id, child_id))
           end
         when "replay_complete"
-          @cursor_registry.try(&.replay_complete(session_id))
-          @session_choices.replay_complete(session_id)
+          unless registry.setup_waiting_to_write?(session_id)
+            @cursor_registry.try(&.replay_complete(session_id))
+            @session_choices.replay_complete(session_id)
+          end
         when "prompt_suggestions_update"
           return false unless @suggestion_content_types &&
                               !@cursor_registry.try(&.replaying?(session_id)) &&
                               !registry.child?(session_id) &&
                               registry.current_updates?(session_id)
+        when "state_update"
+          if registry.setup_waiting_to_write?(session_id) || !@cursor_registry.try(&.replaying?(session_id))
+            registry.observe_root_state(session_id, update_json || Protocol::WireFrame.encode(update))
+          end
         when "config_option_update"
           @session_choices.observe_options(session_id, update_json || Protocol::WireFrame.encode(update))
         when "available_commands_update"

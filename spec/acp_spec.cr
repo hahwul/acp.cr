@@ -7663,10 +7663,12 @@ private class QueuedRequestTransport < V2TestTransport
   getter queued = Channel(Nil).new(1)
   getter ready_to_write = Channel(Nil).new
   property pause_initialize = false
+  property pause_only : String?
   getter queued_message : JSON::Any?
 
   def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
-    if @pause_initialize || message["method"]?.try(&.as_s?) != "initialize"
+    method = message["method"]?.try(&.as_s?)
+    if (@pause_initialize || method != "initialize") && (!@pause_only || @pause_only == method)
       @queued_message = JSON::Any.new(message)
       @queued.send(nil)
       @ready_to_write.receive
@@ -8194,6 +8196,251 @@ describe "ACP draft prompt suggestions" do
   end
 end
 
+describe "ACP v2 live session state" do
+  it "keeps an early state and gives new sessions without a report an idle snapshot" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"fork":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"one"})
+    transport.before_reply = ->(method : String) do
+      if method == "session/new"
+        transport.update("one", %({"sessionUpdate":"state_update","state":"running","background":[]}))
+      end
+      nil
+    end
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_state("one").should be_nil
+    client.session_new("/work")
+    client.session_state("one").not_nil!.state.should eq("running")
+    client.session_state("one").not_nil!.background.should eq([] of ACP::Protocol::V2::BackgroundWork)
+
+    transport.before_reply = nil
+    transport.replies["session/new"] = %("result":{"sessionId":"two"})
+    client.session_new("/work")
+    client.session_state("two").not_nil!.idle?.should be_true
+    client.session_state("two").not_nil!.background.should be_nil
+    client.session_state("one").not_nil!.state.should eq("running")
+
+    transport.replies["session/fork"] = %("result":{"sessionId":"branch"})
+    client.session_fork("one", "/branch")
+    client.session_state("branch").not_nil!.idle?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "starts observing early states only when creation reaches the writer" do
+    transport = QueuedRequestTransport.new
+    transport.pause_only = "session/new"
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    seen = Channel(Nil).new(1)
+    client.on_update = ->(_params : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send(nil)
+      nil
+    end
+
+    result = Channel(ACP::Protocol::V2::SessionNewResult | Exception).new(1)
+    spawn do
+      result.send(client.session_new("/work"))
+    rescue ex
+      result.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    id = transport.queued_message.not_nil!["id"]
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"result":{"sessionId":"premature"}}))
+    transport.update("s", %({"sessionUpdate":"state_update","state":"running"}))
+    take_v2_frame(seen)
+    transport.ready_to_write.send(nil)
+    take_v2_frame(result).as(ACP::Protocol::V2::SessionNewResult).session_id.should eq("s")
+    client.session_state("s").not_nil!.idle?.should be_true
+    client.session_state("premature").should be_nil
+  ensure
+    transport.try(&.ready_to_write.close)
+    client.try(&.close)
+  end
+
+  it "keeps live reports while a resume is queued and then fails to write" do
+    transport = QueuedRequestTransport.new
+    transport.pause_only = "session/resume"
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    seen = Channel(String).new(1)
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send(client.session_state(params.session_id).not_nil!.state)
+      nil
+    end
+
+    failure = Channel(Exception?).new(1)
+    spawn do
+      declaration = ACP::Protocol::McpServerAcp.new("missing", "unknown-server")
+      server = ACP::Protocol::V2::McpServer.acp(declaration)
+      params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", mcp_servers: [server], replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      client.session_resume(params)
+      failure.send(nil)
+    rescue ex
+      failure.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    transport.update("s", %({"sessionUpdate":"state_update","state":"requires_action"}))
+    take_v2_frame(seen).should eq("requires_action")
+    transport.ready_to_write.send(nil)
+    take_v2_frame(failure).should be_a(ACP::InvalidStateError)
+    transport.sent_messages.map(&.["method"].as_s).should eq(["initialize", "session/new"])
+    client.session_state("s").not_nil!.state.should eq("requires_action")
+  ensure
+    transport.try(&.ready_to_write.close)
+    client.try(&.close)
+  end
+
+  it "ignores replay markers that arrive before a queued resume is written" do
+    transport = QueuedRequestTransport.new
+    transport.pause_only = "session/resume"
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    seen = Channel({String, String, Bool}).new(4)
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send({params.update.session_update, client.session_state("s").not_nil!.state, !client.session_cursor("s", "replayed").nil?})
+      nil
+    end
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"state_update","state":"running"}))
+        transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"replayed"}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"requires_action"}))
+      end
+      nil
+    end
+
+    result = Channel(ACP::Protocol::V2::SessionResumeResult | Exception).new(1)
+    spawn do
+      params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      result.send(client.session_resume(params))
+    rescue ex
+      result.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    transport.update("s", %({"sessionUpdate":"replay_complete"}))
+    take_v2_frame(seen).should eq({"replay_complete", "idle", false})
+    transport.ready_to_write.send(nil)
+    take_v2_frame(result).should be_a(ACP::Protocol::V2::SessionResumeResult)
+    take_v2_frame(seen).should eq({"state_update", "idle", false})
+    take_v2_frame(seen).should eq({"cursor_update", "idle", false})
+    take_v2_frame(seen).should eq({"replay_complete", "idle", true})
+    take_v2_frame(seen).should eq({"state_update", "requires_action", true})
+  ensure
+    transport.try(&.ready_to_write.close)
+    client.try(&.close)
+  end
+
+  it "applies whole snapshots before callbacks and does not infer state from prompt replies" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"status":{},"delete":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/status"] = %("result":{"status":"active","state":{"state":"running"}})
+    transport.replies["session/prompt"] = %("result":{"messageId":"m"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    client.session_prompt_text("s", "hello").message_id.should eq("m")
+    client.session_state("s").not_nil!.idle?.should be_true
+
+    snapshots = Channel(ACP::Protocol::V2::StateSnapshot).new(4)
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      if params.update.session_update == "state_update"
+        snapshots.send(client.session_state(params.session_id).not_nil!)
+      end
+      nil
+    end
+    transport.update("s", %({"sessionUpdate":"terminal_update","terminalId":"t"}))
+    transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn","background":[{"type":"terminal","terminalId":"t"}]}))
+    first = take_v2_frame(snapshots)
+    first.stop_reason.should eq("end_turn")
+    first.background.not_nil!.first.entity_id.should eq("t")
+    first.json_unmapped.clear
+    client.session_state("s").not_nil!.stop_reason.should eq("end_turn")
+
+    transport.update("s", %({"sessionUpdate":"state_update","state":"_future","background":null}))
+    second = take_v2_frame(snapshots)
+    second.state.should eq("_future")
+    second.idle?.should be_false
+    second.background.should be_nil
+    second.stop_reason.should be_nil
+    client.session_status("s").state.not_nil!.state.should eq("running")
+    client.session_state("s").not_nil!.state.should eq("_future")
+
+    transport.replies["session/delete"] = %("result":{})
+    client.session_delete("s")
+    client.session_state("s").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a resume synchronization and rejects replayed state as current" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/resume"] = %("result":{})
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"state_update","state":"running"}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"requires_action"}))
+      end
+      nil
+    end
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_state("s").should be_nil
+    resume = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    client.session_resume(resume)
+    client.session_state("s").not_nil!.state.should eq("requires_action")
+
+    seen = Channel(String).new(2)
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      if params.update.session_update == "state_update"
+        seen.send(client.session_state(params.session_id).not_nil!.state)
+      end
+      nil
+    end
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Resume failed"})
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"unknown"}))
+      end
+      nil
+    end
+    expect_raises(ACP::JsonRpcError, /Resume failed/) { client.session_resume(resume) }
+    take_v2_frame(seen).should eq("requires_action")
+    take_v2_frame(seen).should eq("unknown")
+    client.session_state("s").not_nil!.state.should eq("unknown")
+
+    transport.before_reply = nil
+    transport.replies["session/resume"] = %("result":{})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    client.session_state("s").not_nil!.state.should eq("unknown")
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("legacy", "/work"))
+    client.session_state("legacy").not_nil!.state.should eq("unknown")
+
+    transport.replies["session/close"] = %("result":{})
+    client.session_close("s")
+    client.session_state_raw("s").should be_nil
+    client.session_state("legacy").not_nil!.state.should eq("unknown")
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP v2 live command advertisements" do
   it "keeps complete command lists per attached session through setup, preview, resume, and close" do
     transport = V2TestTransport.new
@@ -8487,6 +8734,7 @@ describe "ACP v2 draft agent skills" do
 
   it "rechecks queued references when the Agent withdraws the skill" do
     transport = QueuedRequestTransport.new
+    transport.pause_only = "session/prompt"
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":{}}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"notes","description":"Notes"}]})
     client = v2_skill_client(transport)

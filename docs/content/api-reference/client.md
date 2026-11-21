@@ -39,6 +39,19 @@ The prompt response acknowledges insertion. Foreground completion arrives
 in an idle `state_update`. Keep `on_update` callbacks short because they run
 on the dispatcher fiber.
 
+Use `session_state(session_id)` to read the latest foreground and background
+snapshot for an attached root session. A new session starts at `idle` until
+the Agent reports activity. A resume uses the Agent's current snapshot.
+A newly attached session with no usable resume snapshot reports `unknown`.
+`background` is `nil` when unreported and empty when the Agent reports no
+background work. Check `idle?` before interpreting a stop reason. Use
+`subagent(session_id)` for a child session's state.
+
+The snapshot is available from `on_update` once its session is attached.
+`session_state_raw(session_id)` preserves extension fields and exact JSON
+numbers over stdio. Closing or deleting the session clears the snapshot.
+[ACP v2 Session States](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-states)
+
 The v2 client supports session creation, listing, resume and replay, prompts,
 configuration changes, close and delete. Register `on_request_permission`
 and `on_create_elicitation` to handle Agent requests. Authentication is

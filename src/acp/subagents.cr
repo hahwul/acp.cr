@@ -2,6 +2,7 @@ require "path"
 require "set"
 require "./protocol/types"
 require "./protocol/v2/sessions"
+require "./protocol/v2/updates"
 require "./errors"
 
 module ACP
@@ -46,10 +47,42 @@ module ACP
       end
     end
 
-    private record SetupRequest, method : String, session_id : String?, workspace : SessionWorkspace?, replay_markers : Set(String)?
+    private class SetupRequest
+      getter method : String
+      getter session_id : String?
+      getter workspace : SessionWorkspace?
+      getter replay_markers : Set(String)?
+      property state_revision : UInt64?
+      property state : Protocol::RawJson?
+
+      def initialize(@method : String, @session_id : String?, @workspace : SessionWorkspace?,
+                     @replay_markers : Set(String)?)
+      end
+
+      def creates_session? : Bool
+        @method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK)
+      end
+
+      def written? : Bool
+        !@state_revision.nil?
+      end
+    end
+
+    private record RootState, snapshot : Protocol::RawJson, generation : UInt64
+    private record EarlyState, payload : Protocol::RawJson, revision : UInt64
+
+    private IDLE_STATE    = Protocol::RawJson.from_json(%({"state":"idle"}))
+    private UNKNOWN_STATE = Protocol::RawJson.from_json(%({"state":"unknown"}))
+    # Unknown IDs can only be staged during new/fork and have a bounded wire size.
+    private MAX_EARLY_STATES     = 64
+    private MAX_EARLY_STATE_SIZE = 64 * 1024
 
     @children = {} of String => Child
     @workspace = {} of String => SessionWorkspace
+    @root_states = {} of String => RootState
+    @root_generation = 0_u64
+    @early_states = {} of String => EarlyState
+    @state_revision = 0_u64
     @setups = {} of String => SetupRequest
     @setup_by_session = {} of String => SetupRequest
     @closed_roots = Set(String).new
@@ -95,6 +128,60 @@ module ACP
       return unless Protocol.absolute_workspace?(cwd, additional_directories)
 
       SessionWorkspace.new(cwd, additional_directories.dup)
+    end
+
+    def root_state(session_id : String) : Protocol::RawJson?
+      @root_states[session_id]?.try(&.snapshot)
+    end
+
+    def root_generation(session_id : String) : UInt64?
+      @root_states[session_id]?.try(&.generation)
+    end
+
+    def setup_waiting_to_write?(session_id : String) : Bool
+      if setup = setup_for(session_id)
+        return !setup.written?
+      end
+      false
+    end
+
+    def root_setup_written(id : String) : Nil
+      if setup = @setups[id]?
+        setup.state_revision = @state_revision
+      end
+    end
+
+    def observe_root_state(session_id : String, update : String) : Nil
+      return if child?(session_id)
+
+      setup = @setup_by_session[session_id]?
+      setup = nil unless setup.try(&.written?)
+      if setup
+        return unless current_updates?(session_id)
+      elsif @closed_roots.includes?(session_id)
+        return
+      end
+
+      attached = @root_states[session_id]?
+      early = !attached && !setup && @setups.each_value.any? { |candidate| candidate.written? && candidate.creates_session? }
+      return unless setup || attached || early
+
+      wire = Protocol::RawJson.new(JSON::PullParser.new(update))
+      return unless wire.field("state").try(&.as_s?)
+
+      state = wire.without_field("sessionUpdate")
+      setup.state = state if setup
+      @root_states[session_id] = attached.copy_with(snapshot: state) if attached
+      stage_early_state(session_id, state) if early
+    end
+
+    private def stage_early_state(session_id : String, state : Protocol::RawJson) : Nil
+      @early_states.delete(session_id)
+      return if session_id.bytesize.to_i64 + state.json.bytesize > MAX_EARLY_STATE_SIZE
+
+      @state_revision += 1
+      @early_states[session_id] = EarlyState.new(state, @state_revision)
+      @early_states.shift if @early_states.size > MAX_EARLY_STATES
     end
 
     def cancel?(session_id : String) : Bool
@@ -160,15 +247,30 @@ module ACP
         if attach_result(method, Protocol::WireFrame.result_json(response, frame))
           @closed_roots.delete(sid)
           @workspace[sid] = workspace if workspace
+          attach_root_state(sid, setup.state || root_state(sid) || UNKNOWN_STATE) if @v2
         else
           clear_descendant_runtime(sid)
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
         if workspace && (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
-          @workspace[created.session_id] = workspace
+          new_id = created.session_id
+          @workspace[new_id] = workspace
+          if @v2
+            early = @early_states.delete(new_id)
+            if early && (started = setup.state_revision) && early.revision > started
+              initial = early.payload
+            end
+            attach_root_state(new_id, initial || IDLE_STATE)
+          end
         end
+        @early_states.clear unless @setups.each_value.any?(&.creates_session?)
       end
       nil
+    end
+
+    private def attach_root_state(session_id : String, snapshot : Protocol::RawJson) : Nil
+      @root_generation += 1
+      @root_states[session_id] = RootState.new(snapshot, @root_generation)
     end
 
     # Releases runtime tracking and returns the affected session IDs.
@@ -181,12 +283,16 @@ module ACP
       return if child?(session_id)
 
       @closed_roots.add(session_id) if @workspace.delete(session_id) || @children.any? { |_, child| child.parent_id == session_id }
+      @root_states.delete(session_id)
+      @early_states.delete(session_id)
       clear_descendant_runtime(session_id)
     end
 
     def clear : Nil
       @children.clear
       @workspace.clear
+      @root_states.clear
+      @early_states.clear
       @setups.clear
       @setup_by_session.clear
       @closed_roots.clear
@@ -198,7 +304,9 @@ module ACP
     def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?) : Bool
       case update["sessionUpdate"]?.try(&.as_s?)
       when "replay_complete"
-        setup_for(session_id).try(&.replay_markers).try(&.add(session_id))
+        if (setup = setup_for(session_id)) && setup.written?
+          setup.replay_markers.try(&.add(session_id))
+        end
       when "subagent_update"
         return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update)))
       when "state_update"
