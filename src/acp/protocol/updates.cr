@@ -86,6 +86,12 @@ module ACP
       # The update payload. Deserialized using the "sessionUpdate" discriminator.
       property update : SessionUpdate
 
+      # Whether this update arrived during a pending `session/load`.
+      # Child state, capabilities, and config options from this interval
+      # describe history. Set by a client tracking subagent sessions.
+      @[JSON::Field(ignore: true)]
+      property? before_load_response : Bool = false
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?

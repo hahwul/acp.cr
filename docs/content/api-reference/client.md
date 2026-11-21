@@ -218,6 +218,30 @@ Sends a custom extension notification (no response expected).
 | `on_notification` | `NotificationHandler?` | Handle non-update notifications |
 | `on_disconnect` | `(-> Nil)?` | Called on connection loss |
 
+## Subagent Sessions
+
+Set `subagents: ACP::Protocol::SubagentCapabilities.new` in the client
+capabilities before initialization to receive child session announcements and
+session-directed messages. Use the outer `params.session_id` for updates and
+request attribution, and `SubagentUpdate#session_id` for the announced child.
+
+| Method | Result |
+|--------|--------|
+| `subagent(session_id)` | Current child state and permissions, or `nil` |
+| `subagents(parent_id)` | Immediate children announced under that parent |
+| `session_workspace(session_id)` | Effective working directory and additional directories, or `nil` |
+
+`SubagentSession#cancel?` indicates when `session_cancel(child_id)` is
+available. Other requests for the child raise `ACP::InvalidStateError`.
+Agent requests still reach their existing handlers with their original
+session IDs. Apply your workspace and permission policy to those requests.
+
+Use `subagent(id)` for confirmed state. During `session/load`, typed callbacks
+have `before_load_response?` set for the parent and its descendants. Treat
+child state, capabilities, and configuration in those updates as history.
+During `session/resume`, updates may arrive before the response. The client
+publishes effective state and cancellation permission when the resume succeeds.
+
 ## Typed Client Method Handlers
 
 | Handler | Params Type | Result Type | Description |

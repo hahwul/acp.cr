@@ -186,6 +186,19 @@ module ACP
       end
     end
 
+    # Presence advertises support for exposed child sessions.
+    struct SubagentCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the subagent capability.
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # Presence authorizes cancellation for an announced child session.
     struct SessionCancelCapabilities
       include JSON::Serializable
@@ -244,6 +257,9 @@ module ACP
       # Support for identified checklist and Markdown plans.
       property plan : PlanCapabilities?
 
+      # Support for Agent-owned child sessions.
+      property subagents : SubagentCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -255,6 +271,7 @@ module ACP
         @session : ClientSessionCapabilities? = nil,
         @elicitation : ElicitationCapabilities? = nil,
         @plan : PlanCapabilities? = nil,
+        @subagents : SubagentCapabilities? = nil,
       )
       end
     end

@@ -54,6 +54,7 @@ describe "ACP stable v1 capabilities" do
     json.as_h.has_key?("session").should be_false
     json.as_h.has_key?("elicitation").should be_false
     json.as_h.has_key?("plan").should be_false
+    json.as_h.has_key?("subagents").should be_false
   end
 
   it "serializes session and elicitation client capabilities under their schema keys" do
@@ -567,5 +568,215 @@ describe "ACP::Protocol::SessionSetConfigOptionParams#value=" do
     JSON.parse(params.to_json)["type"].as_s.should eq("boolean")
     params.value = "y"
     JSON.parse(params.to_json).as_h.has_key?("type").should be_false
+  end
+end
+
+# Sends an ordered series of updates around a session setup response.
+class SubagentSetupTransport < AutoReplyTransport
+  property setup_method = ""
+  property before_response = [] of String
+  property after_response = [] of String
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    is_setup = message["method"]?.try(&.as_s?) == @setup_method
+    @before_response.each { |frame| inject_raw(frame) } if is_setup
+    super
+    @after_response.each { |frame| inject_raw(frame) } if is_setup
+  end
+end
+
+private def subagent_update_frame(parent : String, child : String, patch : String) : String
+  %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{parent.to_json},"update":{"sessionUpdate":"subagent_update","sessionId":#{child.to_json}#{patch}}}})
+end
+
+private def synchronize_updates(transport : AutoReplyTransport, client : ACP::Client) : Nil
+  transport.replies["_barrier"] = %("result":{})
+  client.ext_method("barrier")
+end
+
+describe "ACP subagent sessions" do
+  it "registers nested children and applies workspace patches independently" do
+    caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+    transport, client = v1_client(client_caps: caps)
+    sent(transport, "initialize")["params"]["clientCapabilities"]["subagents"].should eq(JSON.parse("{}"))
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    root = ACP::Session.create(client, "/work/root", additional_directories: ["/docs"])
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"title":"Reviewer","cwd":"/work/child","additionalDirectories":[],"capabilities":{"cancel":{}})))
+    transport.inject_raw(subagent_update_frame("child", "nested", %(,"state":{"state":"running"})))
+    synchronize_updates(transport, client)
+
+    root.subagents.map(&.session_id).should eq(["child"])
+    client.subagent("child").not_nil!.cancel?.should be_true
+    client.subagent("nested").not_nil!.parent_session_id.should eq("child")
+    client.session_workspace("nested").should eq(ACP::SessionWorkspace.new("/work/child", [] of String))
+
+    # Reparenting or cycling an existing association does not overwrite it.
+    transport.inject_raw(subagent_update_frame("root", "nested", %(,"title":"Wrong parent")))
+    transport.inject_raw(subagent_update_frame("nested", "root", %(,"title":"Cycle")))
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"additionalDirectories":null)))
+    synchronize_updates(transport, client)
+    client.subagent("root").should be_nil
+    client.subagent("nested").not_nil!.title.should be_nil
+    client.session_workspace("nested").should eq(ACP::SessionWorkspace.new("/work/child", ["/docs"]))
+    client.subagent("child").not_nil!.title.should eq("Reviewer")
+
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"cwd":null,"capabilities":{})))
+    synchronize_updates(transport, client)
+    client.session_workspace("nested").should eq(ACP::SessionWorkspace.new("/work/root", ["/docs"]))
+    client.subagent("child").not_nil!.cancel?.should be_false
+
+    transport.inject_raw(subagent_update_frame("child", "nested", %(,"cwd":"relative/worktree","state":{"state":"unknown"})))
+    synchronize_updates(transport, client)
+    client.session_workspace("nested").should be_nil
+    client.subagent("nested").not_nil!.state.not_nil!.state.should eq("unknown")
+  ensure
+    client.try(&.close)
+  end
+
+  it "blocks outgoing child methods across the typed and raw APIs" do
+    caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+    transport, client = v1_client(client_caps: caps)
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}})))
+    transport.inject_raw(subagent_update_frame("child", "nested", ""))
+    synchronize_updates(transport, client)
+    sent_before = transport.sent_messages.size
+
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("nested") }
+    expect_raises(ACP::InvalidStateError) { client.session_prompt_text("hello", "child") }
+    expect_raises(ACP::InvalidStateError) { client.session_load("child", "/work") }
+    expect_raises(ACP::InvalidStateError) { client.session_resume("child", "/work") }
+    expect_raises(ACP::InvalidStateError) { client.session_close("child") }
+    expect_raises(ACP::InvalidStateError) { client.session_delete("child") }
+    expect_raises(ACP::InvalidStateError) { client.session_set_mode("mode", "child") }
+    expect_raises(ACP::InvalidStateError) { client.session_set_config_option("id", "value", "child") }
+    params = JSON.parse(%({"sessionId":"child"}))
+    expect_raises(ACP::InvalidStateError) { client.send_request_raw("_extra", params) }
+    expect_raises(ACP::InvalidStateError) { client.send_notification_raw("_extra", params) }
+    expect_raises(ACP::InvalidStateError) { client.send_request_raw("session/cancel", params) }
+    transport.sent_messages.size.should eq(sent_before)
+
+    client.send_notification_raw("session/cancel", params)
+    transport.last_sent.not_nil!["params"].should eq(params)
+    transport.last_sent.not_nil!["method"].should eq("session/cancel")
+  ensure
+    client.try(&.close)
+  end
+
+  it "uses the load response as the boundary between historical and current child state" do
+    caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+    transport = SubagentSetupTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["session/load"] = %("result":{})
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.request_timeout = 2.0
+    client.initialize_connection
+
+    observations = [] of Tuple(Bool, Bool, String?)
+    client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+      if child = client.subagent("child")
+        observations << {params.before_load_response?, child.cancel?, child.state.try(&.state)}
+      end
+      nil
+    end
+    live = subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}},"state":{"state":"running"}))
+    transport.inject_raw(live)
+    synchronize_updates(transport, client)
+
+    transport.setup_method = "session/load"
+    transport.before_response = [live]
+    transport.after_response = [subagent_update_frame("root", "child", %(,"state":{"state":"idle","stopReason":"end_turn"}))]
+    client.session_load("root", "/work")
+    synchronize_updates(transport, client)
+    observations.should eq([{false, true, "running"}, {true, false, nil}, {false, false, "idle"}])
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+
+    transport.inject_raw(live)
+    synchronize_updates(transport, client)
+    client.subagent("child").not_nil!.cancel?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps resume capabilities provisional and clears them if resume fails" do
+    caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+    transport = SubagentSetupTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["session/resume"] = %("error":{"code":-32002,"message":"Unknown session"})
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.request_timeout = 2.0
+    client.initialize_connection
+
+    observations = [] of Tuple(Bool, Bool)
+    client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+      observations << {params.before_load_response?, client.subagent("child").not_nil!.cancel?}
+      nil
+    end
+    transport.setup_method = "session/resume"
+    transport.before_response = [subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}},"state":{"state":"running"}))]
+    expect_raises(ACP::JsonRpcError) { client.session_resume("root", "/work") }
+    client.subagent("child").not_nil!.state.should be_nil
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+
+    transport.replies["session/resume"] = %("result":{})
+    client.session_resume("root", "/work")
+    observations.should eq([{false, false}, {false, false}])
+    client.subagent("child").not_nil!.state.not_nil!.state.should eq("running")
+    client.subagent("child").not_nil!.cancel?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "resolves the right pending inputs when a child reports cancelled or its parent closes" do
+    caps = ACP::Protocol::ClientCapabilities.new(
+      subagents: ACP::Protocol::SubagentCapabilities.new,
+      elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new),
+    )
+    transport, client = v1_client(client_caps: caps)
+    entered = Channel(Nil).new(3)
+    release = Channel(Nil).new(3)
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+      entered.send(nil)
+      release.receive
+      ACP::Protocol::CreateElicitationResult.decline
+    end
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}})))
+    transport.inject_raw(subagent_update_frame("child", "nested", ""))
+    [
+      %({"jsonrpc":"2.0","id":101,"method":"session/request_permission","params":{"sessionId":"child","toolCall":{"toolCallId":"t"},"options":[]}}),
+      %({"jsonrpc":"2.0","id":102,"method":"elicitation/create","params":{"sessionId":"nested","mode":"form","message":"Continue?","requestedSchema":{"type":"object","properties":{}}}}),
+      %({"jsonrpc":"2.0","id":103,"method":"session/request_permission","params":{"sessionId":"nested","toolCall":{"toolCallId":"t"},"options":[]}}),
+    ].each { |frame| transport.inject_raw(frame) }
+    3.times do
+      select
+      when entered.receive
+      when timeout(2.seconds)
+        raise "agent request handler did not start"
+      end
+    end
+
+    client.session_cancel("root")
+    answers_to(transport, 101).should be_empty
+    answers_to(transport, 102).should be_empty
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"state":{"state":"idle","stopReason":"cancelled"})))
+    synchronize_updates(transport, client)
+    answers_to(transport, 101).first["result"]["outcome"]["outcome"].should eq("cancelled")
+    answers_to(transport, 102).should be_empty
+
+    transport.replies["session/close"] = %("result":{})
+    client.session_close("root")
+    answers_to(transport, 102).first["result"]["action"].should eq("cancel")
+    answers_to(transport, 103).first["result"]["outcome"]["outcome"].should eq("cancelled")
+    transport.inject_raw(subagent_update_frame("root", "child", %(,"capabilities":{"cancel":{}},"state":{"state":"running"})))
+    synchronize_updates(transport, client)
+    client.subagent("child").not_nil!.cancel?.should be_false
+    client.subagent("child").not_nil!.state.should be_nil
+  ensure
+    3.times { release.try(&.send(nil)) }
+    client.try(&.close)
   end
 end

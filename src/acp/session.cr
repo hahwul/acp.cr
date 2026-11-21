@@ -171,6 +171,11 @@ module ACP
       @client.session_cancel(@id)
     end
 
+    # Child sessions announced under this session, when subagents are enabled.
+    def subagents : Array(SubagentSession)
+      @client.subagents(@id)
+    end
+
     # ─── Mode ─────────────────────────────────────────────────────────
 
     # Switches the session to the specified mode.
