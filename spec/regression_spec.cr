@@ -3404,3 +3404,153 @@ describe "ACP v2 exact permission subjects" do
     end
   end
 end
+
+private class ClosedChannelStdioDiagnostics < IO
+  def read(slice : Bytes) : Int32
+    0
+  end
+
+  def write(slice : Bytes) : Nil
+    raise Channel::ClosedError.new
+  end
+end
+
+private class PausedStdioDiagnostics < IO
+  getter resumed = Channel(Nil).new
+
+  def read(slice : Bytes) : Int32
+    0
+  end
+
+  def write(slice : Bytes) : Nil
+    @resumed.receive?
+  end
+end
+
+private def await_stdio_termination(transport : ACP::ProcessTransport) : Nil
+  deadline = Time.instant + 2.seconds
+  until transport.terminated?
+    fail "Agent did not exit" if Time.instant >= deadline
+    sleep 10.milliseconds
+  end
+end
+
+private def await_stdio_exit(transport : ACP::ProcessTransport) : Process::Status
+  result = Channel(Process::Status | Exception).new(1)
+  spawn do
+    result.send(transport.wait)
+  rescue ex
+    result.send(ex)
+  end
+
+  select
+  when status = result.receive
+    raise status if status.is_a?(Exception)
+    status
+  when timeout(5.seconds)
+    transport.process.terminate(graceful: false) unless transport.terminated?
+    fail "Agent did not exit after shutdown"
+  end
+end
+
+describe "ACP stdio shutdown" do
+  it "gives the Agent time to finish EOF cleanup and drains stdout while it exits" do
+    script = <<-'SH'
+      trap 'exit 95' TERM
+      printf '{"ready":true}\n'
+      read -r line
+      printf '{"cleanup":"%01048576d"}\n' 0 || exit 96
+      exit 17
+      SH
+    transport = ACP::ProcessTransport.new("sh", ["-c", script])
+    transport.receive(2.seconds).not_nil!["ready"].as_bool.should be_true
+
+    transport.close
+    transport.closed?.should be_true
+    transport.receive(10.milliseconds).should be_nil
+    status = await_stdio_exit(transport)
+    status.exit_signal?.should be_nil
+    status.exit_code.should eq(17)
+    transport.exit_status.should eq(status)
+  ensure
+    transport.try(&.close)
+  end
+
+  it "reaps an Agent that already exited when close is called" do
+    transport = ACP::ProcessTransport.new("sh", ["-c", "exit 23"])
+    await_stdio_termination(transport)
+
+    transport.close
+    transport.exit_status.not_nil!.exit_code.should eq(23)
+  ensure
+    transport.try(&.close)
+  end
+
+  it "closes an already exited process while its stderr consumer is paused" do
+    diagnostics = PausedStdioDiagnostics.new
+    transport = ACP::ProcessTransport.new("sh", ["-c", "printf diagnostic >&2; exit 24"], stderr: diagnostics)
+    await_stdio_termination(transport)
+
+    closed = Channel(Nil).new
+    spawn do
+      transport.close
+      closed.close
+    end
+    select
+    when closed.receive?
+    when timeout(1.second)
+      fail "close waited for the stderr consumer"
+    end
+    transport.process.output.closed?.should be_true
+
+    diagnostics.resumed.close
+    await_stdio_exit(transport).exit_code.should eq(24)
+  ensure
+    diagnostics.try(&.resumed.close)
+    transport.try(&.close)
+  end
+
+  it "still stops the Agent when its stderr consumer makes wait fail" do
+    script = <<-'SH'
+      trap 'exit 27' TERM
+      printf '{"ready":true}\n'
+      read -r line
+      printf 'diagnostic\n' >&2
+      while :; do sleep 0.05; done
+      SH
+    transport = ACP::ProcessTransport.new("sh", ["-c", script], stderr: ClosedChannelStdioDiagnostics.new)
+    transport.receive(2.seconds).not_nil!["ready"].as_bool.should be_true
+
+    transport.close
+    transport.terminated?.should be_true
+    error = expect_raises(ACP::TransportError) { await_stdio_exit(transport) }
+    error.cause.should be_a(Channel::ClosedError)
+    expect_raises(ACP::TransportError) { await_stdio_exit(transport) }.should be(error)
+  ensure
+    if transport && !transport.terminated?
+      transport.process.terminate(graceful: false) rescue nil
+    end
+    transport.try(&.close)
+  end
+
+  it "sends SIGTERM before force-killing an Agent that stays alive" do
+    script = <<-'SH'
+      trap 'printf "term\n" >&2' TERM
+      printf '{"ready":true}\n'
+      read -r line
+      while :; do sleep 0.05; done
+      SH
+    diagnostics = IO::Memory.new
+    transport = ACP::ProcessTransport.new("sh", ["-c", script], stderr: diagnostics)
+    transport.receive(2.seconds).not_nil!["ready"].as_bool.should be_true
+
+    transport.close
+    transport.close
+    status = await_stdio_exit(transport)
+    status.exit_signal?.should eq(Signal::KILL)
+    diagnostics.to_s.should eq("term\n")
+    transport.wait.should eq(status)
+  ensure
+    transport.try(&.close)
+  end
+end

@@ -119,8 +119,8 @@ module ACP
     # The IO we read incoming messages from (agent's stdout).
     @reader : IO
 
-    # The background reader fiber.
-    @reader_fiber : Fiber? = nil
+    # Signals that the reader fiber no longer owns the input stream.
+    @reader_finished = Channel(Nil).new
 
     # Set while a -32700 answer is being written; see `send_parse_error`.
     @parse_error_pending : Atomic(Bool) = Atomic(Bool).new(false)
@@ -310,6 +310,12 @@ module ACP
     # Closes the transport, signaling the reader to stop and
     # closing the underlying IO objects.
     def close : Nil
+      close_stdio(close_reader: true)
+    end
+
+    # Detaches the protocol and closes stdin. Keep stdout open when the
+    # child may still write while it is shutting down.
+    protected def close_stdio(*, close_reader : Bool) : Nil
       return if @close_called
       @close_called = true
       @closed = true
@@ -326,9 +332,21 @@ module ACP
       @close_sent = true
       @incoming.close
 
-      # Close the underlying IOs if they support it.
       @writer.close rescue nil
-      @reader.close rescue nil
+      if close_reader
+        @reader.close rescue nil
+      end
+    end
+
+    # Discards remaining stdout after the normal reader stops using it.
+    protected def drain_closing_stdout : Nil
+      @reader_finished.receive?
+      buffer = uninitialized UInt8[8192]
+      while @reader.read(buffer.to_slice) > 0
+        Fiber.yield
+      end
+    rescue IO::Error
+      # The process reaper may close the pipe while it is being drained.
     end
 
     # Returns true if the transport has been closed.
@@ -420,9 +438,16 @@ module ACP
     # discarded. A nil return from `gets` (EOF) ends the drain.
     private def drain_oversize_line : Int64
       drained = 0_i64
-      while chunk = @reader.gets(@max_line_bytes, chomp: false)
-        drained += chunk.bytesize
-        break if chunk.ends_with?('\n')
+      chunk_size = Math.min(@max_line_bytes, 8192)
+      begin
+        while !@closed && (chunk = @reader.gets(chunk_size, chomp: false))
+          drained += chunk.bytesize
+          break if chunk.ends_with?('\n')
+
+          Fiber.yield
+        end
+      rescue ex : IO::Error
+        raise ex unless @closed
       end
       drained
     end
@@ -448,8 +473,10 @@ module ACP
     end
 
     private def start_reader
-      @reader_fiber = spawn(name: "acp-transport-reader") do
+      spawn(name: "acp-transport-reader") do
         read_loop
+      ensure
+        @reader_finished.close
       end
     end
 
@@ -475,6 +502,8 @@ module ACP
           break
         end
 
+        break if @closed
+
         # nil from gets means EOF — the agent process closed its stdout.
         if raw.nil?
           Log.debug { "Reader reached EOF" }
@@ -495,6 +524,8 @@ module ACP
             break
           end
           drained = drain_oversize_line
+          break if @closed
+
           Log.warn { "Dropped oversized incoming line (> #{@max_line_bytes} bytes; drained #{drained} more bytes to re-sync)" }
           next
         end
@@ -558,12 +589,14 @@ module ACP
     # The underlying child process.
     getter process : Process
 
-    # Flag to prevent duplicate close/terminate sequences.
-    @process_closing : Bool = false
+    private STDIN_EOF_GRACE = 1.second
+    private TERMINATE_GRACE = 2.seconds
 
-    # Memoized exit status, so the process is reaped exactly once no matter
-    # how many callers (or the internal reaper fiber) ask for it.
-    @exit_status : Process::Status? = nil
+    # Prevents duplicate shutdown sequences.
+    @process_closing = Atomic(Bool).new(false)
+
+    # Process#wait can only be used once, even when it fails.
+    @wait_result : Process::Status | Exception | Nil
 
     # Guards the single reap of the child process.
     @wait_mutex : Mutex = Mutex.new
@@ -658,68 +691,90 @@ module ACP
         @agent_stderr, @agent_buffer_size, @max_line_bytes, exact_frames: @exact_frames)
     end
 
-    # Closes the transport and terminates the agent process if it's
-    # still running.
+    # Closes stdin and gives the Agent time to exit before escalating.
+    # The transport stops delivering messages immediately. This call allows
+    # up to three seconds before force-killing an unresponsive child.
     def close : Nil
-      return if @process_closing
-      @process_closing = true
-      super
+      return unless @process_closing.compare_and_set(false, true)[1]
+      already_exited = @process.terminated?
+      close_stdio(close_reader: already_exited)
 
-      if @process.terminated?
-        # Reap the already-terminated process to avoid zombies.
-        wait rescue nil
-      else
-        # Give the process a moment to exit gracefully, then signal it.
-        @process.terminate(graceful: true)
-
-        # Wait briefly for graceful shutdown, then force-kill if needed.
-        spawn do
-          sleep 2.seconds
-          begin
-            unless @process.terminated?
-              @process.terminate(graceful: false)
-            end
-          rescue
-            # Process may have already exited.
-          end
-          # Reap the process to avoid zombies.
-          wait rescue nil
+      unless already_exited
+        spawn(name: "acp-process-stdout-drain") { drain_closing_stdout }
+        unless process_exited_within?(STDIN_EOF_GRACE)
+          terminate_process(graceful: true)
+          terminate_process(graceful: false) unless process_exited_within?(TERMINATE_GRACE)
         end
+        @reader.close rescue nil
       end
+
+      # Unix passes file descriptors directly. Other sinks may leave stderr
+      # copying blocked even after the child exits, so reap them off-fiber.
+      if already_exited && {{ flag?(:unix) }} && @agent_stderr.is_a?(IO::FileDescriptor)
+        reap_process
+      else
+        spawn(name: "acp-process-reaper") { reap_process }
+      end
+    end
+
+    private def process_exited_within?(grace : Time::Span) : Bool
+      # Crystal's wait also consumes any errors from copying stderr. Check
+      # liveness directly so a failing stderr sink cannot interrupt shutdown.
+      deadline = Time.instant + grace
+      until @process.terminated?
+        remaining = deadline - Time.instant
+        return false if remaining <= Time::Span.zero
+
+        sleep Math.min(remaining, 10.milliseconds)
+      end
+      true
+    end
+
+    private def reap_process : Nil
+      wait
+    rescue ex
+      Log.debug { "Could not reap Agent process: #{ex.class}" }
+    end
+
+    private def terminate_process(*, graceful : Bool) : Nil
+      @process.terminate(graceful: graceful) unless @process.terminated?
+    rescue ex : RuntimeError
+      # The process can exit between the liveness check and the signal.
+      Log.debug { "Could not signal Agent process: #{ex.class}" }
     end
 
     # Waits for the agent process to exit and returns its status.
     #
     # Safe to call any number of times, from any fiber, and after `close`:
-    # the child is reaped exactly once and every caller gets the same status.
-    # `Process#wait` itself is single-shot — a second call raises
-    # `Channel::ClosedError` — and `close` spawns a reaper fiber that also
-    # waits, so calling this without the memo would raise or not depending on
-    # which fiber won the race.
+    # the child is reaped once and every caller gets the same status or error.
+    # Crystal's `Process#wait` itself is single-shot.
     def wait : Process::Status
       @wait_mutex.synchronize do
-        if status = @exit_status
-          return status
+        case result = @wait_result
+        when Process::Status then return result
+        when Exception       then raise result
         end
 
-        status = begin
-          @process.wait
+        begin
+          status = @process.wait
         rescue ex : Channel::ClosedError
-          # Something outside this class already reaped the process; we have
-          # no status to report.
-          raise TransportError.new("Agent process was already reaped: #{ex.message}")
+          error = TransportError.new("Could not wait for Agent process: #{ex.message}", ex)
+          @wait_result = error
+          raise error
+        rescue ex
+          @wait_result = ex
+          raise ex
         end
 
-        @exit_status = status
-        status
+        @wait_result = status
       end
     end
 
     # Returns the agent process's exit status if it has already been reaped,
-    # or nil if it is still running (or has not been waited on yet). Never
+    # or nil if it is still running or has not been waited on yet. Never
     # blocks — use `wait` when you want to block until the process exits.
     def exit_status : Process::Status?
-      @exit_status
+      @wait_result.as?(Process::Status)
     end
 
     # Returns true if the agent process has terminated.

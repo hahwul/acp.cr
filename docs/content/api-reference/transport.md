@@ -149,6 +149,11 @@ transport.terminated?    # => Bool (has the process exited?)
 transport.wait           # => Process::Status (blocks until process exits)
 ```
 
+Closing the transport closes the Agent's stdin and starts draining its remaining
+stdout. The Agent gets one second to exit on its own, then two seconds after
+SIGTERM before SIGKILL. The transport stops delivering messages immediately,
+and the call waits through the grace periods when escalation is needed. Call `transport.wait` to wait for shutdown and read the exit status.
+
 ## ACP.connect
 
 Convenience function that creates a `ProcessTransport`, wraps it in a `Client`, and calls `initialize_connection`:
