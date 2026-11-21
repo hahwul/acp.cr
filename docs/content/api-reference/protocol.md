@@ -253,9 +253,17 @@ supplies, including explicit clears.
 Typed child-session announcements expose the mirrored `StateSnapshot`, and
 inter-session messages retain their transcript links and open content.
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
-fields from clears and apply metadata patches by key. Notices and compaction
-summary chunks reuse their wire-compatible `ACP::Protocol` types.
+fields from clears and apply metadata patches by key. Compaction summary
+chunks reuse their wire-compatible `ACP::Protocol` types.
 [ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
+
+V2 notices use `NoticeUpdate` and expose the original severity, the
+required title, and optional description. They are live events with no
+capability requirement. Both notices and `ReplayCompleteUpdate` expose
+exact event metadata through `meta_raw`. Each replay marker applies to
+its own session, including during child-session replay.
+[ACP v2 session notices](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-notices)
+[ACP v2 replay completion](https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete)
 
 `V2::PlanUpdate#plan` exposes the plan ID and the full representation as
 `raw`. Its `typed` accessor returns a checklist or a Markdown plan, and

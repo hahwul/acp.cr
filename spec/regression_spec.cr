@@ -4543,3 +4543,117 @@ describe "ACP v2 identified plan updates" do
     client.try(&.close)
   end
 end
+
+describe "ACP exact notices and replay completion" do
+  it "keeps valid notices with wide metadata and tolerates a malformed optional description" do
+    wire = %({"sessionUpdate":"notice","severity":"future_severity","title":"History gap","description":{"unexpected":true},"_meta":{"example.test/count":18446744073709551615}})
+    notice = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::NoticeUpdate)
+    notice.severity.should eq("future_severity")
+    notice.title.should eq("History gap")
+    notice.description.should be_nil
+    notice.to_json.should contain(%("example.test/count":18446744073709551615))
+    notice.meta_raw.not_nil!.field("example.test/count").not_nil!.json.should eq(UInt64::MAX.to_s)
+    malformed_meta = ACP::Protocol::NoticeUpdate.from_json(%({"sessionUpdate":"notice","severity":"info","title":"Hello","_meta":true}))
+    malformed_meta.meta_raw.should be_nil
+
+    shared = ACP::Protocol::NoticeUpdate.from_json(wire)
+    shared.title.should eq("History gap")
+    shared.description.should be_nil
+    shared.to_json.should contain(%("example.test/count":18446744073709551615))
+  end
+
+  it "rejects malformed required notice fields while preserving the raw update" do
+    [
+      %("title":""),
+      %("title":null),
+      %("title":false),
+      %("description":"optional"),
+    ].each do |fields|
+      update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"notice","severity":"warning",#{fields}}))
+      update.typed.should be_nil
+      update.to_json.should contain(fields)
+    end
+  end
+
+  it "retains exact replay metadata and ignores malformed optional metadata" do
+    meta = %({"example.test/count":18446744073709551615,"example.test/precision":0.1234567890123456789})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"replay_complete","_meta":#{meta}}))
+    marker = update.typed.as(ACP::Protocol::V2::ReplayCompleteUpdate)
+    marker.meta_raw.not_nil!.json.should eq(meta)
+    copy = ACP::Protocol::V2::ReplayCompleteUpdate.from_json(marker.to_json)
+    copy.meta_raw.not_nil!.json.should eq(meta)
+
+    ["null", "false", "[42]"].each do |invalid|
+      update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"replay_complete","_meta":#{invalid}}))
+      update.typed.as(ACP::Protocol::V2::ReplayCompleteUpdate).meta_raw.should be_nil
+    end
+  end
+
+  it "delivers exact notices and per-session replay markers in stdio order" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(8)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+      resume = Channel(ACP::Protocol::V2::SessionResumeResult | Exception).new(1)
+      spawn do
+        params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+        resume.send(client.session_resume(params))
+      rescue ex
+        resume.send(ex)
+      end
+      request = JSON.parse(outgoing.gets.not_nil!)
+      request["method"].as_s.should eq("session/resume")
+
+      send_update = ->(sid : String, body : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{sid.to_json},"update":#{body}}})
+        nil
+      end
+      meta = %({"example.test/count":18446744073709551615,"example.test/precision":0.1234567890123456789})
+      send_update.call("root", %({"sessionUpdate":"notice","severity":"error","title":"In-flight live notice","_meta":#{meta}}))
+      notice = next_exact_session_update(observed).update.typed.as(ACP::Protocol::NoticeUpdate)
+      notice.title.should eq("In-flight live notice")
+      notice.to_json.should contain(%("_meta":#{meta}))
+      client.session_state("root").not_nil!.state.should eq("idle")
+
+      send_update.call("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+      next_exact_session_update(observed).update.session_update.should eq("subagent_update")
+      send_update.call("root", %({"sessionUpdate":"cursor_update","cursorId":"r"}))
+      next_exact_session_update(observed).update.session_update.should eq("cursor_update")
+      send_update.call("child", %({"sessionUpdate":"cursor_update","cursorId":"c"}))
+      next_exact_session_update(observed).update.session_update.should eq("cursor_update")
+
+      client.session_cursor("root", "r").should be_nil
+      client.session_cursor("child", "c").should be_nil
+      marker = %({"sessionUpdate":"replay_complete","_meta":#{meta}})
+      send_update.call("child", marker)
+      child = next_exact_session_update(observed)
+      child.session_id.should eq("child")
+      child.update.typed.as(ACP::Protocol::V2::ReplayCompleteUpdate).to_json.should contain(%("_meta":#{meta}))
+      client.session_cursor("child", "c").should_not be_nil
+      client.session_cursor("root", "r").should be_nil
+
+      send_update.call("root", marker)
+      root = next_exact_session_update(observed)
+      root.session_id.should eq("root")
+      root.update.typed.as(ACP::Protocol::V2::ReplayCompleteUpdate).to_json.should contain(%("_meta":#{meta}))
+      client.session_cursor("root", "r").should_not be_nil
+      send_update.call("root", %({"sessionUpdate":"notice","severity":"info","title":"Live after replay"}))
+      next_exact_session_update(observed).update.typed.as(ACP::Protocol::NoticeUpdate).title.should eq("Live after replay")
+
+      feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{}})
+      select
+      when result = resume.receive
+        result.should be_a(ACP::Protocol::V2::SessionResumeResult)
+      when timeout(2.seconds)
+        fail "resume response did not arrive"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+end
