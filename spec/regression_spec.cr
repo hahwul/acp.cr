@@ -5569,3 +5569,125 @@ describe "ACP v2 streamed tool content" do
     end
   end
 end
+describe "ACP v2 display media and resources" do
+  it "requires standard Base64 for media and a valid URI and payload for resources" do
+    invalid = [
+      %({"type":"image","mimeType":"image/png","data":"YQ"}),
+      %({"type":"audio","mimeType":"audio/wav","data":"_w=="}),
+      %({"type":"resource","resource":{"uri":"file:///work/data","blob":"YQ="}}),
+      %({"type":"resource","resource":{"uri":"file:///work/invalid%ZZ","text":"content"}}),
+      %({"type":"resource","resource":{"uri":"relative","text":"content"}}),
+      %({"type":"resource_link","name":"Notes","uri":"https://[draft]/notes"}),
+      %({"type":"resource_link","name":"Notes","uri":"relative/path"}),
+    ]
+    invalid.each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::ContentBlock.from_v2_json(wire) }
+    end
+
+    legacy = ACP::Protocol::ContentBlock.from_json(invalid.first).as(ACP::Protocol::ImageContentBlock)
+    legacy.data.should eq("YQ")
+    resource = ACP::Protocol::ContentBlock.from_v2_json(%({"type":"resource","resource":{"uri":"file:///work/notes","text":"","_meta":{"example.test/value":18446744073709551615}}})).as(ACP::Protocol::ResourceContentBlock)
+    resource.text.should eq("")
+    resource.resource_raw.field("_meta").not_nil!.field("example.test/value").not_nil!.json.should eq(UInt64::MAX.to_s)
+
+    mixed = %({"type":"resource","resource":{"uri":"file:///work/notes","text":"usable","blob":"!!!!"}})
+    typed = ACP::Protocol::ContentBlock.from_v2_json(mixed).as(ACP::Protocol::ResourceContentBlock)
+    typed.text.should eq("usable")
+    typed.blob.should be_nil
+    typed.resource_raw.field("blob").not_nil!.as_s?.should eq("!!!!")
+  end
+
+  it "keeps valid display content when optional media and link fields are malformed" do
+    invalid_uri = %({"type":"image","mimeType":"image/png","data":"YQ==","uri":"https://example.test/with space","_meta":{"example.test/value":0.1234567890123456789}})
+    image = ACP::Protocol::ContentBlock.from_v2_json(invalid_uri).as(ACP::Protocol::ImageContentBlock)
+    image.data.should eq("YQ==")
+    image.uri.should be_nil
+    image.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq("0.1234567890123456789")
+    valid_image = ACP::Protocol::ContentBlock.from_v2_json(%({"type":"image","mimeType":"image/png","data":"+/8=","uri":"https://[2001:db8::1]/a%20b.png#preview"})).as(ACP::Protocol::ImageContentBlock)
+    valid_image.uri.should eq("https://[2001:db8::1]/a%20b.png#preview")
+
+    wire = <<-JSON
+      {"type":"resource_link","name":"Notes","uri":"file:///work/a%20b","size":-1,
+       "icons":[{"src":"relative.png"},{"src":"http://example.test/insecure.png"},
+                {"src":"file:///work/icon.png"},{"src":"https://example.test/with space.png"},
+                {"src":"https:icon.png"},{"src":"https:///icon.png"},
+                {"src":"https://user@example.test/icon.png"},
+                {"src":"https://example%20test/icon.png"},{"src":"https://example.test:65536/icon.png"},
+                {"src":"https://%5Bexample.test%5D/icon.png"},
+                {"src":"data:icon.png"},{"src":"data:text/plain;base64,YQ=="},
+                {"src":"data:text/plain;base64,YQ==","mimeType":"image/png"},
+                {"src":"data:application/octet-stream;base64,YQ=="},
+                {"src":"data:image/png;base64,YQ="},{"src":"data:image/png,YQ=="},
+                {"src":"https://example.test/first","src":"https://example.test/second"},
+                {"src":"data:image/png;base64,YQ%3D%3D"},{"src":"HTTPS://example.test/icon.png"},
+                {"src":"https://[2001:db8::1]:65535/icon.png"},
+                {"src":"data:application/octet-stream;base64,YQ==","mimeType":"image/png"},
+                {"src":"data:;base64,YQ==","mimeType":"image/png"}]}
+      JSON
+    link = ACP::Protocol::ContentBlock.from_v2_json(wire).as(ACP::Protocol::ResourceLinkContentBlock)
+    link.size.should be_nil
+    link.size_bytes.should be_nil
+    link.icons.not_nil!.map(&.src).should eq([
+      "data:image/png;base64,YQ%3D%3D",
+      "HTTPS://example.test/icon.png",
+      "https://[2001:db8::1]:65535/icon.png",
+      "data:application/octet-stream;base64,YQ==",
+      "data:;base64,YQ==",
+    ])
+    ACP::Protocol::ContentBlock.from_json(wire).as(ACP::Protocol::ResourceLinkContentBlock).size.should eq(-1_i64)
+
+    duplicate_icons = %({"type":"resource_link","name":"Notes","uri":"file:///work/a","icons":[],"icons":[{"src":"https://example.test/icon.png"}]})
+    ACP::Protocol::ContentBlock.from_v2_json(duplicate_icons).as(ACP::Protocol::ResourceLinkContentBlock).icons.should be_nil
+    duplicate_uri = %({"type":"resource_link","name":"Notes","uri":"relative","uri":"file:///work/a","icons":[]})
+    expect_raises(JSON::ParseException) { ACP::Protocol::ContentBlock.from_v2_json(duplicate_uri) }
+  end
+
+  it "applies the same display validation across messages and tool updates over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(4)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      invalid_audio = %({"type":"audio","mimeType":"audio/wav","data":"!!!!"})
+      image = %({"type":"image","mimeType":"image/png","data":"YQ==","uri":"relative.png"})
+      blob = %({"type":"resource","resource":{"uri":"file:///work/blob","blob":"+/8=","_meta":{"example.test/value":18446744073709551615}}})
+      invalid_link = %({"type":"resource_link","uri":"relative","name":"Notes"})
+      wrap_link = %({"type":"content","content":#{invalid_link}})
+      wrap_blob = %({"type":"content","content":#{blob}})
+      [
+        %({"sessionUpdate":"agent_message","messageId":"m","content":[#{invalid_audio},#{image},#{blob}]}),
+        %({"sessionUpdate":"agent_message_chunk","messageId":"m","content":#{invalid_audio}}),
+        %({"sessionUpdate":"tool_call_update","toolCallId":"t","content":[#{wrap_link},#{wrap_blob}]}),
+        %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":#{wrap_link}}),
+      ].each do |wire|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{wire}}})
+      end
+
+      message = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::MessageUpdate)
+      message.content_raw.not_nil!.elements?.not_nil!.size.should eq(3)
+      blocks = message.content_blocks.not_nil!
+      blocks.map(&.type).should eq(["image", "resource"])
+      blocks.first.as(ACP::Protocol::ImageContentBlock).uri.should be_nil
+      message_blob = blocks.last.as(ACP::Protocol::ResourceContentBlock)
+      message_blob.blob.should eq("+/8=")
+      message_blob.resource_raw.field("_meta").not_nil!.field("example.test/value").not_nil!.json.should eq(UInt64::MAX.to_s)
+
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+      chunk.content_raw.json.should eq(invalid_audio)
+      chunk.to_content_chunk.should be_nil
+      tool = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      tool.content.not_nil!.size.should eq(1)
+      tool.content.not_nil!.first.content_block.as(ACP::Protocol::ResourceContentBlock).resource_raw.json.should eq(message_blob.resource_raw.json)
+      rejected = next_exact_session_update(observed)
+      rejected.update.typed.should be_nil
+      rejected.raw.field("update").not_nil!.field("content").not_nil!.json.should eq(wrap_link)
+    ensure
+      client.try(&.close)
+    end
+  end
+end

@@ -248,6 +248,13 @@ chunks. Terminal snapshots and chunks expose decoded bytes through `bytes`.
 The `*_present?` methods on upserts identify fields the update supplies,
 including explicit clears.
 
+Typed v2 display content validates Base64 media and absolute resource URIs.
+An invalid optional image URI leaves the image data available. Embedded text
+remains available when a sibling blob is invalid. Resource links omit invalid
+sizes and icon entries. Display icons use credential-free HTTPS URLs or
+Base64 image data URIs. Raw accessors retain the original values for inspection.
+[ACP v2 content](https://agentclientprotocol.com/protocol/v2/content)
+
 Terminal updates treat malformed optional fields as omitted. A concrete
 `exit_status` still marks an exit when its code and signal are unknown.
 Output snapshots and chunks validate standard Base64 on receipt. Decode each
