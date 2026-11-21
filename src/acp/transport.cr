@@ -232,19 +232,21 @@ module ACP
 
     # ─── Private ────────────────────────────────────────────────────
 
-    # Returns the JSON string to print at DEBUG level for an outgoing
-    # message. If the method is in `SENSITIVE_METHODS`, the `params`
-    # field is replaced with "[REDACTED]" so credentials don't end up
-    # in log files. Errors fall back to a constant string.
+    # Redacts sensitive request parameters and MCP configurations from logs.
     private def redact_frame(message : Hash(String, JSON::Any)) : String
       method = message["method"]?.try(&.as_s?)
-      return message.to_json unless method && SENSITIVE_METHODS.includes?(method)
+      return message.to_json unless params = message["params"]?
 
-      sanitized = message.dup
-      sanitized["params"] = JSON::Any.new("[REDACTED]") if sanitized.has_key?("params")
-      sanitized.to_json
+      redacted = JSON::Any.new("[REDACTED]")
+      if method && SENSITIVE_METHODS.includes?(method)
+        message.merge({"params" => redacted}).to_json
+      elsif (fields = params.as_h?) && fields.has_key?("mcpServers")
+        message.merge({"params" => JSON::Any.new(fields.merge({"mcpServers" => redacted}))}).to_json
+      else
+        message.to_json
+      end
     rescue
-      %({"method":"#{method}","params":"[REDACTED]"})
+      "[REDACTED frame]"
     end
 
     # Redacts incoming authentication payloads and launch descriptors.
