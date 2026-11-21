@@ -195,6 +195,7 @@ module ACP
 
     struct ToolCallLocation
       include JSON::Serializable
+      include LosslessMetadata
 
       # The absolute file path being accessed or modified (required).
       property path : String
@@ -202,15 +203,13 @@ module ACP
       # Optional line number within the file (1-based). Schema `uint32`.
       property line : UInt32?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a reported tool-call location.
       def initialize(
         @path : String,
         @line : UInt32? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns a human-readable representation of this location.

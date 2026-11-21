@@ -50,7 +50,7 @@ module ACP
         def initialize(@type : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
-        # Decodes a tool-call patch. Raises JSON::ParseException for malformed fields.
+        # Decodes a tool-call patch. Raises JSON::ParseException if the required ID is malformed.
         def tool_call : PermissionToolCall?
           PermissionToolCall.from_json(exact_unmapped_json("toolCall") || "null") if @type == "tool_call"
         end

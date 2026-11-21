@@ -42,6 +42,10 @@ module ACP
     # :nodoc:
     module OptionalContentList(T)
       def self.from_json(pull : JSON::PullParser) : Array(T)?
+        from_json(pull) { |item| OptionalContentValue(T).from_json(item) }
+      end
+
+      def self.from_json(pull : JSON::PullParser, &decode : JSON::PullParser -> T?) : Array(T)?
         unless pull.kind.begin_array?
           pull.skip
           return nil
@@ -49,7 +53,7 @@ module ACP
 
         values = [] of T
         pull.read_array do
-          if value = OptionalContentValue(T).from_json(pull)
+          if value = yield pull
             values << value
           end
         end

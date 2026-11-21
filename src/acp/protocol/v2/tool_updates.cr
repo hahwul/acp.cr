@@ -259,6 +259,66 @@ module ACP
         end
       end
 
+      # :nodoc:
+      module ToolPatchContentList
+        def self.from_json(pull : JSON::PullParser) : Array(ToolCallContent)?
+          OptionalContentList(ToolCallContent).from_json(pull) do |item|
+            decode(RawJson.new(item))
+          end
+        end
+
+        private def self.decode(wire : RawJson) : ToolCallContent?
+          return unless wire.object?
+
+          unless WireFrame.unique_members?(wire.json, recursive: false)
+            # A diff can still render its changes when its optional patch is ambiguous.
+            return unless WireFrame.field(wire.json, "type", unique: true) == %("diff") &&
+                          WireFrame.unique_members?(wire.without_field("patch").json, recursive: false)
+          end
+
+          content = ToolCallContent.from_json(wire.json)
+          case content.content_type
+          when "content"  then content if content.content_block
+          when "diff"     then content if content.diff
+          when "terminal" then content if content.terminal_id
+          when "session"  then content if content.session_id
+          else                 content
+          end
+        rescue JSON::ParseException
+          nil
+        end
+      end
+
+      # :nodoc:
+      module ToolPatchLocationList
+        def self.from_json(pull : JSON::PullParser) : Array(Protocol::ToolCallLocation)?
+          OptionalContentList(Protocol::ToolCallLocation).from_json(pull) do |item|
+            decode(RawJson.new(item))
+          end
+        end
+
+        private def self.decode(wire : RawJson) : Protocol::ToolCallLocation?
+          return unless wire.object?
+          path = WireFrame.field(wire.json, "path", unique: true)
+          return unless path && path.starts_with?('"') && Protocol.absolute_path?(String.from_json(path))
+
+          wire = wire.without_field("line") unless valid_line?(wire)
+          Protocol::ToolCallLocation.from_json(wire.json)
+        rescue JSON::ParseException
+          nil
+        end
+
+        private def self.valid_line?(wire : RawJson) : Bool
+          line = WireFrame.field(wire.json, "line", unique: true)
+          return true if line.nil? || line == "null"
+
+          number = line.to_u32?
+          !!number && !number.zero?
+        rescue JSON::ParseException
+          false
+        end
+      end
+
       # Fields shared by tool-call updates and permission subjects.
       abstract struct ToolCallPatch
         include JSON::Serializable
@@ -273,14 +333,14 @@ module ACP
         getter tool_call_id : String
 
         # Fields are replaced when present. Top-level metadata patches by key.
-        PatchFields.define({
-          name:         {String, "name"},
-          title:        {String, "title"},
-          kind:         {String, "kind"},
-          status:       {String, "status"},
-          content:      {Array(ToolCallContent), "content"},
-          locations:    {Array(Protocol::ToolCallLocation), "locations"},
-          capabilities: {EntityCapabilities, "capabilities"},
+        PatchFields.tolerant({
+          name:         {String, "name", OptionalCapabilityString},
+          title:        {String, "title", OptionalCapabilityString},
+          kind:         {String, "kind", OptionalCapabilityString},
+          status:       {String, "status", OptionalCapabilityString},
+          content:      {Array(ToolCallContent), "content", ToolPatchContentList},
+          locations:    {Array(Protocol::ToolCallLocation), "locations", ToolPatchLocationList},
+          capabilities: {EntityCapabilities, "capabilities", OptionalCapabilityObject(EntityCapabilities)},
         })
         include LosslessMetadataPatch
 
