@@ -33,11 +33,14 @@ module ACP
         private def handle_session_update(params : JSON::Any?, params_json : String?) : Nil
           if params
             begin
-              update = Protocol::V2::SessionUpdateParams.from_json(params_json || params.to_json)
+              update = Protocol::V2::SessionUpdateParams.from_json(params_json || Protocol::WireFrame.encode(params))
               if params_json && update.update.session_update.in?("state_update", "subagent_update")
                 update_json = Protocol::WireFrame.field(params_json, "update")
               end
               return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
+              if update.update.session_update == "cursor_update" && (cursor = update.update.typed.as?(Protocol::CursorUpdate))
+                observe_cursor_update(update.session_id, cursor)
+              end
             rescue ex : JSON::ParseException
               ClientLog.warn { "Failed to parse v2 session/update: #{ex.message}" }
               deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
@@ -181,6 +184,9 @@ module ACP
 
       # Child associations and effective session workspace roots.
       delegate subagent, subagents, session_workspace, to: @connection
+
+      # Cursor snapshots scoped to their originating session.
+      delegate session_cursor, session_cursors, to: @connection
 
       # Sends initialize and verifies the selected protocol version.
       def initialize_connection : Wire::InitializeResult

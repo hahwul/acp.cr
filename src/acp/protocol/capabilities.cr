@@ -97,6 +97,28 @@ module ACP
       end
     end
 
+    # Presence advertises support for v1 cursor_update notifications.
+    struct SessionCursorsCapabilities
+      include JSON::Serializable
+
+      # Creates the cursor support marker.
+      def initialize
+      end
+
+      # :nodoc:
+      def self.from_json(pull : JSON::PullParser) : SessionCursorsCapabilities?
+        return new(pull) if pull.kind.begin_object?
+
+        pull.skip
+        nil
+      end
+
+      # :nodoc:
+      def self.to_json(value : SessionCursorsCapabilities, json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
     # Session-related client capabilities (`clientCapabilities.session`).
     # Each field is opt-in: omitted or null means unsupported, and the agent
     # MUST NOT send the corresponding updates or option types.
@@ -113,6 +135,10 @@ module ACP
       # Live user-facing notices.
       property notices : NoticeCapabilities?
 
+      # Session cursor announcements.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionCursorsCapabilities)]
+      property cursors : SessionCursorsCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -122,6 +148,7 @@ module ACP
         @config_options : SessionConfigOptionsCapabilities? = nil,
         @notices : NoticeCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @cursors : SessionCursorsCapabilities? = nil,
       )
       end
     end
