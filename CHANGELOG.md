@@ -33,6 +33,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Configure draft ACP v1 and v2 model providers with typed discovery, replacement, and disable requests.
 - Advertise and invoke draft ACP v2 Agent Skills with typed command entries and prompt references.
 - Create draft ACP v1 and v2 session forks, including forks at an announced cursor and initial configuration choices.
 - Opt in to draft prompt suggestions in ACP v1 and v2 and receive ordered, typed replacement lists.

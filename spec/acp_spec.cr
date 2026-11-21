@@ -1835,6 +1835,57 @@ describe ACP::StdioTransport do
     transport.close
   end
 
+  it "redacts provider requests and correlated replies from frame logs" do
+    reader, feed = IO.pipe
+    writer = IO::Memory.new
+    captured = IO::Memory.new
+    backend = ::Log::IOBackend.new(captured, dispatcher: ::Log::DispatchMode::Sync)
+    backend.formatter = ::Log::Formatter.new { |entry, io| io << entry.message << '\n' }
+    ::Log.setup { |config| config.bind "acp.transport", :debug, backend }
+    transport = ACP::StdioTransport.new(reader, writer)
+    secret = "fixture-provider-credential"
+    params = ACP::Protocol::SetProviderParams.new("model", "openai", "https://llm.example.test",
+      headers: {"Authorization" => secret})
+    transport.send(ACP::Protocol.build_request(4_i64, "providers/set", params))
+    transport.send(ACP::Protocol.build_request(5_i64, "providers/list", ACP::Protocol::ListProvidersParams.new))
+    feed.puts %({"jsonrpc":"2.0","id":5,"result":{"providers":[],"_meta":{"echo":"#{secret}"}}})
+    feed.puts %("#{secret}")
+    feed.puts %({"jsonrpc":"2.0","id" "#{secret}"})
+    feed.puts %({"jsonrpc":"2.0","id":14,"result":{"unrelated":"ordinary-result"}})
+    feed.puts %({"jsonrpc":"1.0","id":4,"error":{"code":-32602,"message":"Unusable #{secret}"}})
+    feed.puts %({"jsonrpc":"2.0","id":"4","error":{"code":-32602,"message":"Rejected #{secret}","data":{"echo":"#{secret}"}}})
+    feed.puts %({"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Repeated #{secret}"}})
+    feed.puts %({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Unknown ID #{secret}"}})
+    transport.receive(2.seconds).not_nil!["result"]["_meta"]["echo"].should eq(secret)
+    transport.receive(2.seconds).not_nil!.as_s.should eq(secret)
+    transport.receive(2.seconds).not_nil!["id"].should eq(14)
+    transport.receive(2.seconds).not_nil!["jsonrpc"].should eq("1.0")
+    transport.receive(2.seconds).not_nil!["error"]["data"]["echo"].should eq(secret)
+    transport.receive(2.seconds).not_nil!["id"].should eq(4)
+    transport.receive(2.seconds).not_nil!["error"]["code"].should eq(-32700)
+
+    writer.to_s.should contain(secret)
+    params.inspect.should_not contain(secret)
+    params.to_s.should_not contain(secret)
+    captured.to_s.should contain("providers/set")
+    captured.to_s.should contain("ordinary-result")
+    captured.to_s.should contain("Failed to parse incoming JSON")
+    captured.to_s.scan("[REDACTED response]").size.should eq(5)
+    captured.to_s.should_not contain(secret)
+
+    (100_i64..356_i64).each do |id|
+      transport.send(ACP::Protocol.build_request(id, "providers/list", ACP::Protocol::ListProvidersParams.new))
+    end
+    feed.puts %({"jsonrpc":"2.0","id":500,"result":{"unrelated":"overflow-result"}})
+    transport.receive(2.seconds).not_nil!["result"]["unrelated"].should eq("overflow-result")
+    captured.to_s.scan("[REDACTED response]").size.should eq(6)
+    captured.to_s.should_not contain("overflow-result")
+  ensure
+    ::Log.setup(:none)
+    transport.try(&.close)
+    feed.try(&.close)
+  end
+
   it "handles multiple messages in sequence" do
     reader_r, reader_w = IO.pipe
     writer_io = IO::Memory.new
@@ -7964,6 +8015,135 @@ describe "ACP v2 draft agent skills" do
   ensure
     client.try(&.close)
     transport.try(&.ready_to_write.close)
+  end
+end
+
+describe "ACP draft model providers" do
+  it "uses nullable capability objects and preserves open protocol names" do
+    {ACP::Protocol::AgentCapabilities, ACP::Protocol::V2::AgentCapabilities}.each do |type|
+      type.from_json(%({"providers":{}})).providers.should_not be_nil
+      type.from_json(%({"providers":false})).providers.should be_nil
+      type.from_json(%({"providers":null})).providers.should be_nil
+      type.from_json(%({})).providers.should be_nil
+    end
+    result = ACP::Protocol::ListProvidersResult.from_json(<<-JSON)
+      {"providers":[
+        {"providerId":"main","supported":["anthropic",false,18446744073709551615,"future","_custom"],"required":true,"current":{"apiType":"future","baseUrl":"https://model.example.test","_meta":0}},
+        {"providerId":"optional","supported":null,"required":false,"current":null,"_meta":{"bad":18446744073709551615}}
+      ]}
+      JSON
+    result.providers.first.supported.should eq(["anthropic", "future", "_custom"])
+    result.providers.first.current.not_nil!.api_type.should eq("future")
+    result.providers.last.supported.should be_empty
+    result.providers.last.current.should be_nil
+    result.providers.last.meta.should be_nil
+    result.required?("main").should be_true
+    result.required?("optional").should be_false
+  end
+
+  it "registers provider method names as connection-scoped requests" do
+    {ACP::Protocol::AgentMethod::PROVIDERS_LIST, ACP::Protocol::AgentMethod::PROVIDERS_SET, ACP::Protocol::AgentMethod::PROVIDERS_DISABLE}.each do |method|
+      ACP::Protocol::AgentMethod.known?(method).should be_true
+      ACP::Protocol::AgentMethod.session_method?(method).should be_false
+    end
+  end
+
+  {"v1", "v2"}.each do |version|
+    it "lists, replaces, and disables providers before creating a session on #{version}" do
+      transport = V2TestTransport.new
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"providers":{}}})
+        client = ACP::Client.new(transport)
+      else
+        transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"providers":{}}})
+        client = ACP::V2::Client.new(transport)
+      end
+      transport.replies["providers/list"] = %("result":{"providers":[{"providerId":"main","supported":["openai"],"required":true},{"providerId":"gateway","supported":["_gateway"],"required":false,"current":null}]})
+      transport.replies["providers/set"] = %("result":{"_meta":{"example.test/applied":true}})
+      transport.replies["providers/disable"] = %("result":{})
+      expect_raises(ACP::InvalidStateError) { client.providers_list }
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)["method"].should eq("initialize")
+
+      meta = {"example.test/source" => JSON::Any.new("fixture")}
+      list = client.providers_list(ACP::Protocol::ListProvidersParams.new(meta))
+      list.providers.map(&.provider_id).should eq(["main", "gateway"])
+      request = take_v2_frame(transport.outgoing)
+      request["method"].should eq("providers/list")
+      request["params"]["_meta"]["example.test/source"].should eq("fixture")
+
+      params = ACP::Protocol::SetProviderParams.new("gateway", "_gateway", "https://llm.example.test/v1",
+        headers: {"Authorization" => "fixture-token", "X-Model-Route" => "fixture"})
+      client.providers_set(params).meta.not_nil!["example.test/applied"].should eq(true)
+      request = take_v2_frame(transport.outgoing)
+      request["method"].should eq("providers/set")
+      request["params"].should eq(JSON.parse(%({"providerId":"gateway","apiType":"_gateway","baseUrl":"https://llm.example.test/v1","headers":{"Authorization":"fixture-token","X-Model-Route":"fixture"}})))
+
+      client.providers_set(ACP::Protocol::SetProviderParams.new("gateway", "_gateway", "https://llm.example.test/v1"))
+      take_v2_frame(transport.outgoing)["params"]["headers"]?.should be_nil
+      client.providers_set(ACP::Protocol::SetProviderParams.new("gateway", "_gateway", "https://llm.example.test/v1", headers: {} of String => String))
+      take_v2_frame(transport.outgoing)["params"]["headers"].should eq(JSON.parse("{}"))
+
+      expect_raises(ACP::InvalidStateError, /requires this provider/) { client.providers_disable("main") }
+      take_v2_frame(transport.outgoing)["method"].should eq("providers/list")
+      client.providers_disable(ACP::Protocol::DisableProviderParams.new("gateway", meta))
+      take_v2_frame(transport.outgoing)["method"].should eq("providers/list")
+      request = take_v2_frame(transport.outgoing)
+      request["method"].should eq("providers/disable")
+      request["params"]["providerId"].should eq("gateway")
+      request["params"]["_meta"]["example.test/source"].should eq("fixture")
+      client.providers_disable("unknown")
+      take_v2_frame(transport.outgoing)["method"].should eq("providers/list")
+      take_v2_frame(transport.outgoing)["params"]["providerId"].should eq("unknown")
+
+      transport.replies["providers/list"] = %("result":{"providers":[{"providerId":"uncertain","supported":[]}]})
+      expect_raises(ACP::ProtocolError) { client.providers_disable("uncertain") }
+      take_v2_frame(transport.outgoing)["method"].should eq("providers/list")
+      transport.sent_messages.size.should eq(11)
+    ensure
+      client.try(&.close)
+    end
+
+    it "does not send provider methods without a negotiated capability on #{version}" do
+      transport = V2TestTransport.new
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"providers":false}})
+        client = ACP::Client.new(transport)
+      else
+        client = ACP::V2::Client.new(transport)
+      end
+      client.initialize_connection
+      expect_raises(ACP::InvalidStateError, /did not advertise providers/) { client.providers_list }
+      expect_raises(ACP::InvalidStateError, /did not advertise providers/) do
+        client.providers_set(ACP::Protocol::SetProviderParams.new("optional", "openai", "https://llm.example.test"))
+      end
+      expect_raises(ACP::InvalidStateError, /did not advertise providers/) { client.providers_disable("optional") }
+      transport.sent_messages.size.should eq(1)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "checks v2 provider URLs locally and preserves Agent errors" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"providers":{}}})
+    transport.replies["providers/set"] = %("error":{"code":-32602,"message":"Unsupported protocol","data":{"providerId":"gateway"}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    {"/relative", "https:///no-host", "https://llm.example.test/with space"}.each do |base_url|
+      expect_raises(ArgumentError, /absolute URIs/) do
+        client.providers_set(ACP::Protocol::V2::SetProviderParams.new("gateway", "openai", base_url))
+      end
+    end
+    transport.sent_messages.size.should eq(1)
+    error = expect_raises(ACP::JsonRpcError) do
+      client.providers_set(ACP::Protocol::V2::SetProviderParams.new("gateway", "_custom", "https://llm.example.test"))
+    end
+    error.invalid_params?.should be_true
+    error.data.not_nil!["providerId"].should eq("gateway")
+  ensure
+    client.try(&.close)
   end
 end
 

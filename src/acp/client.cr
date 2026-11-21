@@ -540,6 +540,42 @@ module ACP
       decode_result(Protocol::AuthStatusResult, send_request(method, params), method)
     end
 
+    # Lists the Agent's configurable model providers and current routing.
+    def providers_list(params : Protocol::ListProvidersParams = Protocol::ListProvidersParams.new) : Protocol::ListProvidersResult
+      method = Protocol::AgentMethod::PROVIDERS_LIST
+      ensure_provider_support(method)
+      send_typed_request(method, params, Protocol::ListProvidersResult)
+    end
+
+    # Replaces the full routing configuration for one provider.
+    def providers_set(params : Protocol::SetProviderParams) : Protocol::SetProviderResult
+      method = Protocol::AgentMethod::PROVIDERS_SET
+      ensure_provider_support(method)
+      send_typed_request(method, params, Protocol::SetProviderResult)
+    end
+
+    # Disables a provider after checking that the Agent does not require it.
+    def providers_disable(params : Protocol::DisableProviderParams) : Protocol::DisableProviderResult
+      method = Protocol::AgentMethod::PROVIDERS_DISABLE
+      ensure_provider_support(method)
+      if providers_list.required?(params.provider_id)
+        raise InvalidStateError.new("The Agent requires this provider")
+      end
+      send_typed_request(method, params, Protocol::DisableProviderResult)
+    end
+
+    # Disables the specified non-mandatory provider.
+    def providers_disable(provider_id : Protocol::ProviderId) : Protocol::DisableProviderResult
+      providers_disable(Protocol::DisableProviderParams.new(provider_id))
+    end
+
+    private def ensure_provider_support(method : String) : Nil
+      ensure_state(ClientState::Initialized, method)
+      unless @agent_capabilities.try(&.providers)
+        raise InvalidStateError.new("The Agent did not advertise providers")
+      end
+    end
+
     # Creates a new session with the agent.
     #
     # - `cwd` — the absolute path to the working directory.

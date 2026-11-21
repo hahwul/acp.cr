@@ -14,6 +14,7 @@ require "./session_title"
 require "./session_archive"
 require "./session_options"
 require "./prompt_suggestions"
+require "./providers"
 
 module ACP
   module Protocol
@@ -696,6 +697,10 @@ module ACP
       # Authentication capabilities (e.g. `logout`).
       property auth : AgentAuthCapabilities?
 
+      # Presence advertises draft provider configuration methods.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::ProvidersCapabilities))]
+      property providers : ProvidersCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -707,6 +712,7 @@ module ACP
         @session_capabilities : SessionCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
         @auth : AgentAuthCapabilities? = nil,
+        @providers : ProvidersCapabilities? = nil,
       )
       end
     end

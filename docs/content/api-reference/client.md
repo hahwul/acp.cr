@@ -432,6 +432,31 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+## Model providers (draft)
+
+After initialization, call `providers_list` if the Agent advertises
+`agentCapabilities.providers` in v1 or `capabilities.providers` in v2.
+Each entry reports the provider ID, its supported API protocols, whether
+the Agent requires it, and its current routing. A missing `current` value
+indicates a disabled provider. The routing summary carries the protocol
+and base URL.
+
+Call `providers_set(SetProviderParams.new(provider_id, api_type, base_url,
+headers: headers))` to replace a provider's full configuration. Use the
+wire types in the protocol version's namespace. Supply the full intended
+header map with each replacement. The Agent owns routing and decides when
+changes apply to existing sessions.
+
+`providers_disable(provider_id)` queries the Agent's current provider list
+and rejects the operation if that provider is required. These methods apply
+to the Agent process. Built-in stdio frame logs redact provider parameters and
+their replies, including late or repeated replies. Once the log keeps track
+of more than 256 provider request IDs, it redacts all response payloads for
+that connection.
+Applications receive the Agent's JSON-RPC errors, including any data the
+Agent returns.
+[ACP v1 draft schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v1/schema.unstable.json) · [ACP v2 draft schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v2/schema.unstable.json)
+
 ## Agent Skills (v2 draft)
 
 Advertise `commands: CommandsCapabilities.new(skill: CommandsSkillCapabilities.new)`

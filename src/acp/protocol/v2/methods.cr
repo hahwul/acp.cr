@@ -9,6 +9,9 @@ module ACP
         AUTH_LOGIN                = "auth/login"
         AUTH_LOGOUT               = "auth/logout"
         AUTH_STATUS               = Protocol::AgentMethod::AUTH_STATUS
+        PROVIDERS_LIST            = Protocol::AgentMethod::PROVIDERS_LIST
+        PROVIDERS_SET             = Protocol::AgentMethod::PROVIDERS_SET
+        PROVIDERS_DISABLE         = Protocol::AgentMethod::PROVIDERS_DISABLE
         SESSION_NEW               = "session/new"
         SESSION_SET_CONFIG_OPTION = "session/set_config_option"
         SESSION_PROMPT            = "session/prompt"
