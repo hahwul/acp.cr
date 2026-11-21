@@ -6166,6 +6166,98 @@ private def take_v2_frame(channel : Channel(T)) : T forall T
   end
 end
 
+describe "ACP version negotiation" do
+  it "keeps the first transport and returns the v2 client when v2 is selected" do
+    transport = V2TestTransport.new
+    opens = 0
+    capabilities = ACP::Protocol::V2::ClientCapabilities.new(
+      auth: ACP::Protocol::V2::ClientAuthCapabilities.new(terminal: ACP::Protocol::V2::Capability.new)
+    )
+    client = ACP.connect_negotiated(v2_capabilities: capabilities) do
+      opens += 1
+      transport
+    end
+    client.should be_a(ACP::V2::Client)
+    client.negotiated_protocol_version.should eq(2_u16)
+    opens.should eq(1)
+    params = take_v2_frame(transport.outgoing)["params"]
+    params["protocolVersion"].should eq(2)
+    params["capabilities"]["auth"]["terminal"].should eq(JSON.parse("{}"))
+  ensure
+    client.try(&.close)
+  end
+
+  it "closes the first transport and negotiates v1 with its own capabilities" do
+    first = V2TestTransport.new
+    first.replies["initialize"] = %("result":{"protocolVersion":1,"agentInfo":{"name":"probe","version":"1"}})
+    second = V2TestTransport.new
+    second.replies["initialize"] = %("result":{"protocolVersion":1,"agentInfo":{"name":"legacy","version":"1"}})
+    second.replies["session/new"] = %("result":{"sessionId":"legacy-session"})
+    info = ACP::Protocol::ClientInfo.new("test-editor", "1.2", title: "Test Editor")
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    transports = [first, second]
+    client = ACP.connect_negotiated(info: info, v1_capabilities: caps) do
+      next_transport = transports.shift
+      first.closed?.should be_true if next_transport == second
+      next_transport
+    end.as(ACP::Client)
+    client.negotiated_protocol_version.should eq(1_u16)
+    client.agent_info.not_nil!.name.should eq("legacy")
+    first_params = take_v2_frame(first.outgoing)["params"]
+    first_params["info"]["title"].should eq("Test Editor")
+    first_params["capabilities"]["fs"]?.should be_nil
+    second_params = take_v2_frame(second.outgoing)["params"]
+    second_params["protocolVersion"].should eq(1)
+    second_params["clientInfo"]["name"].should eq("test-editor")
+    second_params["clientCapabilities"]["fs"]["readTextFile"].should eq(true)
+    client.session_new("/work").session_id.should eq("legacy-session")
+  ensure
+    client.try(&.close)
+  end
+
+  it "surfaces an initialize error without reopening the transport" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("error":{"code":-32022,"message":"Unsupported","data":{"requested":2,"supported":[3]}})
+    opens = 0
+    error = expect_raises(ACP::JsonRpcError) do
+      ACP.connect_negotiated do
+        opens += 1
+        transport
+      end
+    end
+    error.data.not_nil!["supported"].should eq(JSON.parse("[3]"))
+    opens.should eq(1)
+    transport.closed?.should be_true
+  end
+
+  it "rejects a malformed v1 response before retrying" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":[]})
+    opens = 0
+    expect_raises(ACP::ProtocolError, /malformed result/) do
+      ACP.connect_negotiated do
+        opens += 1
+        transport
+      end
+    end
+    opens.should eq(1)
+    transport.closed?.should be_true
+  end
+
+  it "closes the v1 transport when its handshake fails" do
+    first = V2TestTransport.new
+    first.replies["initialize"] = %("result":{"protocolVersion":1})
+    second = V2TestTransport.new
+    second.replies["initialize"] = %("error":{"code":-32603,"message":"Agent setup failed"})
+    transports = [first, second]
+    expect_raises(ACP::JsonRpcError, /Agent setup failed/) do
+      ACP.connect_negotiated { transports.shift }
+    end
+    first.closed?.should be_true
+    second.closed?.should be_true
+  end
+end
+
 describe ACP::V2::Client do
   it "rejects Agent requests before the successful initialize response" do
     transport = V2TestTransport.new

@@ -65,6 +65,7 @@ require "./acp/protocol/v2/updates"
 require "./acp/transport"
 require "./acp/client"
 require "./acp/v2_client"
+require "./acp/negotiation"
 require "./acp/session"
 
 module ACP

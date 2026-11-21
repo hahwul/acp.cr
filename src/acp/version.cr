@@ -3,8 +3,7 @@ module ACP
   # agents as `clientInfo.version` during the initialize handshake.
   VERSION = "0.3.0"
 
-  # The latest ACP protocol version this client implements. This is the
-  # version sent in the `initialize` request.
+  # The ACP protocol version sent by the v1 client in `initialize`.
   PROTOCOL_VERSION = 1_u16
 
   # The oldest ACP protocol version this client can still speak. The

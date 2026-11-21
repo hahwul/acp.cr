@@ -184,6 +184,41 @@ describe "ACP terminal authentication" do
   end
 end
 
+describe "ACP negotiated process connection" do
+  it "reopens a legacy Agent with the same process configuration" do
+    directory = File.join(Dir.tempdir, "acp-negotiate-#{Random::Secure.hex(8)}")
+    Dir.mkdir(directory)
+    launches = File.join(directory, "launches")
+    agent = <<-'SH'
+      [ "$1" = 'base argument' ] && [ "$ACP_NEGOTIATION_SPEC" = 'fixture' ] || exit 4
+      IFS= read -r initialize || exit 5
+      case "$initialize" in
+        *'"protocolVersion":2'*'"info":'*) printf '%s\n' v2 >> launches ;;
+        *'"protocolVersion":1'*'"clientInfo":'*) printf '%s\n' v1 >> launches ;;
+        *) exit 6 ;;
+      esac
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      IFS= read -r session || exit 0
+      case "$session" in
+        *'"method":"session/new"'*)
+          printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"legacy"}}'
+          ;;
+        *) exit 7 ;;
+      esac
+      while IFS= read -r unused; do :; done
+      SH
+
+    client = ACP.connect_negotiated("/bin/sh", ["-c", agent, "agent", "base argument"],
+      env: {"ACP_NEGOTIATION_SPEC" => "fixture"}, chdir: directory).as(ACP::Client)
+    client.session_new(directory).session_id.should eq("legacy")
+    File.read_lines(launches).should eq(["v2", "v1"])
+  ensure
+    client.try(&.close)
+    File.delete(launches) if launches && File.exists?(launches)
+    Dir.delete(directory) if directory && Dir.exists?(directory)
+  end
+end
+
 describe "ACP v2 terminal authentication" do
   it "applies the ordered environment overlay and reinitializes the v2 connection" do
     directory = File.join(Dir.tempdir, "acp-v2-terminal-auth-#{Random::Secure.hex(8)}")

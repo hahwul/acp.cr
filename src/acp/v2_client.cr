@@ -118,6 +118,11 @@ module ACP
         @connection.initialization_result
       end
 
+      # Wire protocol version selected after a successful handshake.
+      def negotiated_protocol_version : UInt16?
+        initialization_result.try(&.protocol_version)
+      end
+
       # Child associations and effective session workspace roots.
       delegate subagent, subagents, session_workspace, to: @connection
 
@@ -132,6 +137,7 @@ module ACP
           version = raw.as_h?.try(&.["protocolVersion"]?).try(&.as_i64?)
           unless version == Wire::VERSION
             close
+            decode(Protocol::InitializeResult, raw, AgentMethod::INITIALIZE) if version == ACP::PROTOCOL_VERSION
             reported = version.to_u16 if version && (0..UInt16::MAX.to_i).includes?(version)
             raise VersionMismatchError.new(Wire::VERSION, reported)
           end

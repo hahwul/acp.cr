@@ -46,6 +46,33 @@ available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
 current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 
+## Automatic version negotiation
+
+Use `ACP.connect_negotiated` to try ACP v2 Preview first. If the Agent
+selects v1, the connector closes the first connection and starts a fresh
+one with the v1 handshake. An initialization error or unknown version
+is returned to the caller.
+
+```crystal
+client = ACP.connect_negotiated("my-agent", ["--stdio"])
+begin
+  case client
+  when ACP::V2::Client
+    puts client.initialization_result.not_nil!.info.name
+  when ACP::Client
+    puts client.agent_info.try(&.name) || "ACP v1 Agent"
+  end
+ensure
+  client.close
+end
+```
+
+The optional `info` applies to both handshakes. Advertise capabilities
+through `v1_capabilities` and `v2_capabilities`. To negotiate over a custom
+transport, pass a block to `ACP.connect_negotiated` that opens a fresh
+transport each time it is called.
+[ACP Initialization](https://agentclientprotocol.com/protocol/v2/initialization#protocol-version)
+
 ## Constructor
 
 ### `.new`
