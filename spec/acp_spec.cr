@@ -6375,6 +6375,70 @@ describe "ACP draft session status" do
   end
 end
 
+describe "ACP draft session titles" do
+  {"v1", "v2"}.each do |version|
+    it "returns the title the Agent stored for an inactive #{version} session" do
+      transport = V2TestTransport.new
+      transport.replies["initialize"] = if version == "v1"
+                                          %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"title":{}}}})
+                                        else
+                                          %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"title":{}}}})
+                                        end
+      transport.replies["session/set_title"] = %("result":{"title":"New title","_meta":false})
+      client = version == "v1" ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)
+
+      metadata = {"example.test/source" => JSON::Any.new("editor")}
+      original = " New   title "
+      result = if client.is_a?(ACP::Client)
+                 session = ACP::Session.new(client, "saved")
+                 session.close(notify_agent: false)
+                 session.set_title(original, meta: metadata)
+               else
+                 client.session_set_title("saved", original, meta: metadata)
+               end
+      result.title.should eq("New title")
+      result.meta.should be_nil
+      wire = take_v2_frame(transport.outgoing)
+      wire["method"].should eq("session/set_title")
+      wire["params"]["sessionId"].should eq("saved")
+      wire["params"]["title"].should eq(original)
+      wire["params"]["_meta"]["example.test/source"].should eq("editor")
+
+      transport.replies["session/set_title"] = %("error":{"code":-32602,"message":"Title must not be empty."})
+      error = expect_raises(ACP::JsonRpcError) { client.session_set_title("saved", " ") }
+      error.received?.should be_true
+      error.invalid_params?.should be_true
+      take_v2_frame(transport.outgoing)["params"]["title"].should eq(" ")
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects omitted, null, and non-string stored titles" do
+    {"{}", %({"title":null}), %({"title":42})}.each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::SetSessionTitleResult.from_json(wire) }
+    end
+  end
+
+  it "treats an invalid title marker as unsupported" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"title":true}}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /session.title/) { client.session_set_title("s", "Title") }
+    transport.sent_messages.size.should eq(1)
+
+    marker = ACP::Protocol::SessionTitleCapabilities.new
+    capabilities = ACP::Protocol::SessionCapabilities.new(title: marker)
+    JSON.parse(capabilities.to_json)["title"].should eq(JSON.parse("{}"))
+    ACP::Protocol::SessionCapabilities.from_json(%({"title":{"_meta":true}})).title.not_nil!.meta.should be_nil
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

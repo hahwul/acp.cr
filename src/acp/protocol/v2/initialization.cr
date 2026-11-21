@@ -150,6 +150,10 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::SessionStatusCapabilities)]
         property status : Protocol::SessionStatusCapabilities?
 
+        # When present, the Agent supports setting session titles.
+        @[JSON::Field(converter: ::ACP::Protocol::SessionTitleCapabilities)]
+        property title : Protocol::SessionTitleCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -163,6 +167,7 @@ module ACP
           @system_prompt : Protocol::SessionSystemPromptCapabilities? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
           @status : Protocol::SessionStatusCapabilities? = nil,
+          @title : Protocol::SessionTitleCapabilities? = nil,
         )
         end
       end

@@ -220,6 +220,15 @@ foreground state unknown. An unknown session ID raises an `ACP::JsonRpcError`
 with code `-32002`.
 [ACP Session Status Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-status.mdx)
 
+### `#session_set_title` (draft)
+
+Call `client.session_set_title(session_id, title)` on v1 or v2 when the Agent
+advertises `sessionCapabilities.title` or `session.title`, respectively.
+The session can be inactive on the connection. Use `result.title` for display
+because the Agent can normalize the title before storing it.
+`Session#set_title` uses the wrapped v1 session ID.
+[ACP Session Title Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-set-title.mdx)
+
 ### `#session_delete`
 
 ```crystal

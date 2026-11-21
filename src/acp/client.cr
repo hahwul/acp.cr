@@ -621,6 +621,17 @@ module ACP
       send_typed_request(method, Protocol::SessionStatusParams.new(session_id, meta), Protocol::SessionStatusResult)
     end
 
+    # Sets the title of a session and returns the title the Agent stored.
+    def session_set_title(session_id : String, title : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SetSessionTitleResult
+      method = Protocol::AgentMethod::SESSION_SET_TITLE
+      ensure_state(ClientState::Initialized, method)
+      unless @agent_capabilities.try(&.session_capabilities).try(&.title)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.title")
+      end
+
+      send_typed_request(method, Protocol::SetSessionTitleParams.new(session_id, title, meta), Protocol::SetSessionTitleResult)
+    end
+
     # Resumes an existing session by ID without replaying conversation history.
     #
     # Unlike `session/load`, the agent will NOT emit `session/update`
