@@ -92,9 +92,13 @@ module ACP
 
       cwd ||= root.cwd
       additional_directories ||= root.additional_directories
-      return unless Path[cwd].absolute? && additional_directories.all? { |directory| Path[directory].absolute? }
+      return unless absolute_workspace_path?(cwd) && additional_directories.all? { |directory| absolute_workspace_path?(directory) }
 
       SessionWorkspace.new(cwd, additional_directories.dup)
+    end
+
+    private def absolute_workspace_path?(path : String) : Bool
+      @v2 ? Protocol::V2.absolute_path?(path) : Path[path].absolute?
     end
 
     def cancel?(session_id : String) : Bool
