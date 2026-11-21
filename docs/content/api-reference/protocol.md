@@ -244,11 +244,19 @@ key, and other values replace their key whole. Use `apply_metadata` for a
 [ACP v2 metadata patches](https://agentclientprotocol.com/protocol/v2/extensibility#metadata-patches)
 
 `update.typed` also decodes tool-call and Agent-owned terminal updates and
-chunks. Tool-call diff content exposes structured file changes and optional
-patch text. Terminal snapshots and chunks expose decoded bytes through
-`bytes`. The `*_present?` methods on upserts identify fields the update
-supplies, including explicit clears.
-[ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls)
+chunks. Terminal snapshots and chunks expose decoded bytes through `bytes`.
+The `*_present?` methods on upserts identify fields the update supplies,
+including explicit clears.
+
+`ToolCallContent#diff` exposes usable file changes in wire order and omits
+entries with conflicting destination paths. It returns `nil` when no usable
+changes remain. A malformed optional patch object leaves the structured
+changes available. Use `changes` for affected paths, `git_patch` to select
+patches labeled with ACP's standard format, and `patch` to inspect other
+formats. Tool content and individual file changes expose open fields through
+`raw`. Diffs, patches, file changes, tool content, and content chunks expose
+exact metadata through `meta_raw`.
+[ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls#diffs)
 
 Typed child-session announcements expose the mirrored `StateSnapshot`, and
 inter-session messages retain their transcript links and open content.

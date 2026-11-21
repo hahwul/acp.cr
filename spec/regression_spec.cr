@@ -5003,3 +5003,135 @@ describe "ACP v2 exact command advertisements" do
     end
   end
 end
+describe "ACP v2 structured tool diffs" do
+  it "keeps usable changes in order when neighboring entries are malformed" do
+    content = ACP::Protocol::V2::ToolCallContent.from_json <<-'JSON'
+      {"type":"diff","changes":[
+        false,
+        {"operation":"add","path":"/work/source"},
+        {"operation":"modify","path":"relative"},
+        {"path":"/work/missing-operation"},
+        {"operation":"move","path":"C:\\work\\destination","oldPath":"/work/source"},
+        {"operation":"copy","path":"/work/missing-source"},
+        {"operation":"modify","path":"/work/duplicate"},
+        {"operation":"delete","path":"/work/duplicate"},
+        {"operation":"modify","path":"/work/ambiguous","path":"/work/other"},
+        {"operation":"future","path":"relative","fileType":42},
+        {"operation":"delete","path":"/work/end"}
+      ]}
+      JSON
+
+    changes = content.diff.not_nil!.changes
+    changes.map(&.operation).should eq(["add", "move", "future", "delete"])
+    changes.map(&.path).should eq(["/work/source", "C:\\work\\destination", nil, "/work/end"])
+    changes[1].old_path.should eq("/work/source")
+    changes[2].file_type.should be_nil
+  end
+
+  it "keeps structured changes when the optional patch is malformed" do
+    changes = %([{"operation":"add","path":"/work/added"}])
+    [
+      %({"format":"git_patch","text":false}),
+      %({"format":"git_patch","format":"future","text":"ambiguous"}),
+      %({"format":"git_patch"}),
+      "[]",
+      "null",
+    ].each do |patch|
+      content = ACP::Protocol::V2::ToolCallContent.from_json(%({"type":"diff","changes":#{changes},"patch":#{patch}}))
+      diff = content.diff.not_nil!
+      diff.changes.first.path.should eq("/work/added")
+      diff.patch.should be_nil
+    end
+  end
+
+  it "requires a usable structured change before exposing a diff" do
+    ["[]", %([{"operation":"move","path":"/work/incomplete"}]), "false"].each do |changes|
+      content = ACP::Protocol::V2::ToolCallContent.from_json(%({"type":"diff","changes":#{changes},"patch":{"format":"git_patch","text":"example"}}))
+      content.diff.should be_nil
+    end
+  end
+
+  it "rejects ambiguous required fields and ignores ambiguous optional patches" do
+    changes = %([{"operation":"add","path":"/work/added"}])
+    duplicate_type = %("type":"content","type":"diff","changes":#{changes})
+    duplicate_changes = %("type":"diff","changes":#{changes},"changes":#{changes})
+    [duplicate_type, duplicate_changes].each do |fields|
+      content = ACP::Protocol::V2::ToolCallContent.from_json("{#{fields}}")
+      content.diff.should be_nil
+      ACP::Protocol::V2::ToolCallContent.from_json(content.to_json).diff.should be_nil
+    end
+    expect_raises(JSON::ParseException, /Ambiguous ACP diff changes/) do
+      ACP::Protocol::V2::DiffContent.from_json("{#{duplicate_changes}}")
+    end
+    expect_raises(JSON::ParseException, /Ambiguous ACP diff change fields/) do
+      ACP::Protocol::V2::DiffChange.from_json(%({"operation":"add","path":"/work/added","path":"/work/ambiguous"}))
+    end
+
+    patch = %({"format":"git_patch","text":"example"})
+    duplicate_patch = %({"type":"diff","changes":#{changes},"patch":#{patch},"patch":#{patch}})
+    projected = ACP::Protocol::V2::ToolCallContent.from_json(duplicate_patch).diff.not_nil!
+    direct = ACP::Protocol::V2::DiffContent.from_json(duplicate_patch)
+    [projected, direct].each do |diff|
+      diff.changes.first.path.should eq("/work/added")
+      diff.patch.should be_nil
+    end
+  end
+
+  it "preserves custom patch formats and the raw fields of future operations" do
+    wire = %({"type":"diff","changes":[{"operation":"_future","path":"relative","vendor":{"number":18446744073709551615}}],"patch":{"format":"_future","text":"example"}})
+    content = ACP::Protocol::V2::ToolCallContent.from_json(wire)
+    diff = content.diff.not_nil!
+    diff.patch.not_nil!.format.should eq("_future")
+    diff.git_patch.should be_nil
+    change = diff.changes.first
+    change.path.should be_nil
+    change.raw.field("path").not_nil!.as_s?.should eq("relative")
+    change.raw.field("vendor").not_nil!.field("number").not_nil!.json.should eq(UInt64::MAX.to_s)
+    content.raw.field("changes").not_nil!.elements?.not_nil!.size.should eq(1)
+  end
+
+  it "preserves exact metadata in full tool updates and streamed content over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      meta_key = "example.test/value"
+      decimal = "0.1234567890123456789"
+      wide = UInt64::MAX.to_s
+      change = %({"operation":"modify","path":"/work/config","_meta":{"#{meta_key}":#{wide}}})
+      patch = %({"format":"git_patch","text":"example","_meta":{"#{meta_key}":#{decimal}}})
+      content = %({"type":"diff","changes":[false,#{change}],"patch":#{patch},"_meta":{"#{meta_key}":#{wide}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","content":[#{content}]}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_content_chunk","toolCallId":"tool","content":#{content},"_meta":{"#{meta_key}":#{decimal}}}}})
+
+      update = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+      chunk.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(decimal)
+      [update.content.not_nil!.first, chunk.content].each do |item|
+        item.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(wide)
+        item.raw.field("changes").not_nil!.elements?.not_nil!.size.should eq(2)
+        diff = item.diff.not_nil!
+        diff.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(wide)
+        diff.changes.map(&.path).should eq(["/work/config"])
+        diff.changes.first.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(wide)
+        diff.git_patch.not_nil!.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(decimal)
+        encoded = ACP::Protocol::WireFrame.encode(diff)
+        decoded = ACP::Protocol::V2::DiffContent.from_json(encoded)
+        decoded.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(wide)
+        decoded.git_patch.not_nil!.meta_raw.not_nil!.field(meta_key).not_nil!.json.should eq(decimal)
+      end
+
+      ambiguous = %({"type":"diff","changes":[#{change}],"changes":[#{change}]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_content_chunk","toolCallId":"tool","content":#{ambiguous}}}})
+      next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk).content.diff.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end

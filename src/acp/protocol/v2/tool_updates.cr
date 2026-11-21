@@ -1,8 +1,10 @@
 require "base64"
 require "./initialization"
 require "./metadata_patch"
+require "../content_block"
 require "../tool_call_content"
 require "../raw_json"
+require "../session_options"
 
 module ACP
   module Protocol
@@ -25,11 +27,7 @@ module ACP
       # One file operation in a structured diff.
       struct DiffChange
         include JSON::Serializable
-        include LosslessUnmapped
-
-        protected def keep_exact_unmapped?(_key : String) : Bool
-          true
-        end
+        include LosslessOpenObject
 
         # Open operation discriminator, such as modify, move, or copy.
         getter operation : String
@@ -38,14 +36,29 @@ module ACP
         def initialize(@operation : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
+        # Reads one operation with its required absolute paths.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = WireFrame.read_raw(pull)
+          unless WireFrame.unique_members?(wire, recursive: false)
+            raise JSON::ParseException.new("Ambiguous ACP diff change fields", *location)
+          end
+
+          change = previous_def(JSON::PullParser.new(wire))
+          unless change.valid_paths?
+            raise JSON::ParseException.new("ACP diff change requires absolute paths for #{change.operation}", *location)
+          end
+          change
+        end
+
         # Absolute destination path or the affected path.
         def path : String?
-          @json_unmapped["path"]?.try(&.as_s?)
+          absolute_path_field("path")
         end
 
         # Absolute source path for a move or copy.
         def old_path : String?
-          @json_unmapped["oldPath"]?.try(&.as_s?)
+          absolute_path_field("oldPath")
         end
 
         # Open file type qualifier.
@@ -57,11 +70,29 @@ module ACP
         def mime_type : String?
           @json_unmapped["mimeType"]?.try(&.as_s?)
         end
+
+        protected def valid_paths? : Bool
+          case @operation
+          when "add", "delete", "modify"
+            !path.nil?
+          when "move", "copy"
+            !path.nil? && !old_path.nil?
+          else
+            true
+          end
+        end
+
+        private def absolute_path_field(key : String) : String?
+          if value = @json_unmapped[key]?.try(&.as_s?)
+            value if Protocol.absolute_path?(value)
+          end
+        end
       end
 
-      # Renderable patch text associated with a structured diff.
+      # Optional patch text associated with a structured diff.
       struct DiffPatch
         include JSON::Serializable
+        include LosslessMetadata
 
         # Optional extension formats are retained as strings.
         property format : String
@@ -69,42 +100,115 @@ module ACP
         # Patch text.
         property text : String
 
-        # Extension metadata scoped to the patch.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        # Creates a patch in the supplied format.
+        def initialize(@format : String, @text : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
+        end
 
-        # Creates a renderable patch.
-        def initialize(@format : String, @text : String, @meta : Hash(String, JSON::Any)? = nil)
+        # Reads patch fields with an unambiguous format and text.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = WireFrame.read_raw(pull)
+          unless WireFrame.unique_members?(wire, recursive: false)
+            raise JSON::ParseException.new("Ambiguous ACP diff patch fields", *location)
+          end
+          previous_def(JSON::PullParser.new(wire))
         end
       end
 
       # Structured file changes and their optional textual patch.
       struct DiffContent
         include JSON::Serializable
+        include LosslessMetadata
 
-        # New, changed, or removed paths reported by the tool.
+        # Usable changes in wire order. Conflicting destination paths are omitted.
+        @[JSON::Field(converter: ::ACP::Protocol::V2::DiffContent::Changes)]
         property changes : Array(DiffChange)
 
-        # Optional renderable patch.
+        # Optional patch, including custom and future formats.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::V2::DiffPatch))]
         property patch : DiffPatch?
 
-        # Extension metadata scoped to the diff.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the structured diff.
-        def initialize(@changes : Array(DiffChange), @patch : DiffPatch? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@changes : Array(DiffChange), @patch : DiffPatch? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
+        end
+
+        # Reads the change list, treating an ambiguous optional patch as absent.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = RawJson.new(pull)
+          repeated = repeated_fields(wire)
+          if repeated.includes?("changes")
+            raise JSON::ParseException.new("Ambiguous ACP diff changes", *location)
+          end
+          wire = wire.without_field("patch") if repeated.includes?("patch")
+          previous_def(JSON::PullParser.new(wire.json))
+        end
+
+        # :nodoc:
+        def self.repeated_fields(wire : RawJson) : Set(String)
+          seen = Set(String).new
+          repeated = Set(String).new
+          if wire.object?
+            pull = JSON::PullParser.new(wire.json)
+            pull.read_object do |key|
+              repeated.add(key) if key.in?("type", "changes", "patch") && !seen.add?(key)
+              pull.skip
+            end
+          end
+          repeated
+        end
+
+        # Returns the patch in ACP's standard git_patch format, when supplied.
+        # Use changes as the authoritative list of affected files.
+        def git_patch : DiffPatch?
+          patch = @patch
+          patch if patch && patch.format == "git_patch"
+        end
+
+        # :nodoc:
+        module Changes
+          def self.from_json(pull : JSON::PullParser) : Array(DiffChange)
+            location = pull.location
+            changes = [] of DiffChange
+            paths = Set(String).new
+            conflicts = Set(String).new
+            pull.read_array do
+              if change = decode_change(pull)
+                if (path = change.path) && !paths.add?(path)
+                  conflicts.add(path)
+                end
+                changes << change
+              end
+            end
+
+            changes.reject! { |change| (path = change.path) && conflicts.includes?(path) } unless conflicts.empty?
+            if changes.empty?
+              raise JSON::ParseException.new("ACP diff requires a usable file change", *location)
+            end
+            changes
+          end
+
+          private def self.decode_change(pull : JSON::PullParser) : DiffChange?
+            return DiffChange.new(pull) if pull.kind.begin_object?
+
+            WireFrame.read_raw(pull)
+            nil
+          rescue JSON::ParseException
+            nil
+          end
+
+          def self.to_json(value : Array(DiffChange), json : JSON::Builder) : Nil
+            value.to_json(json)
+          end
         end
       end
 
       # Open content item belonging to a tool call.
       struct ToolCallContent
         include JSON::Serializable
-        include LosslessUnmapped
-
-        protected def keep_exact_unmapped?(_key : String) : Bool
-          true
-        end
+        include LosslessOpenObject
 
         # Content type such as content, diff, terminal, or session.
         @[JSON::Field(key: "type")]
@@ -112,6 +216,20 @@ module ACP
 
         # Creates content with the fields of its variant.
         def initialize(@content_type : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+        end
+
+        # Reads open content, clearing ambiguous fields in a structured diff.
+        def self.new(pull : JSON::PullParser) : self
+          wire = RawJson.new(pull)
+          content = previous_def(JSON::PullParser.new(wire.json))
+          return content unless content.content_type == "diff"
+
+          repeated = DiffContent.repeated_fields(wire)
+          return content if repeated.empty?
+
+          wire = wire.without_field("changes") if repeated.includes?("type") || repeated.includes?("changes")
+          wire = wire.without_field("patch") if repeated.includes?("patch")
+          previous_def(JSON::PullParser.new(wire.json))
         end
 
         # Typed diff for a recognized structured diff item.
@@ -138,11 +256,6 @@ module ACP
         # ID of the referenced child session.
         def session_id : String?
           @json_unmapped["sessionId"]?.try(&.as_s?) if @content_type == "session"
-        end
-
-        # Extension metadata scoped to the content item.
-        def meta : Hash(String, JSON::Any)?
-          @json_unmapped["_meta"]?.try(&.as_h?)
         end
       end
 
@@ -219,6 +332,7 @@ module ACP
       # Appends one content item to a tool call.
       struct ToolCallContentChunk
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -231,12 +345,9 @@ module ACP
         # Content item to append.
         property content : ToolCallContent
 
-        # Extension metadata scoped to this chunk.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates a tool-call content chunk.
-        def initialize(@tool_call_id : String, @content : ToolCallContent, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@tool_call_id : String, @content : ToolCallContent, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
 
