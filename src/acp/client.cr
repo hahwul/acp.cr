@@ -233,6 +233,7 @@ module ACP
       response : Channel(PendingResponse),
       closing_session : String?,
       close_on_missing : Bool,
+      creating_session : String?,
       fork_source : String?,
       fork_cursor : ForkCursorGrant?,
       on_result : (String -> Nil)?
@@ -1260,6 +1261,7 @@ module ACP
     #   the serialized message hash ready for transport.
     # - `timeout` — optional timeout in seconds (nil = no timeout).
     # - `on_result` — internal cache update from a successful result's JSON.
+    # - `before_send` — checks live state immediately before a transport write.
     #
     # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
@@ -1271,6 +1273,7 @@ module ACP
       *,
       on_result : (String -> Nil)? = nil,
       check_fork_cursor : Bool = false,
+      before_send : (-> Nil)? = nil,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1293,6 +1296,9 @@ module ACP
       end
       if method == Protocol::AgentMethod::SESSION_FORK
         fork_source = params.try(&.["sessionId"]?).try(&.as_s?)
+        creating_session = method if fork_source
+      elsif v2_wire? && method == Protocol::AgentMethod::SESSION_NEW
+        creating_session = method
       end
       if !v2_wire? && method == Protocol::AgentMethod::SESSION_LOAD
         loading_session = params.try(&.["sessionId"]?).try(&.as_s?)
@@ -1312,7 +1318,7 @@ module ACP
         if loading_session && @suggestion_content_types
           @suggestion_loads[id_str] = loading_session
         end
-        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, fork_source, fork_cursor, on_result)
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result)
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
       begin
@@ -1320,6 +1326,8 @@ module ACP
           @transport.send_checked(message) do
             refresh_fork_grant(id_str, params)
           end
+        elsif before_send
+          @transport.send_checked(message, &before_send)
         else
           @transport.send(message)
         end
@@ -1670,7 +1678,7 @@ module ACP
             @initialize_request = nil
             observe_initialize_response(msg) unless wire_frame
           end
-          if error = fork_response_error(request.fork_source, msg)
+          if error = created_session_response_error(request.creating_session, request.fork_source, msg)
             response = error
             @subagent_registry.try(&.request_finished(id_str))
           else
@@ -1701,14 +1709,14 @@ module ACP
       end
     end
 
-    # Checks fork IDs before the workspace registry or active cache can change.
-    private def fork_response_error(source : String?, msg : JSON::Any) : ProtocolError?
-      return unless source && !msg["error"]? && (id = msg["result"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?))
+    # Checks newly allocated IDs before the workspace or capability cache can change.
+    private def created_session_response_error(method : String?, source : String?, msg : JSON::Any) : ProtocolError?
+      return unless method && !msg["error"]? && (id = msg["result"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?))
 
       if id == source
         ProtocolError.new("The Agent returned the source session ID for session/fork")
       elsif @known_session_ids.includes?(id) || @subagent_registry.try(&.known_session?(id))
-        ProtocolError.new("The Agent returned an existing session ID for session/fork")
+        ProtocolError.new("The Agent returned an existing session ID for #{method}")
       end
     end
 
@@ -2094,7 +2102,8 @@ module ACP
       @pending_mutex.synchronize do
         return false if @disconnected
 
-        return false unless @subagent_registry.not_nil!.observe_v2_update(session_id, update, update_json)
+        registry = @subagent_registry.not_nil!
+        return false unless registry.observe_v2_update(session_id, update, update_json)
 
         case update["sessionUpdate"]?.try(&.as_s?)
         when "subagent_update"
@@ -2106,8 +2115,12 @@ module ACP
         when "prompt_suggestions_update"
           return false unless @suggestion_content_types &&
                               !@cursor_registry.try(&.replaying?(session_id)) &&
-                              !@subagent_registry.not_nil!.child?(session_id) &&
-                              @subagent_registry.not_nil!.current_updates?(session_id)
+                              !registry.child?(session_id) &&
+                              registry.current_updates?(session_id)
+        when "available_commands_update"
+          unless @cursor_registry.try(&.replaying?(session_id))
+            registry.observe_available_commands(session_id, update, update_json)
+          end
         end
         true
       end

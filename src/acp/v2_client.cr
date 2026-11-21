@@ -26,6 +26,30 @@ module ACP
           send_typed_request(method, params, type)
         end
 
+        def enable_skill_commands : Nil
+          @subagent_registry.not_nil!.enable_skill_commands
+        end
+
+        def submit_with_skills(params : Wire::SessionPromptParams, names : Array(String)) : JSON::Any
+          method = AgentMethod::SESSION_PROMPT
+          session_id = params.session_id
+          builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
+          check_skills = -> do
+            @pending_mutex.synchronize do
+              raise ConnectionClosedError.new if @disconnected
+              if @cursor_registry.try(&.replaying?(session_id))
+                raise InvalidStateError.new("Skill references require a current command list after session replay")
+              end
+
+              registry = @subagent_registry.not_nil!
+              if name = names.find { |candidate| !registry.skill_advertised?(session_id, candidate) }
+                raise InvalidStateError.new("Skill #{name.inspect} is not currently advertised for session #{session_id.inspect}")
+              end
+            end
+          end
+          response_result(send_and_await_response(method, builder, prompt_timeout, before_send: check_skills), method)
+        end
+
         private def v2_wire? : Bool
           true
         end
@@ -38,7 +62,7 @@ module ACP
 
             begin
               update = Protocol::V2::SessionUpdateParams.from_json(params_json || Protocol::WireFrame.encode(params))
-              if params_json && update.update.session_update.in?("state_update", "subagent_update")
+              if params_json && update.update.session_update.in?("state_update", "subagent_update", "available_commands_update")
                 update_json = Protocol::WireFrame.field(params_json, "update")
               end
               return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
@@ -150,6 +174,7 @@ module ACP
         session = Protocol::ClientSessionCapabilities.new(prompt_suggestions: @capabilities.session.try(&.prompt_suggestions))
         @connection = Connection.new(@transport,
           client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation, session: session))
+        @connection.enable_skill_commands if @capabilities.session.try(&.commands).try(&.skill)
         @connection.on_agent_request = ->handle_extension_request(String, JSON::Any)
       end
 
@@ -354,13 +379,24 @@ module ACP
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.
-      def session_prompt(params : Wire::SessionPromptParams) : Wire::SessionPromptResult
+      # Set retry_submission only when resending the original prompt and key.
+      def session_prompt(params : Wire::SessionPromptParams, *, retry_submission : Bool = false) : Wire::SessionPromptResult
         caps = session_capabilities
-        if (key = params.idempotency_key) && !key.size.in?(1..255)
-          raise ArgumentError.new("ACP v2 idempotency keys must contain 1 to 255 characters")
+        if key = params.idempotency_key
+          unless key.size.in?(1..255)
+            raise ArgumentError.new("ACP v2 idempotency keys must contain 1 to 255 characters")
+          end
+        elsif retry_submission
+          raise ArgumentError.new("Retrying an ACP v2 submission requires its original idempotency key")
         end
-        validate_prompt(caps.prompt, params.prompt)
-        raw = @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
+        skills = validate_prompt(caps.prompt, params.prompt)
+        # The Agent resolves keyed retries even if the command list has changed
+        # since insertion or since an earlier connection.
+        raw = if !skills.empty? && !retry_submission
+                @connection.submit_with_skills(params, skills)
+              else
+                @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
+              end
         decode(Wire::SessionPromptResult, raw, AgentMethod::SESSION_PROMPT)
       end
 
@@ -520,10 +556,11 @@ module ACP
         raise ArgumentError.new("ACP v2 MCP HTTP servers require an absolute HTTP(S) URL")
       end
 
-      private def validate_prompt(caps : Wire::PromptCapabilities?, blocks : Array(JSON::Any)) : Nil
+      private def validate_prompt(caps : Wire::PromptCapabilities?, blocks : Array(JSON::Any)) : Array(String)
         raise ArgumentError.new("ACP v2 prompts require at least one content block") if blocks.empty?
 
-        blocks.each do |block|
+        skills = [] of String
+        blocks.each_with_index do |block, index|
           kind = block.as_h?.try(&.["type"]?).try(&.as_s?) ||
                  raise ArgumentError.new("ACP v2 prompt content blocks require a type")
           case kind
@@ -534,11 +571,23 @@ module ACP
             raise InvalidStateError.new("The Agent did not advertise audio prompts") unless caps.try(&.audio)
           when "resource"
             raise InvalidStateError.new("The Agent did not advertise embedded context") unless caps.try(&.embedded_context)
+          when "skill"
+            unless @capabilities.session.try(&.commands).try(&.skill)
+              raise InvalidStateError.new("The Client did not advertise support for skill commands")
+            end
+            support = caps.try(&.skill) || raise InvalidStateError.new("The Agent did not advertise skill prompts")
+            if index != 0 && !support.inline
+              raise ArgumentError.new("Only the first prompt block can reference a skill without inline support")
+            end
+            skill = Wire::SkillReference.from_content_block(block) || raise ArgumentError.new("Malformed ACP v2 skill reference")
+            skills << skill.name
+            next
           else
             next
           end
           Protocol::ContentBlock.from_json(block.to_json)
         end
+        skills
       rescue JSON::ParseException
         raise ArgumentError.new("Malformed ACP v2 prompt content block")
       end

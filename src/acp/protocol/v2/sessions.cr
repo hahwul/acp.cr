@@ -179,7 +179,7 @@ module ACP
         property config_options : Array(JSON::Any) = [] of JSON::Any
 
         # Available slash commands, including open command variants.
-        @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::OptionalOptionList)]
+        @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::V2::AvailableCommandsJson)]
         property available_commands : Array(JSON::Any) = [] of JSON::Any
 
         # Extension metadata.
@@ -405,6 +405,12 @@ module ACP
         def self.new(session_id : String, prompt : Array(Protocol::ContentBlock),
                      idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)
           new(session_id, prompt.map { |content| JSON.parse(content.to_json) }, idempotency_key, meta)
+        end
+
+        # Builds a prompt from typed v2 content and skill references.
+        def self.new(session_id : String, prompt : Array(PromptContentBlock),
+                     idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+          new(session_id, prompt.map { |content| JSON.parse(WireFrame.encode(content)) }, idempotency_key, meta)
         end
       end
 

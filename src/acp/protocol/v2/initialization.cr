@@ -1,6 +1,7 @@
 require "json"
 require "../capabilities"
 require "../types"
+require "./skills"
 
 module ACP
   module Protocol
@@ -69,15 +70,23 @@ module ACP
         include LosslessUnmapped
 
         # Presence advertises support for draft prompt suggestions.
-        @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsCapabilities))]
+        @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsCapabilities))]
         property prompt_suggestions : PromptSuggestionsCapabilities?
+
+        # Additional command types understood by this client.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::CommandsCapabilities))]
+        property commands : CommandsCapabilities?
 
         # Extension metadata scoped to the session capabilities.
         @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates the session capability group.
-        def initialize(@prompt_suggestions : PromptSuggestionsCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(
+          @prompt_suggestions : PromptSuggestionsCapabilities? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+          @commands : CommandsCapabilities? = nil,
+        )
         end
       end
 
@@ -92,7 +101,7 @@ module ACP
         property elicitation : Protocol::ElicitationCapabilities?
 
         # Session features supported by the client.
-        @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::V2::ClientSessionCapabilities))]
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::ClientSessionCapabilities))]
         property session : ClientSessionCapabilities?
 
         # Extension metadata.
@@ -123,6 +132,10 @@ module ACP
         @[JSON::Field(key: "embeddedContext")]
         property embedded_context : Capability?
 
+        # Presence allows a skill reference at the start of a prompt.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::PromptSkillCapabilities))]
+        property skill : PromptSkillCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -133,6 +146,7 @@ module ACP
           @audio : Capability? = nil,
           @embedded_context : Capability? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @skill : PromptSkillCapabilities? = nil,
         )
         end
       end

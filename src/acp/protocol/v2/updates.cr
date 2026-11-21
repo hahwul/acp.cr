@@ -152,6 +152,13 @@ module ACP
         # Creates a message upsert. Assign nil explicitly to clear a field.
         def initialize(@session_update : String, @message_id : String)
         end
+
+        # Returns well-formed skill references in a user message in content order.
+        def skill_references : Array(SkillReference)
+          return [] of SkillReference unless @session_update == "user_message"
+
+          content.try(&.compact_map { |block| SkillReference.from_content_block(block) }) || [] of SkillReference
+        end
       end
 
       # Appends a content block to a transcript message.
@@ -183,6 +190,11 @@ module ACP
           Protocol::ContentChunk.new(block, @meta, @message_id)
         rescue JSON::ParseException
           nil
+        end
+
+        # Returns the skill reference in a user message chunk, if present.
+        def skill_reference : SkillReference?
+          SkillReference.from_content_block(@content) if @session_update == "user_message_chunk"
         end
       end
 
@@ -281,7 +293,7 @@ module ACP
           when "notice"
             Protocol::NoticeUpdate.from_json(to_json)
           when "available_commands_update"
-            AvailableCommandsUpdate.from_json(to_json)
+            AvailableCommandsUpdate.from_json(WireFrame.encode(self))
           when "config_option_update"
             ConfigOptionUpdate.from_json(to_json)
           when "prompt_suggestions_update"

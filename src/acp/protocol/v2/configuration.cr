@@ -1,4 +1,5 @@
 require "../types"
+require "./skills"
 
 module ACP
   module Protocol
@@ -140,6 +141,14 @@ module ACP
           @type == "command"
         end
 
+        # Projects a valid skill advertisement without interpreting its path.
+        def skill : Skill?
+          return unless @type == "skill" && Skill.valid_name?(@name)
+
+          path = @json_unmapped["path"]?.try(&.as_s?)
+          Skill.new(@name, @description, path, meta)
+        end
+
         # Input specification for a recognized slash command, when available.
         def input : CommandInput?
           return unless slash_command? && (input = @json_unmapped["input"]?)
@@ -176,7 +185,72 @@ module ACP
       module AvailableCommandList
         # Parses entries that carry a v2 command discriminator, name, and description.
         def typed_available_commands : Array(AvailableCommand)
-          available_commands.compact_map { |command| AvailableCommand.from_json(command.to_json) rescue nil }
+          available_commands.compact_map do |raw|
+            command = AvailableCommand.from_json(WireFrame.encode(raw))
+            command if command.type != "skill" || command.skill
+          rescue JSON::Error
+            nil
+          end
+        end
+
+        # Parses skill entries whose names are unique across the command list.
+        def typed_available_skills : Array(Skill)
+          commands = typed_available_commands
+          names = commands.map(&.name).tally
+          commands.compact_map { |command| command.skill if names[command.name] == 1 }
+        end
+      end
+
+      # :nodoc:
+      module AvailableCommandsJson
+        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
+          commands = [] of JSON::Any
+          unless pull.kind.begin_array?
+            pull.skip
+            return commands
+          end
+          pull.read_array do
+            if pull.kind.begin_object?
+              command = parse_command(WireFrame.read_raw(pull))
+              commands << command if command
+            else
+              pull.skip
+            end
+          end
+          commands
+        end
+
+        private def self.parse_command(raw : String) : JSON::Any?
+          JSON.parse(raw)
+        rescue JSON::ParseException
+          # A known skill can still be used when an optional field is too
+          # wide for JSON::Any. Decode its recognized fields from the wire.
+          begin
+            if WireFrame.field(raw, "type") == %("skill")
+              skill = Skill.from_json(raw)
+              JSON.parse(WireFrame.encode(skill))
+            end
+          rescue JSON::Error
+            nil
+          end
+        end
+
+        def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+          value.to_json(json)
+        end
+      end
+
+      # :nodoc:
+      module RequiredAvailableCommands
+        def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
+          unless pull.kind.begin_array?
+            raise JSON::ParseException.new("Available commands must be an array", *pull.location)
+          end
+          AvailableCommandsJson.from_json(pull)
+        end
+
+        def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+          AvailableCommandsJson.to_json(value, json)
         end
       end
 
@@ -190,11 +264,11 @@ module ACP
         getter session_update : String = "available_commands_update"
 
         # Complete list of currently advertised commands.
-        @[JSON::Field(key: "availableCommands")]
+        @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::V2::RequiredAvailableCommands)]
         property available_commands : Array(JSON::Any)
 
         # Extension metadata scoped to the update.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates an update with replacement command advertisements.

@@ -1,25 +1,10 @@
 require "set"
 require "./content_block"
 require "./optional_metadata"
+require "./optional_capability"
 
 module ACP
   module Protocol
-    # :nodoc:
-    module OptionalSuggestionCapability(T)
-      def self.from_json(pull : JSON::PullParser) : T?
-        return T.from_json(WireFrame.read_raw(pull)) if pull.kind.begin_object?
-
-        pull.skip
-        nil
-      rescue JSON::ParseException
-        nil
-      end
-
-      def self.to_json(value : T, json : JSON::Builder) : Nil
-        value.to_json(json)
-      end
-    end
-
     # Presence advertises support for an additional suggestion content type.
     struct PromptSuggestionContentCapabilities
       include JSON::Serializable
@@ -47,15 +32,15 @@ module ACP
       include JSON::Serializable
 
       # Presence allows suggestions with image content.
-      @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsImageCapabilities))]
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsImageCapabilities))]
       getter image : PromptSuggestionsImageCapabilities?
 
       # Presence allows suggestions with audio content.
-      @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsAudioCapabilities))]
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsAudioCapabilities))]
       getter audio : PromptSuggestionsAudioCapabilities?
 
       # Presence allows suggestions with embedded resources.
-      @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsEmbeddedContextCapabilities))]
+      @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsEmbeddedContextCapabilities))]
       getter embedded_context : PromptSuggestionsEmbeddedContextCapabilities?
 
       # Extension metadata for the suggestion capability.
