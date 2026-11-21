@@ -431,7 +431,7 @@ module ACP
         property message_id : String
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates an acknowledgement for an inserted prompt.

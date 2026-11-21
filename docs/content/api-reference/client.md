@@ -39,6 +39,25 @@ The prompt response acknowledges insertion. Foreground completion arrives
 in an idle `state_update`. Keep `on_update` callbacks short because they run
 on the dispatcher fiber.
 
+ACP v2 prompts accept baseline text and resource links. Images, audio,
+embedded resources, and skill references require their respective grants.
+For custom content, set `client.on_prompt_content_type` to check the
+Agent’s advertised `capabilities` against the extension’s documented rules.
+The callback receives the custom type and the Agent’s capability object.
+Stdio preserves the exact JSON values in the advertisement.
+
+```crystal
+client.on_prompt_content_type = ->(type : String, agent : ACP::Protocol::RawJson) do
+  meta = agent.field("session").try(&.field("prompt")).try(&.field("_meta"))
+  type == "_example.test/diagram" && meta.try(&.field("example.test/diagrams")).try(&.json) == "true"
+end
+```
+
+This example uses an extension that advertises a boolean under prompt
+capability metadata. The extension defines its own key, location, and
+value. Return `true` only when the Agent advertises support for that type.
+[ACP v2 Prompt Content](https://agentclientprotocol.com/protocol/v2/content#content-types)
+
 Use `note.raw` from the v2 update callback to store or forward notification
 parameters. It preserves unknown fields and exact JSON numbers over stdio,
 including in updates whose `typed` accessor returns `nil`. The notification's

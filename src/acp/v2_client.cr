@@ -1,4 +1,5 @@
 require "uri"
+require "socket"
 require "./client"
 require "./protocol/raw_json"
 require "./protocol/v2/methods"
@@ -71,6 +72,11 @@ module ACP
         @skill_commands_negotiated = false
 
         @initialize_offer : Wire::InitializeParams?
+        @agent_capabilities_raw : Protocol::RawJson?
+
+        def agent_capabilities_raw : Protocol::RawJson?
+          @pending_mutex.synchronize { @agent_capabilities_raw }
+        end
 
         def initialization_offer : Wire::InitializeParams?
           @pending_mutex.synchronize { @initialize_offer }
@@ -95,8 +101,8 @@ module ACP
           outcome = nil
           observe = ->(response : PendingResponse) do
             outcome = begin
-              result = decode_initialization_response(response)
-              apply_initialization(offer, result)
+              result, agent_capabilities_raw = decode_initialization_response(response)
+              apply_initialization(offer, result, agent_capabilities_raw)
               result
             rescue ex : JsonRpcError
               ex
@@ -147,7 +153,7 @@ module ACP
 
         # Commit the client offer and the Agent's result before dispatching the
         # next frame. The dispatcher already holds the pending mutex.
-        private def apply_initialization(offer : Wire::InitializeParams, result : Wire::InitializeResult) : Nil
+        private def apply_initialization(offer : Wire::InitializeParams, result : Wire::InitializeResult, agent_capabilities_raw : Protocol::RawJson?) : Nil
           advertised = offer.capabilities
           session = advertised.session
           suggestions = session.try(&.prompt_suggestions)
@@ -160,10 +166,11 @@ module ACP
             image: !!prompt.try(&.image), audio: !!prompt.try(&.audio),
             embedded_context: !!prompt.try(&.embedded_context))
           @initialize_offer = offer
+          @agent_capabilities_raw = agent_capabilities_raw
           @v2_initialization_result = result
         end
 
-        private def decode_initialization_response(response : PendingResponse) : Wire::InitializeResult
+        private def decode_initialization_response(response : PendingResponse) : {Wire::InitializeResult, Protocol::RawJson?}
           raise response if response.is_a?(ProtocolError)
 
           wire = response.is_a?(Protocol::WireFrame) ? response.json : Protocol::WireFrame.encode(response)
@@ -173,7 +180,7 @@ module ACP
           end
           error = envelope.field("error")
           result = envelope.field("result")
-          return decode_initialization(result.json) if result && !error
+          return {decode_initialization(result.json), result.field("capabilities")} if result && !error
 
           code = error.try(&.field("code")).try(&.as_i64?)
           message = error.try(&.field("message")).try(&.as_s?)
@@ -189,24 +196,27 @@ module ACP
           raise JsonRpcError.new(code.to_i32, message, data, received: true)
         end
 
-        def submit_with_skills(params : Wire::SessionPromptParams, names : Array(String)) : JSON::Any
+        def submit_prompt(params : JSON::Any, skill_names : Array(String)?) : Wire::SessionPromptResult
           method = AgentMethod::SESSION_PROMPT
-          session_id = params.session_id
-          builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-          check_skills = -> do
-            @pending_mutex.synchronize do
-              raise ConnectionClosedError.new if @disconnected
-              if @cursor_registry.try(&.replaying?(session_id))
-                raise InvalidStateError.new("Skill references require a current command list after session replay")
-              end
+          builder = ->(id : Int64) { Protocol.build_request_raw(id, method, params) }
+          if skill_names && !skill_names.empty?
+            session_id = params["sessionId"].as_s
+            check_skills = -> do
+              @pending_mutex.synchronize do
+                raise ConnectionClosedError.new if @disconnected
+                if @cursor_registry.try(&.replaying?(session_id))
+                  raise InvalidStateError.new("Skill references require a current command list after session replay")
+                end
 
-              advertised = @session_choices.command_skill_names(session_id)
-              if name = names.find { |candidate| !advertised.try(&.includes?(candidate)) }
-                raise InvalidStateError.new("Skill #{name.inspect} is not currently advertised for session #{session_id.inspect}")
+                advertised = @session_choices.command_skill_names(session_id)
+                if name = skill_names.find { |candidate| !advertised.try(&.includes?(candidate)) }
+                  raise InvalidStateError.new("Skill #{name.inspect} is not currently advertised for session #{session_id.inspect}")
+                end
               end
             end
           end
-          response_result(send_and_await_response(method, builder, prompt_timeout, before_send: check_skills), method)
+          response = send_and_await_response(method, builder, prompt_timeout, before_send: check_skills)
+          decode_typed_response(method, response, Wire::SessionPromptResult)
         end
 
         private def v2_wire? : Bool
@@ -329,6 +339,10 @@ module ACP
 
       # Resolves custom system prompt modes advertised through an ACP extension.
       property on_system_prompt_mode : Protocol::SystemPromptModeResolver?
+
+      # Resolves custom prompt types against the Agent's advertised capabilities.
+      # Return true when the type has a matching advertisement defined by the extension.
+      property on_prompt_content_type : Wire::PromptContentTypeResolver?
 
       @initializing = Atomic(Bool).new(false)
       @terminal_auth_running = Atomic(Bool).new(false)
@@ -632,15 +646,13 @@ module ACP
           elsif retry_submission
             raise ArgumentError.new("Retrying an ACP v2 submission requires its original idempotency key")
           end
-          skills = validate_prompt(caps.prompt, params.prompt)
+          # Validate the same detached payload that will be sent, even if an
+          # extension resolver yields or edits the caller's original blocks.
+          payload = JSON.parse(Protocol::WireFrame.encode(params))
+          skills = validate_prompt(caps.prompt, payload["prompt"].as_a)
           # The Agent resolves keyed retries even if the command list has changed
           # since insertion or since an earlier connection.
-          raw = if !skills.empty? && !retry_submission
-                  @connection.submit_with_skills(params, skills)
-                else
-                  @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
-                end
-          decode(Wire::SessionPromptResult, raw, AgentMethod::SESSION_PROMPT)
+          @connection.submit_prompt(payload, retry_submission ? nil : skills)
         end
       end
 
@@ -866,6 +878,7 @@ module ACP
         raise ArgumentError.new("ACP v2 prompts require at least one content block") if blocks.empty?
 
         skills = [] of String
+        resolve = @on_prompt_content_type
         blocks.each_with_index do |block, index|
           kind = block.as_h?.try(&.["type"]?).try(&.as_s?) ||
                  raise ArgumentError.new("ACP v2 prompt content blocks require a type")
@@ -889,13 +902,77 @@ module ACP
             skills << skill.name
             next
           else
+            unless kind.starts_with?('_')
+              raise ArgumentError.new("Unknown ACP v2 prompt content type #{kind.inspect}")
+            end
+            unless resolve && (advertised = @connection.agent_capabilities_raw) && resolve.call(kind, advertised)
+              raise InvalidStateError.new("The Agent did not advertise custom prompt content #{kind.inspect}")
+            end
             next
           end
-          Protocol::ContentBlock.from_json(block.to_json)
+          validate_standard_prompt_block(block)
         end
         skills
+      end
+
+      private def validate_standard_prompt_block(block : JSON::Any) : Nil
+        case content = Protocol::ContentBlock.from_json(Protocol::WireFrame.encode(block))
+        when Protocol::ImageContentBlock
+          if (uri = content.uri) && !valid_prompt_uri?(uri)
+            raise ArgumentError.new("ACP v2 image prompts require an absolute URI when one is supplied")
+          end
+          validate_prompt_media(content.data)
+        when Protocol::AudioContentBlock
+          validate_prompt_media(content.data)
+        when Protocol::ResourceLinkContentBlock
+          unless valid_prompt_uri?(content.uri)
+            raise ArgumentError.new("ACP v2 resource links require an absolute URI")
+          end
+        when Protocol::ResourceContentBlock
+          uri = content.uri
+          blob = content.blob
+          unless uri && valid_prompt_uri?(uri) && (content.text || (blob && valid_prompt_base64?(blob)))
+            raise ArgumentError.new("Malformed ACP v2 embedded resource")
+          end
+        end
       rescue JSON::ParseException
         raise ArgumentError.new("Malformed ACP v2 prompt content block")
+      end
+
+      private def validate_prompt_media(data : String) : Nil
+        raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless valid_prompt_base64?(data)
+      end
+
+      private def valid_prompt_base64?(data : String) : Bool
+        data.bytesize % 4 == 0 && data.matches?(/\A[A-Za-z0-9+\/]*={0,2}\z/)
+      end
+
+      private def valid_prompt_uri?(value : String) : Bool
+        return false if value.count('#') > 1 || value.matches?(%r{[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]|%(?![A-Fa-f0-9]{2})})
+
+        return false unless URI.parse(value).absolute?
+
+        _, _, remainder = value.partition(':')
+        unless hierarchy = remainder.lchop?("//")
+          return !remainder.matches?(/[\[\]]/)
+        end
+
+        # Check delimiters before URI.parse's percent decoding of host and user info.
+        authority, _, resource = hierarchy.partition(%r{[/?#]})
+        return false if resource.matches?(/[\[\]]/)
+
+        user, separator, host_port = authority.partition('@')
+        host_port = authority if separator.empty?
+        return false if (!separator.empty? && user.matches?(/[\[\]]/)) || host_port.includes?('@')
+        return true unless host_port.matches?(/[\[\]]/)
+
+        match = /\A\[([^\[\]]+)\](?::[0-9]*)?\z/.match(host_port)
+        return false unless match
+
+        literal = match[1]
+        Socket::IPAddress.valid_v6?(literal) || literal.matches?(%r{\A[vV][A-Fa-f0-9]+\.[A-Za-z0-9._~!$&'()*+,;=:\-]+\z})
+      rescue URI::Error | OverflowError
+        false
       end
 
       private def terminal_auth_flow(method_id : String, approve : Wire::AuthMethod -> Bool) : Client
@@ -924,6 +1001,7 @@ module ACP
         replacement.on_elicitation_complete = on_elicitation_complete
         replacement.on_auth_status_update = on_auth_status_update
         replacement.on_system_prompt_mode = on_system_prompt_mode
+        replacement.on_prompt_content_type = on_prompt_content_type
         begin
           replacement.initialize_connection(meta: @connection.initialization_offer.try(&.meta))
           close

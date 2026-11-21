@@ -3662,3 +3662,157 @@ describe "ACP v2 exact session update delivery" do
     end
   end
 end
+
+describe "ACP v2 negotiated prompt content" do
+  it "blocks an unadvertised custom block before sending a prompt" do
+    with_v2_request_client do |client, transport|
+      block = JSON.parse(%({"type":"_example.test/diagram","source":"flow"}))
+      params = ACP::Protocol::V2::SessionPromptParams.new("session", [block])
+      client.prompt_timeout = 0.05
+
+      expect_raises(ACP::InvalidStateError, /custom prompt content/) { client.session_prompt(params) }
+      transport.sent_messages.map { |frame| frame["method"].as_s }.should eq(["initialize"])
+    end
+  end
+
+  it "rejects malformed embedded resources and image payloads even when advertised" do
+    with_v2_request_client(%({"prompt":{"embeddedContext":{},"image":{}}})) do |client, transport|
+      client.prompt_timeout = 0.05
+      invalid = [
+        %({"type":"resource","resource":{"uri":"file:///work/notes","value":"unknown"}}),
+        %({"type":"resource","resource":{"text":"no URI"}}),
+        %({"type":"resource","resource":[1]}),
+        %({"type":"resource","resource":{"uri":"/work/not-a-uri","text":"source"}}),
+        %({"type":"resource","resource":{"uri":"file:///work/invalid%ZZ","text":"source"}}),
+        %({"type":"resource","resource":{"uri":"file:///work/notes","blob":"***"}}),
+      ]
+      invalid.each do |input|
+        params = ACP::Protocol::V2::SessionPromptParams.new("session", [JSON.parse(input)])
+        expect_raises(ArgumentError, /embedded resource/) { client.session_prompt(params) }
+      end
+      malformed_images = [
+        %({"type":"image","mimeType":"image/png","data":"YQ="}),
+        %({"type":"image","mimeType":"image/png","data":"YQ==","uri":"file:///work/[draft]"}),
+      ]
+      malformed_images.each do |input|
+        params = ACP::Protocol::V2::SessionPromptParams.new("session", [JSON.parse(input)])
+        expect_raises(ArgumentError) { client.session_prompt(params) }
+      end
+      transport.sent_messages.map { |frame| frame["method"].as_s }.should eq(["initialize"])
+
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"messageId":"image"}}))
+      end
+      image = JSON.parse(%({"type":"image","mimeType":"image/png","data":"YQ==","uri":"https://[2001:db8::1]/a%20b.png#preview"}))
+      client.prompt_timeout = 2.0
+      client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [image])).message_id.should eq("image")
+    end
+  end
+
+  it "keeps baseline and advertised media available beside invalid optional markers" do
+    with_v2_request_client(%({"prompt":{"image":true,"audio":{},"embeddedContext":{}}})) do |client, transport|
+      image = JSON.parse(%({"type":"image","mimeType":"image/png","data":"YQ=="}))
+      future = JSON.parse(%({"type":"future_type","value":"unrecognized"}))
+      expect_raises(ACP::InvalidStateError, /image prompts/) do
+        client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [image]))
+      end
+      expect_raises(ArgumentError, /Unknown ACP v2 prompt content type/) do
+        client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [future]))
+      end
+      malformed = [
+        { %({"type":"audio","mimeType":"audio/wav","data":"YQ="}), /Base64 data/ },
+        { %({"type":"audio","mimeType":"audio/wav","data":"!!!!"}), /Base64 data/ },
+        { %({"type":"resource_link","name":"notes","uri":"file:///work/with space"}), /absolute URI/ },
+        { %({"type":"resource_link","name":"notes","uri":"https://example.test/notes#one#two"}), /absolute URI/ },
+        { %({"type":"resource_link","name":"notes","uri":"https://example.test:999999999999999999999/notes"}), /absolute URI/ },
+        { %({"type":"resource_link","name":"notes","uri":"https://[draft]/notes"}), /absolute URI/ },
+      ]
+      malformed.each do |raw, message|
+        params = ACP::Protocol::V2::SessionPromptParams.new("session", [JSON.parse(raw)])
+        expect_raises(ArgumentError, message) { client.session_prompt(params) }
+      end
+      transport.sent_messages.size.should eq(1)
+
+      blocks = [
+        %({"type":"text","text":"hello"}),
+        %({"type":"resource_link","name":"notes","uri":"file:///work/notes"}),
+        %({"type":"resource_link","name":"escaped URI","uri":"https://user%5Bname%5D@example.test/file"}),
+        %({"type":"audio","mimeType":"audio/wav","data":"YQ=="}),
+        %({"type":"resource","resource":{"uri":"file:///work/notes","text":""}}),
+        %({"type":"resource","resource":{"uri":"file:///work/data","blob":"YQ=="}}),
+      ].map { |raw| JSON.parse(raw) }
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"messageId":"m"}}))
+      end
+
+      client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", blocks)).message_id.should eq("m")
+      transport.sent_messages.last["params"]["prompt"].as_a.should eq(blocks)
+    end
+  end
+
+  it "uses the current exact Agent advertisement and sends the validated prompt snapshot" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.prompt_timeout = 2.0
+
+      first = %({"session":{"mcp":false,"prompt":{"_meta":{"example.test/diagram":{"version":0.1234567890123456789}}}}})
+      second = %({"_meta":{"example.test/sequence":18446744073709551615},"session":{"mcp":{"stdio":{},"http":true,"_meta":{"example.test/count":18446744073709551615}},"prompt":{"_meta":{"example.test/diagram":{"version":0.9876543210987654321}}}}})
+      auth = %([false,{"type":"agent","methodId":"optional","name":"Sign in","_meta":{"example.test/count":18446744073709551615}}])
+      used = Channel(JSON::Any).new(1)
+      spawn do
+        {first, second}.each_with_index do |advertised, index|
+          request = JSON.parse(outgoing.gets.not_nil!)
+          methods = index == 0 ? "false" : auth
+          feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":#{advertised},"authMethods":#{methods}}})
+        end
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"session"}})
+        request = JSON.parse(outgoing.gets.not_nil!)
+        used.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"messageId":"inserted","_meta":{"example.test/sequence":18446744073709551615}}})
+      end
+
+      diagram = JSON.parse(%({"type":"_example.test/diagram","source":"hello"}))
+      blocks = [diagram]
+      observed = [] of String
+      client.on_prompt_content_type = ->(kind : String, caps : ACP::Protocol::RawJson) do
+        prompt = caps.field("session").not_nil!.field("prompt").not_nil!
+        version = prompt.field("_meta").not_nil!.field("example.test/diagram").not_nil!.field("version").not_nil!.json
+        observed << version
+        sequence = caps.field("_meta").try(&.field("example.test/sequence")).try(&.json)
+        if kind == "_example.test/diagram" && sequence == "18446744073709551615"
+          blocks[0] = JSON.parse(%({"type":"_example.test/unadvertised"}))
+          true
+        else
+          false
+        end
+      end
+
+      params = ACP::Protocol::V2::SessionPromptParams.new("session", blocks)
+      initial = client.initialize_connection
+      initial.capabilities.session.not_nil!.mcp.should be_nil
+      initial.auth_methods.should be_empty
+      expect_raises(ACP::InvalidStateError, /custom prompt content/) { client.session_prompt(params) }
+      renewed = client.initialize_connection
+      mcp = renewed.capabilities.session.not_nil!.mcp.not_nil!
+      mcp.stdio.should_not be_nil
+      mcp.http.should be_nil
+      renewed.auth_methods.map(&.method_id).should eq(["optional"])
+      client.session_new("/work").session_id.should eq("session")
+      client.session_prompt(params).message_id.should eq("inserted")
+      select
+      when request = used.receive
+        request["method"].as_s.should eq("session/prompt")
+        request["params"]["prompt"].as_a.should eq([diagram])
+      when timeout(2.seconds)
+        fail "the validated prompt was not sent"
+      end
+      observed.should eq(["0.1234567890123456789", "0.9876543210987654321"])
+    ensure
+      client.try(&.close)
+    end
+  end
+end
