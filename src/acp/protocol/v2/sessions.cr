@@ -1,4 +1,5 @@
 require "./initialization"
+require "./configuration"
 
 module ACP
   module Protocol
@@ -148,6 +149,8 @@ module ACP
       # Optional configuration and slash commands returned during session setup.
       abstract struct SessionSetupResult
         include JSON::Serializable
+        include ConfigOptionList
+        include AvailableCommandList
 
         # Agent configuration, including open option variants.
         @[JSON::Field(key: "configOptions")]
@@ -256,6 +259,7 @@ module ACP
       # The complete configuration after a successful option change.
       struct SessionSetConfigOptionResult
         include JSON::Serializable
+        include ConfigOptionList
 
         # All current configuration options, including extension variants.
         @[JSON::Field(key: "configOptions")]

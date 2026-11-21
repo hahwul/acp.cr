@@ -207,6 +207,13 @@ even when the representation is unknown. Plan removal, notices, and
 compaction summary chunks reuse their wire-compatible `ACP::Protocol` types.
 [ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
 
+Configuration and command updates expose `typed_config_options` and
+`typed_available_commands`. Session setup responses provide the same
+accessors, and configuration change responses expose the updated options.
+Select options can be flat or grouped. Commands with `slash_command?` set
+expose their input specification, including text hints. Unknown variants
+retain their raw fields.
+
 ## Capabilities
 
 ### ClientCapabilities
