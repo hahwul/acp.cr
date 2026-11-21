@@ -237,7 +237,8 @@ module ACP
       creating_session : String?,
       fork_source : String?,
       fork_cursor : ForkCursorGrant?,
-      on_result : (String -> Nil)?
+      on_result : (String -> Nil)?,
+      on_response : (PendingResponse -> Nil)?
 
     @pending = {} of String => PendingRequest
 
@@ -264,6 +265,10 @@ module ACP
     # the newly negotiated protocol and authentication status capability.
     @initialize_request : String?
     @v2_initialization_result : Protocol::V2::InitializeResult?
+    @v2_request_sent = false
+    @v2_request_operations = 0
+    @v2_initialize_armed = false
+    @v2_contract_unknown = Atomic(Bool).new(false)
     @auth_status_supported = false
 
     # IDs announced through plan_update, grouped by session. Guarded by
@@ -1237,7 +1242,7 @@ module ACP
       raise ConnectionClosedError.new if closed?
 
       message = Protocol.build_response_raw(id, result)
-      @transport.send(message)
+      write_client_message(message)
 
       ClientLog.debug { "Sent response to agent request id=#{id}" }
     end
@@ -1260,7 +1265,7 @@ module ACP
       raise ConnectionClosedError.new if closed?
 
       message = Protocol.build_error_response(id, code, error_message, data)
-      @transport.send(message)
+      write_client_message(message)
 
       ClientLog.debug { "Sent error response to agent request id=#{id} code=#{code}" }
     end
@@ -1313,6 +1318,7 @@ module ACP
     #   the serialized message hash ready for transport.
     # - `timeout` — optional timeout in seconds (nil = no timeout).
     # - `on_result` — internal cache update from a successful result's JSON.
+    # - `on_response` — internal observer for a correlated response envelope.
     # - `before_send` — checks live state immediately before a transport write.
     #
     # Returns the correlated response envelope.
@@ -1324,6 +1330,7 @@ module ACP
       timeout : Float64? = @request_timeout,
       *,
       on_result : (String -> Nil)? = nil,
+      on_response : (PendingResponse -> Nil)? = nil,
       check_fork_cursor : Bool = false,
       before_send : (-> Nil)? = nil,
     ) : PendingResponse
@@ -1358,8 +1365,11 @@ module ACP
       end
 
       fork_cursor = nil
+      initialize = method == Protocol::AgentMethod::INITIALIZE
+      v2_request = v2_wire? && !initialize
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
+        check_v2_request_order(initialize) if v2_wire?
         fork_cursor = fork_cursor_grant(params) if check_fork_cursor
         start_cursor_replay(id_str, method, params)
         begin
@@ -1371,22 +1381,36 @@ module ACP
         if loading_session && @suggestion_content_types
           @suggestion_loads[id_str] = loading_session
         end
-        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result)
-        @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result, on_response)
+        if initialize
+          @initialize_request = id_str
+          @v2_initialize_armed = false if v2_wire?
+        end
       end
       begin
-        if fork_cursor || before_send || mcp_servers
+        if v2_wire? && initialize
+          @transport.send_checked(message) do
+            @pending_mutex.synchronize do
+              raise ConnectionClosedError.new if @disconnected
+
+              @v2_initialize_armed = true
+            end
+          end
+        elsif fork_cursor || before_send || mcp_servers
           @transport.send_checked(message) do
             refresh_fork_grant(id_str, params) if fork_cursor
             before_send.try(&.call)
             @mcp_provider.publish(mcp_servers) if mcp_servers
+            mark_v2_request_sent if v2_request
           end
         else
+          mark_v2_request_sent if v2_request
           @transport.send(message)
         end
       rescue ex
         @pending_mutex.synchronize do
           @pending.delete(id_str)
+          @initialize_request = nil if @initialize_request == id_str
           @suggestion_loads.delete(id_str)
           @subagent_registry.try(&.request_finished(id_str))
           @cursor_registry.try(&.finish_replay(id_str))
@@ -1407,6 +1431,28 @@ module ACP
         # `drain_pending_requests` closed it: the connection is gone.
         raise ConnectionClosedError.new("#{@user_closed ? "Client closed" : "Connection lost"} while waiting for response to #{method}")
       end
+    end
+
+    # Runs under the pending mutex so initialization and ordinary requests
+    # cannot both reserve the next write.
+    private def check_v2_request_order(initialize : Bool) : Nil
+      raise ConnectionClosedError.new if @disconnected || @v2_contract_unknown.get
+
+      if @initialize_request
+        raise InvalidStateError.new("ACP v2 initialization is in progress")
+      end
+
+      if initialize
+        if @v2_request_sent || @v2_request_operations > 0 || !@pending.empty?
+          raise InvalidStateError.new("ACP v2 initialization must precede other requests")
+        end
+      elsif !@v2_initialization_result
+        raise InvalidStateError.new("ACP v2 initialization is required")
+      end
+    end
+
+    private def mark_v2_request_sent : Nil
+      @pending_mutex.synchronize { @v2_request_sent = true }
     end
 
     # Only session setup can publish an MCP registration to the Agent.
@@ -1481,7 +1527,7 @@ module ACP
       sid = message["params"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
       cancel = method == Protocol::AgentMethod::SESSION_CANCEL
       pending = @pending_mutex.synchronize do
-        raise ConnectionClosedError.new if @disconnected
+        raise ConnectionClosedError.new if @disconnected || (v2_wire? && @v2_contract_unknown.get)
         if sid && (registry = @subagent_registry) && registry.child?(sid)
           unless cancel && registry.cancel?(sid)
             raise InvalidStateError.new("#{method} is unavailable for child session #{sid.inspect}")
@@ -1490,8 +1536,18 @@ module ACP
         claim_session_inputs([sid], elicitations: !@subagent_registry.nil?) if sid && cancel && !v2_wire?
       end
 
-      @transport.send(message)
+      write_client_message(message)
       answer_cancelled_session_inputs(pending) if pending
+    end
+
+    private def write_client_message(message : Hash(String, JSON::Any)) : Nil
+      if v2_wire?
+        @transport.send_checked(message) do
+          raise ConnectionClosedError.new if @v2_contract_unknown.get
+        end
+      else
+        @transport.send(message)
+      end
     end
 
     # Deserializes an agent `result` payload into the expected protocol type.
@@ -1528,6 +1584,7 @@ module ACP
         @disconnected = true
         @pending.each_value { |request| request.response.close }
         @pending.clear
+        @initialize_request = nil
         @known_session_ids.clear
         @suggestion_loads.clear
         @plan_ids.clear
@@ -1565,20 +1622,27 @@ module ACP
       when timeout(timeout_span)
         # Clean up the pending entry. If it is already gone, the response was
         # delivered (or the channel closed) after the timer fired: use that.
+        initialization = false
         removed = @pending_mutex.synchronize do
           id = request_id.to_s
           pending = @pending.delete(id)
-          @subagent_registry.try(&.request_finished(id)) if pending
+          if pending
+            @subagent_registry.try(&.request_finished(id))
+            initialization = v2_wire? && @initialize_request == id
+            @v2_contract_unknown.set(true) if initialization
+          end
           # The Agent may still send history after a local timeout. Keep
           # staging cursors until the wire replay or response ends.
           pending
         end
         return channel.receive unless removed
         # Nobody waits for the answer any more: tell the agent it can stop.
-        begin
-          cancel_request(request_id)
-        rescue ex
-          ClientLog.debug { "Could not send $/cancel_request for id=#{request_id}: #{ex.message}" }
+        unless initialization
+          begin
+            cancel_request(request_id)
+          rescue ex
+            ClientLog.debug { "Could not send $/cancel_request for id=#{request_id}: #{ex.message}" }
+          end
         end
         raise RequestTimeoutError.new(request_id, timeout_seconds)
       end
@@ -1659,6 +1723,8 @@ module ACP
     # Routes a single incoming message to the appropriate handler. Returns
     # true for an agent request, whose handler fiber records the outcome.
     private def dispatch_message(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil) : Bool
+      return false if v2_wire? && @v2_contract_unknown.get
+
       # Every JSON-RPC 2.0 message is an object. ACP does not use batch
       # (array) requests, so a top-level array — or a bare number, string,
       # bool, or null — is not routable. Probing it for "id"/"method" would
@@ -1678,7 +1744,11 @@ module ACP
       end
 
       if v2_wire? && obj["jsonrpc"]?.try(&.as_s?) != "2.0"
-        reject_invalid_request("ACP v2 requires JSON-RPC 2.0") unless kind == Protocol::MessageKind::Response
+        if kind == Protocol::MessageKind::Response
+          handle_response(msg, wire_frame, initialization_only: true)
+        else
+          reject_invalid_request("ACP v2 requires JSON-RPC 2.0")
+        end
         return false
       end
 
@@ -1745,7 +1815,7 @@ module ACP
 
     # Handles a response to one of our pending requests.
     # Finds the corresponding channel by ID and sends the response into it.
-    private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil) : Nil
+    private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil, *, initialization_only : Bool = false) : Nil
       id = Protocol.extract_id(msg)
       unless id
         ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
@@ -1761,13 +1831,17 @@ module ACP
       cancelled_inputs = nil
       response = wire_frame || msg
       channel = @pending_mutex.synchronize do
+        initializing = v2_wire? && @initialize_request == id_str
+        next if initialization_only && !initializing
+        next if initializing && (!@v2_initialize_armed || !msg["id"]?.try(&.as_i64?))
+
         @cursor_registry.try(&.finish_replay(id_str, msg, wire_frame))
         @suggestion_loads.delete(id_str)
         if request = @pending.delete(id_str)
           if (grant = request.fork_cursor) && msg["error"]?.try(&.as_h?).try(&.["code"]?).try(&.as_i64?) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
           end
-          if @initialize_request == id_str
+          if !v2_wire? && @initialize_request == id_str
             @initialize_request = nil
             observe_initialize_response(msg) unless wire_frame
           end
@@ -1776,6 +1850,7 @@ module ACP
             @subagent_registry.try(&.request_finished(id_str))
           else
             closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
+            request.on_response.try(&.call(response))
             if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
             end
@@ -1835,28 +1910,14 @@ module ACP
       return if message["error"]?
       return unless result = message["result"]?
 
-      suggestions = @client_capabilities.session.try(&.prompt_suggestions)
-      if v2_wire?
-        typed = Protocol::V2::InitializeResult.from_json(result.to_json)
-        if typed.protocol_version == Protocol::V2::VERSION
-          @v2_initialization_result = typed
-          @mcp_acp_supported = !!typed.capabilities.session.try(&.mcp).try(&.acp)
-          @auth_status_supported = typed.capabilities.auth_status?
-          prompt = typed.capabilities.session.try(&.prompt)
-          @suggestion_content_types = suggestions.try &.content_types(
-            image: !!prompt.try(&.image), audio: !!prompt.try(&.audio),
-            embedded_context: !!prompt.try(&.embedded_context))
-        end
-      else
-        typed = Protocol::InitializeResult.from_json(result.to_json)
-        if ACP.supports_protocol_version?(typed.protocol_version)
-          @mcp_acp_supported = typed.agent_capabilities.mcp_capabilities.try(&.acp?) || false
-          @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?
-          prompt = typed.agent_capabilities.prompt_capabilities
-          @suggestion_content_types = suggestions.try &.content_types(
-            image: prompt.try(&.image?) || false, audio: prompt.try(&.audio?) || false,
-            embedded_context: prompt.try(&.embedded_context?) || false)
-        end
+      typed = Protocol::InitializeResult.from_json(result.to_json)
+      if ACP.supports_protocol_version?(typed.protocol_version)
+        @mcp_acp_supported = typed.agent_capabilities.mcp_capabilities.try(&.acp?) || false
+        @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?
+        prompt = typed.agent_capabilities.prompt_capabilities
+        @suggestion_content_types = @client_capabilities.session.try(&.prompt_suggestions).try &.content_types(
+          image: prompt.try(&.image?) || false, audio: prompt.try(&.audio?) || false,
+          embedded_context: prompt.try(&.embedded_context?) || false)
       end
     rescue JSON::ParseException
     end

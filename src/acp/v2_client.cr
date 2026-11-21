@@ -1,5 +1,6 @@
 require "uri"
 require "./client"
+require "./protocol/raw_json"
 require "./protocol/v2/methods"
 require "./protocol/v2/interactions"
 require "./protocol/v2/updates"
@@ -26,8 +27,123 @@ module ACP
           send_typed_request(method, params, type)
         end
 
-        def enable_skill_commands : Nil
-          @subagent_registry.not_nil!.enable_skill_commands
+        @initialize_offer : Wire::InitializeParams?
+
+        def initialization_offer : Wire::InitializeParams?
+          @pending_mutex.synchronize { @initialize_offer }
+        end
+
+        # Keep capability checks and their write on the same negotiation.
+        # Other ordinary requests may proceed while this one waits for its reply.
+        def with_request(&block : -> T) : T forall T
+          @pending_mutex.synchronize do
+            check_v2_request_order(false)
+            @v2_request_operations += 1
+          end
+          begin
+            yield
+          ensure
+            @pending_mutex.synchronize { @v2_request_operations -= 1 }
+          end
+        end
+
+        def initialize_v2(offer : Wire::InitializeParams) : Wire::InitializeResult
+          method = AgentMethod::INITIALIZE
+          outcome = nil
+          observe = ->(response : PendingResponse) do
+            outcome = begin
+              result = decode_initialization_response(response)
+              apply_initialization(offer, result)
+              result
+            rescue ex : JsonRpcError
+              ex
+            rescue ex : ProtocolError
+              @v2_contract_unknown.set(true)
+              ex
+            end
+            nil
+          end
+          builder = ->(id : Int64) { Protocol.build_request(id, method, offer) }
+          begin
+            send_and_await_response(method, builder, on_response: observe)
+          rescue ex : RequestTimeoutError | TransportError
+            close
+            raise ex
+          end
+
+          begin
+            case result = outcome
+            when Wire::InitializeResult
+              result
+            when Error
+              raise result
+            else
+              raise ProtocolError.new("Missing initialization outcome")
+            end
+          rescue ex : ProtocolError
+            close
+            raise ex
+          ensure
+            @pending_mutex.synchronize { @initialize_request = nil }
+          end
+        end
+
+        private def decode_initialization(json : String) : Wire::InitializeResult
+          data = Protocol::RawJson.from_json(json)
+          number = data.field("protocolVersion").try(&.as_i64?)
+          version = number.to_u16 if number && (0..UInt16::MAX).includes?(number)
+          if version != Wire::VERSION
+            if version == ACP::PROTOCOL_VERSION
+              decode_result_json(Protocol::InitializeResult, json, AgentMethod::INITIALIZE)
+            end
+            raise VersionMismatchError.new(Wire::VERSION, version)
+          end
+
+          decode_result_json(Wire::InitializeResult, json, AgentMethod::INITIALIZE)
+        end
+
+        # Commit the client offer and the Agent's result before dispatching the
+        # next frame. The dispatcher already holds the pending mutex.
+        private def apply_initialization(offer : Wire::InitializeParams, result : Wire::InitializeResult) : Nil
+          advertised = offer.capabilities
+          session = advertised.session
+          suggestions = session.try(&.prompt_suggestions)
+          prompt = result.capabilities.session.try(&.prompt)
+          @client_capabilities.elicitation = advertised.elicitation
+          @subagent_registry.not_nil!.configure_skill_commands(!!session.try(&.commands).try(&.skill))
+          @mcp_acp_supported = !!result.capabilities.session.try(&.mcp).try(&.acp)
+          @auth_status_supported = result.capabilities.auth_status?
+          @suggestion_content_types = suggestions.try &.content_types(
+            image: !!prompt.try(&.image), audio: !!prompt.try(&.audio),
+            embedded_context: !!prompt.try(&.embedded_context))
+          @initialize_offer = offer
+          @v2_initialization_result = result
+        end
+
+        private def decode_initialization_response(response : PendingResponse) : Wire::InitializeResult
+          raise response if response.is_a?(ProtocolError)
+
+          wire = response.is_a?(Protocol::WireFrame) ? response.json : Protocol::WireFrame.encode(response)
+          envelope = Protocol::RawJson.from_json(wire)
+          unless envelope.field("jsonrpc").try(&.as_s?) == "2.0"
+            raise ProtocolError.new("Agent returned a malformed initialization response")
+          end
+          error = envelope.field("error")
+          result = envelope.field("result")
+          return decode_initialization(result.json) if result && !error
+
+          code = error.try(&.field("code")).try(&.as_i64?)
+          message = error.try(&.field("message")).try(&.as_s?)
+          unless !result && code && (Int32::MIN..Int32::MAX).includes?(code) && message
+            raise ProtocolError.new("Agent returned a malformed initialization response")
+          end
+
+          data = begin
+            error.try(&.field("data")).try(&.to_json_any)
+          rescue JSON::ParseException
+            nil
+          end
+          raise JsonRpcError.new(code.to_i32, message, data, received: true)
         end
 
         def submit_with_skills(params : Wire::SessionPromptParams, names : Array(String)) : JSON::Any
@@ -150,14 +266,21 @@ module ACP
         end
       end
 
+      private struct InheritMetadata
+      end
+
       # Transport used by this protocol connection.
       getter transport : Transport
 
-      # Implementation identity included in the handshake.
-      getter info : Wire::Implementation
+      # Implementation identity of the latest successful handshake, or the initial default.
+      def info : Wire::Implementation
+        @connection.initialization_offer.try(&.info) || @info
+      end
 
-      # Client capabilities included in the handshake.
-      getter capabilities : Wire::ClientCapabilities
+      # Client capabilities of the latest successful handshake, or the initial default.
+      def capabilities : Wire::ClientCapabilities
+        @connection.initialization_offer.try(&.capabilities) || @capabilities
+      end
 
       # Handler for custom Agent-to-Client requests.
       property on_extension_request : AgentRequestHandler?
@@ -173,11 +296,7 @@ module ACP
         *,
         @mcp_request_limit : Int32 = 32,
       )
-        session = Protocol::ClientSessionCapabilities.new(prompt_suggestions: @capabilities.session.try(&.prompt_suggestions))
-        @connection = Connection.new(@transport,
-          client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation, session: session),
-          mcp_request_limit: @mcp_request_limit)
-        @connection.enable_skill_commands if @capabilities.session.try(&.commands).try(&.skill)
+        @connection = Connection.new(@transport, mcp_request_limit: @mcp_request_limit)
         @connection.on_agent_request = ->handle_extension_request(String, JSON::Any)
       end
 
@@ -241,24 +360,27 @@ module ACP
       # Cursor snapshots scoped to their originating session.
       delegate session_cursor, session_cursors, to: @connection
 
-      # Sends initialize and verifies the selected protocol version.
-      def initialize_connection : Wire::InitializeResult
+      # Initializes the connection or repeats the handshake before its first
+      # other request. Optional arguments replace the advertised values on
+      # success. An Agent error leaves the last successful handshake active.
+      def initialize_connection(*, info : Wire::Implementation? = nil,
+                                capabilities : Wire::ClientCapabilities? = nil,
+                                meta : Hash(String, JSON::Any) | Nil | InheritMetadata = InheritMetadata.new) : Wire::InitializeResult
         _, started = @initializing.compare_and_set(false, true)
         raise InvalidStateError.new("ACP v2 initialization is already in progress") unless started
 
+        previous = initialization_result
         begin
-          raise InvalidStateError.new("ACP v2 connection already initialized") if initialization_result
-          raw = @connection.send_request(AgentMethod::INITIALIZE, Wire::InitializeParams.new(@info, capabilities: @capabilities))
-          version = raw.as_h?.try(&.["protocolVersion"]?).try(&.as_i64?)
-          unless version == Wire::VERSION
-            close
-            decode(Protocol::InitializeResult, raw, AgentMethod::INITIALIZE) if version == ACP::PROTOCOL_VERSION
-            reported = version.to_u16 if version && (0..UInt16::MAX.to_i).includes?(version)
-            raise VersionMismatchError.new(Wire::VERSION, reported)
+          if @terminal_auth_running.get
+            raise InvalidStateError.new("Cannot initialize during terminal authentication")
           end
-          initialization_result || decode(Wire::InitializeResult, raw, AgentMethod::INITIALIZE)
+          previous_offer = @connection.initialization_offer
+          metadata = meta.is_a?(InheritMetadata) ? previous_offer.try(&.meta) : meta
+          offer = Wire::InitializeParams.new(info || previous_offer.try(&.info) || @info,
+            capabilities: capabilities || previous_offer.try(&.capabilities) || @capabilities, meta: metadata)
+          @connection.initialize_v2(offer)
         rescue ex : JsonRpcError
-          close if ex.unsupported_protocol_version?
+          close if !previous && ex.unsupported_protocol_version?
           raise ex
         ensure
           @initializing.set(false)
@@ -267,50 +389,62 @@ module ACP
 
       # Selects an advertised Agent-managed authentication flow.
       def auth_login(method_id : String) : Wire::AuthLoginResult
-        method = ready.auth_methods.find { |candidate| candidate.method_id == method_id }
-        raise InvalidStateError.new("An advertised Agent auth method is required") unless method && method.agent?
+        @connection.with_request do
+          method = ready.auth_methods.find { |candidate| candidate.method_id == method_id }
+          raise InvalidStateError.new("An advertised Agent auth method is required") unless method && method.agent?
 
-        request(AgentMethod::AUTH_LOGIN, Wire::AuthLoginParams.new(method_id), Wire::AuthLoginResult)
+          request(AgentMethod::AUTH_LOGIN, Wire::AuthLoginParams.new(method_id), Wire::AuthLoginResult)
+        end
       end
 
       # Ends authentication when the Agent advertised authentication methods.
       def auth_logout : Wire::AuthLogoutResult
-        raise InvalidStateError.new("The Agent advertised no auth methods") if ready.auth_methods.empty?
+        @connection.with_request do
+          raise InvalidStateError.new("The Agent advertised no auth methods") if ready.auth_methods.empty?
 
-        request(AgentMethod::AUTH_LOGOUT, Wire::AuthLogoutParams.new, Wire::AuthLogoutResult)
+          request(AgentMethod::AUTH_LOGOUT, Wire::AuthLogoutParams.new, Wire::AuthLogoutResult)
+        end
       end
 
       # Queries the Agent's draft authentication status when it advertises support.
       def auth_status(params : Wire::AuthStatusParams = Wire::AuthStatusParams.new) : Wire::AuthStatusResult
-        unless ready.capabilities.auth_status?
-          raise InvalidStateError.new("The Agent did not advertise auth.status")
-        end
+        @connection.with_request do
+          unless ready.capabilities.auth_status?
+            raise InvalidStateError.new("The Agent did not advertise auth.status")
+          end
 
-        request(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
+          request(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
+        end
       end
 
       # Lists the Agent's configurable model providers and current routing.
       def providers_list(params : Wire::ListProvidersParams = Wire::ListProvidersParams.new) : Wire::ListProvidersResult
-        ensure_provider_support
-        @connection.request_typed(AgentMethod::PROVIDERS_LIST, params, Wire::ListProvidersResult)
+        @connection.with_request do
+          ensure_provider_support
+          @connection.request_typed(AgentMethod::PROVIDERS_LIST, params, Wire::ListProvidersResult)
+        end
       end
 
       # Replaces the full routing configuration for one provider.
       def providers_set(params : Wire::SetProviderParams) : Wire::SetProviderResult
-        ensure_provider_support
-        unless valid_provider_url?(params.base_url)
-          raise ArgumentError.new("ACP v2 provider base URLs must be absolute URIs")
+        @connection.with_request do
+          ensure_provider_support
+          unless valid_provider_url?(params.base_url)
+            raise ArgumentError.new("ACP v2 provider base URLs must be absolute URIs")
+          end
+          @connection.request_typed(AgentMethod::PROVIDERS_SET, params, Wire::SetProviderResult)
         end
-        @connection.request_typed(AgentMethod::PROVIDERS_SET, params, Wire::SetProviderResult)
       end
 
       # Disables a provider after checking that the Agent does not require it.
       def providers_disable(params : Wire::DisableProviderParams) : Wire::DisableProviderResult
-        ensure_provider_support
-        if providers_list.required?(params.provider_id)
-          raise InvalidStateError.new("The Agent requires this provider")
+        @connection.with_request do
+          ensure_provider_support
+          if providers_list.required?(params.provider_id)
+            raise InvalidStateError.new("The Agent requires this provider")
+          end
+          @connection.request_typed(AgentMethod::PROVIDERS_DISABLE, params, Wire::DisableProviderResult)
         end
-        @connection.request_typed(AgentMethod::PROVIDERS_DISABLE, params, Wire::DisableProviderResult)
       end
 
       # Disables the specified non-mandatory provider.
@@ -324,6 +458,9 @@ module ACP
         raise InvalidStateError.new("Terminal authentication is already in progress") unless started
 
         begin
+          if @initializing.get
+            raise InvalidStateError.new("Cannot authenticate a terminal during initialization")
+          end
           terminal_auth_flow(method_id, approve)
         ensure
           @terminal_auth_running.set(false)
@@ -332,9 +469,11 @@ module ACP
 
       # Creates a session with typed workspace and MCP settings.
       def session_new(params : Wire::SessionNewParams) : Wire::SessionNewResult
-        caps = session_capabilities
-        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-        @connection.request_typed(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
+        @connection.with_request do
+          caps = session_capabilities
+          validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+          @connection.request_typed(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
+        end
       end
 
       # Creates a session in the given absolute directory.
@@ -344,18 +483,22 @@ module ACP
 
       # Attaches to an existing session and can request history replay.
       def session_resume(params : Wire::SessionResumeParams) : Wire::SessionResumeResult
-        caps = session_capabilities
-        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-        @connection.request_typed(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
+        @connection.with_request do
+          caps = session_capabilities
+          validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+          @connection.request_typed(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
+        end
       end
 
       # Forks a session and returns the new active session's initial state.
       def session_fork(params : Wire::SessionForkParams) : Wire::SessionForkResult
-        caps = session_capabilities
-        raise InvalidStateError.new("The Agent did not advertise session.fork") unless caps.fork
+        @connection.with_request do
+          caps = session_capabilities
+          raise InvalidStateError.new("The Agent did not advertise session.fork") unless caps.fork
 
-        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
-        @connection.request_typed(AgentMethod::SESSION_FORK, params, Wire::SessionForkResult)
+          validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+          @connection.request_typed(AgentMethod::SESSION_FORK, params, Wire::SessionForkResult)
+        end
       end
 
       # Forks a source session into the given working directory.
@@ -365,24 +508,28 @@ module ACP
 
       # Lists available sessions using the provided filter and cursor.
       def session_list(params : Wire::SessionListParams = Wire::SessionListParams.new) : Wire::SessionListResult
-        caps = session_capabilities
-        if params.archived && !caps.archive
-          raise InvalidStateError.new("The Agent did not advertise session.archive")
+        @connection.with_request do
+          caps = session_capabilities
+          if params.archived && !caps.archive
+            raise InvalidStateError.new("The Agent did not advertise session.archive")
+          end
+          if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
+            raise ArgumentError.new("The ACP v2 session list directory must be absolute")
+          end
+          @connection.request_typed(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
         end
-        if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
-          raise ArgumentError.new("The ACP v2 session list directory must be absolute")
-        end
-        @connection.request_typed(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
       end
 
       # Previews options and commands before creating or restoring a session.
       def session_options(params : Wire::SessionOptionsParams) : Wire::SessionOptionsResult
-        raise InvalidStateError.new("The Agent did not advertise session.options") unless session_capabilities.options
-        unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
-          raise ArgumentError.new("ACP v2 session directories must be absolute")
-        end
+        @connection.with_request do
+          raise InvalidStateError.new("The Agent did not advertise session.options") unless session_capabilities.options
+          unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
+            raise ArgumentError.new("ACP v2 session directories must be absolute")
+          end
 
-        @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult)
+          @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult)
+        end
       end
 
       # Previews options and commands for a new session in the given workspace.
@@ -392,54 +539,64 @@ module ACP
 
       # Queries a session and its foreground snapshot without attaching to it.
       def session_status(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionStatusResult
-        unless session_capabilities.status
-          raise InvalidStateError.new("The Agent did not advertise session.status")
-        end
+        @connection.with_request do
+          unless session_capabilities.status
+            raise InvalidStateError.new("The Agent did not advertise session.status")
+          end
 
-        @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult)
+          @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult)
+        end
       end
 
       # Sets the title of a session and returns the title the Agent stored.
       def session_set_title(session_id : String, title : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SetSessionTitleResult
-        unless session_capabilities.title
-          raise InvalidStateError.new("The Agent did not advertise session.title")
-        end
+        @connection.with_request do
+          unless session_capabilities.title
+            raise InvalidStateError.new("The Agent did not advertise session.title")
+          end
 
-        @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult)
+          @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult)
+        end
       end
 
       # Closes and archives the session while preserving its saved history.
       def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionArchiveResult
-        ensure_archive_support
-        @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult)
+        @connection.with_request do
+          ensure_archive_support
+          @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult)
+        end
       end
 
       # Restores the session to default list results without attaching to it.
       def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionUnarchiveResult
-        ensure_archive_support
-        @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult)
+        @connection.with_request do
+          ensure_archive_support
+          @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult)
+        end
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.
       # Set retry_submission only when resending the original prompt and key.
       def session_prompt(params : Wire::SessionPromptParams, *, retry_submission : Bool = false) : Wire::SessionPromptResult
-        caps = session_capabilities
-        if key = params.idempotency_key
-          unless key.size.in?(1..255)
-            raise ArgumentError.new("ACP v2 idempotency keys must contain 1 to 255 characters")
+        @connection.with_request do
+          caps = session_capabilities
+          if key = params.idempotency_key
+            unless key.size.in?(1..255)
+              raise ArgumentError.new("ACP v2 idempotency keys must contain 1 to 255 characters")
+            end
+          elsif retry_submission
+            raise ArgumentError.new("Retrying an ACP v2 submission requires its original idempotency key")
           end
-        elsif retry_submission
-          raise ArgumentError.new("Retrying an ACP v2 submission requires its original idempotency key")
+          skills = validate_prompt(caps.prompt, params.prompt)
+          # The Agent resolves keyed retries even if the command list has changed
+          # since insertion or since an earlier connection.
+          raw = if !skills.empty? && !retry_submission
+                  @connection.submit_with_skills(params, skills)
+                else
+                  @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
+                end
+          decode(Wire::SessionPromptResult, raw, AgentMethod::SESSION_PROMPT)
         end
-        skills = validate_prompt(caps.prompt, params.prompt)
-        # The Agent resolves keyed retries even if the command list has changed
-        # since insertion or since an earlier connection.
-        raw = if !skills.empty? && !retry_submission
-                @connection.submit_with_skills(params, skills)
-              else
-                @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
-              end
-        decode(Wire::SessionPromptResult, raw, AgentMethod::SESSION_PROMPT)
       end
 
       # Inserts a text prompt in a session.
@@ -450,45 +607,57 @@ module ACP
 
       # Requests foreground cancellation. The Agent identifies affected requests.
       def session_cancel(session_id : String) : Nil
-        session_capabilities
-        @connection.send_notification(AgentMethod::SESSION_CANCEL, Wire::SessionCancelParams.new(session_id))
+        @connection.with_request do
+          session_capabilities
+          @connection.send_notification(AgentMethod::SESSION_CANCEL, Wire::SessionCancelParams.new(session_id))
+        end
       end
 
       # Closes a session and its background work.
       def session_close(session_id : String) : Wire::SessionCloseResult
-        session_capabilities
-        request(AgentMethod::SESSION_CLOSE, Wire::SessionCloseParams.new(session_id), Wire::SessionCloseResult)
+        @connection.with_request do
+          session_capabilities
+          request(AgentMethod::SESSION_CLOSE, Wire::SessionCloseParams.new(session_id), Wire::SessionCloseResult)
+        end
       end
 
       # Deletes a session when the Agent advertises deletion.
       def session_delete(session_id : String) : Wire::SessionDeleteResult
-        raise InvalidStateError.new("The Agent did not advertise session deletion") unless session_capabilities.delete
+        @connection.with_request do
+          raise InvalidStateError.new("The Agent did not advertise session deletion") unless session_capabilities.delete
 
-        request(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
+          request(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
+        end
       end
 
       # Changes a session configuration option.
       def session_set_config_option(params : Wire::SessionSetConfigOptionParams) : Wire::SessionSetConfigOptionResult
-        session_capabilities
-        case params.value_type
-        when "id"
-          raise ArgumentError.new("ACP v2 configuration IDs must be strings") if params.value.as_s?.nil?
-        when "boolean"
-          raise ArgumentError.new("ACP v2 boolean option values must be booleans") if params.value.as_bool?.nil?
+        @connection.with_request do
+          session_capabilities
+          case params.value_type
+          when "id"
+            raise ArgumentError.new("ACP v2 configuration IDs must be strings") if params.value.as_s?.nil?
+          when "boolean"
+            raise ArgumentError.new("ACP v2 boolean option values must be booleans") if params.value.as_bool?.nil?
+          end
+          request(AgentMethod::SESSION_SET_CONFIG_OPTION, params, Wire::SessionSetConfigOptionResult)
         end
-        request(AgentMethod::SESSION_SET_CONFIG_OPTION, params, Wire::SessionSetConfigOptionResult)
       end
 
       # Cancels a tool call with an advertised cancel marker.
       def tool_call_cancel(session_id : String, tool_call_id : String) : Wire::ToolCallCancelResult
-        session_capabilities
-        request(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult)
+        @connection.with_request do
+          session_capabilities
+          request(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult)
+        end
       end
 
       # Cancels an Agent-owned terminal with an advertised cancel marker.
       def terminal_cancel(session_id : String, terminal_id : String) : Wire::TerminalCancelResult
-        session_capabilities
-        request(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult)
+        @connection.with_request do
+          session_capabilities
+          request(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult)
+        end
       end
 
       # Cancels a client-originated request by its JSON-RPC ID.
@@ -632,7 +801,7 @@ module ACP
           when "resource"
             raise InvalidStateError.new("The Agent did not advertise embedded context") unless caps.try(&.embedded_context)
           when "skill"
-            unless @capabilities.session.try(&.commands).try(&.skill)
+            unless capabilities.session.try(&.commands).try(&.skill)
               raise InvalidStateError.new("The Client did not advertise support for skill commands")
             end
             support = caps.try(&.skill) || raise InvalidStateError.new("The Agent did not advertise skill prompts")
@@ -655,7 +824,7 @@ module ACP
       private def terminal_auth_flow(method_id : String, approve : Wire::AuthMethod -> Bool) : Client
         method = ready.auth_methods.find { |candidate| candidate.method_id == method_id }
         transport = @transport.as?(ProcessTransport)
-        unless transport && @capabilities.auth.try(&.terminal) && method && (settings = method.terminal_settings)
+        unless transport && capabilities.auth.try(&.terminal) && method && (settings = method.terminal_settings)
           raise InvalidStateError.new("Terminal authentication requires an advertised terminal method and process transport")
         end
         raise AuthenticationError.new("Terminal authentication declined") unless approve.call(method)
@@ -666,7 +835,7 @@ module ACP
         raise AuthenticationError.new("Terminal authentication exited unsuccessfully") unless status.success?
         ready
 
-        replacement = Client.new(transport.reconnect, @info, @capabilities, mcp_request_limit: @mcp_request_limit)
+        replacement = Client.new(transport.reconnect, info, capabilities, mcp_request_limit: @mcp_request_limit)
         replacement.request_timeout = request_timeout
         replacement.prompt_timeout = prompt_timeout
         replacement.on_update = on_update
@@ -678,7 +847,7 @@ module ACP
         replacement.on_elicitation_complete = on_elicitation_complete
         replacement.on_auth_status_update = on_auth_status_update
         begin
-          replacement.initialize_connection
+          replacement.initialize_connection(meta: @connection.initialization_offer.try(&.meta))
           close
         rescue ex
           replacement.close rescue nil

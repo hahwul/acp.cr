@@ -6185,6 +6185,7 @@ end
 private class V2TestTransport < TestTransport
   getter outgoing = Channel(JSON::Any).new(64)
   getter replies = {} of String => String
+  property response_version = "2.0"
   property before_reply : (String -> Nil)?
   property after_reply : (String -> Nil)?
 
@@ -6198,7 +6199,7 @@ private class V2TestTransport < TestTransport
     @outgoing.send(JSON::Any.new(message))
     if (method = message["method"]?.try(&.as_s?)) && (id = message["id"]?) && (payload = @replies[method]?)
       @before_reply.try(&.call(method))
-      inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},#{payload}}))
+      inject_raw(%({"jsonrpc":#{@response_version.to_json},"id":#{id.to_json},#{payload}}))
       @after_reply.try(&.call(method))
     end
   end
@@ -7661,10 +7662,15 @@ end
 private class QueuedRequestTransport < V2TestTransport
   getter queued = Channel(Nil).new(1)
   getter ready_to_write = Channel(Nil).new
+  property pause_initialize = false
+  getter queued_message : JSON::Any?
 
   def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
-    @queued.send(nil)
-    @ready_to_write.receive
+    if @pause_initialize || message["method"]?.try(&.as_s?) != "initialize"
+      @queued_message = JSON::Any.new(message)
+      @queued.send(nil)
+      @ready_to_write.receive
+    end
     super(message, &preflight)
   end
 end
@@ -9413,5 +9419,277 @@ describe ACP::Protocol::Usage do
     client.try(&.close)
     feed.try(&.close)
     outgoing.try(&.close)
+  end
+end
+
+private class V2InitializationDispatchTransport < V2TestTransport
+  property read_barrier : Channel(Nil)?
+
+  def receive : JSON::Any?
+    @read_barrier.try(&.send(nil))
+    super
+  end
+end
+
+describe "ACP v2 repeated initialization" do
+  it "replaces the advertised identity and capabilities before dispatching the next Agent request" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection.info.name.should eq("agent")
+    take_v2_frame(transport.outgoing)
+    client.ext_notification("hello")
+    take_v2_frame(transport.outgoing)["method"].should eq("_hello")
+
+    info = ACP::Protocol::ClientInfo.new("updated-client", "2")
+    caps = ACP::Protocol::V2::ClientCapabilities.new(
+      elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new)
+    )
+    observed = Channel(String).new(1)
+    client.on_create_elicitation = ->(_request : ACP::Protocol::CreateElicitationParams) do
+      observed.send(client.info.name + "/" + client.initialization_result.not_nil!.info.name)
+      ACP::Protocol::CreateElicitationResult.decline
+    end
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"new-agent","version":"2"},"capabilities":{"session":{"delete":{}}}})
+    transport.after_reply = ->(method : String) do
+      if method == "initialize"
+        transport.inject_raw(%({"jsonrpc":"2.0","id":"form","method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Confirm","requestedSchema":{"type":"object","properties":{}}}}))
+      end
+    end
+    result = client.initialize_connection(info: info, capabilities: caps, meta: {"test" => JSON::Any.new(true)})
+    result.info.name.should eq("new-agent")
+    result.capabilities.session.not_nil!.delete.should_not be_nil
+    request = take_v2_frame(transport.outgoing)
+    request["params"]["info"]["name"].should eq("updated-client")
+    request["params"]["capabilities"]["elicitation"]["form"].should eq(JSON.parse("{}"))
+    request["params"]["_meta"]["test"].should eq(true)
+    take_v2_frame(observed).should eq("updated-client/new-agent")
+    take_v2_frame(transport.outgoing)["result"]["action"].should eq("decline")
+
+    transport.after_reply = nil
+    client.initialize_connection
+    request = take_v2_frame(transport.outgoing)
+    request["params"]["info"]["name"].should eq("updated-client")
+    request["params"]["capabilities"]["elicitation"]["form"].should eq(JSON.parse("{}"))
+    request["params"]["_meta"]["test"].should eq(true)
+
+    transport.after_reply = ->(method : String) do
+      if method == "initialize"
+        transport.inject_raw(%({"jsonrpc":"2.0","id":"withdrawn","method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Confirm","requestedSchema":{"type":"object","properties":{}}}}))
+      end
+    end
+    client.initialize_connection(capabilities: ACP::Protocol::V2::ClientCapabilities.new, meta: nil)
+    request = take_v2_frame(transport.outgoing)
+    request["params"]["_meta"]?.should be_nil
+    take_v2_frame(transport.outgoing)["error"]["code"].should eq(-32601)
+  ensure
+    client.try(&.close)
+  end
+
+  it "retains the previous negotiation after a peer error and permits another attempt" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    previous = client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    original = client.info
+    transport.replies["initialize"] = %("error":{"code":-32022,"message":"Request refused","data":{"requested":2,"supported":[]}})
+    error = expect_raises(ACP::JsonRpcError, "Request refused") do
+      client.initialize_connection(info: ACP::Protocol::ClientInfo.new("rejected", "1"))
+    end
+    error.unsupported_protocol_version?.should be_true
+    error.received?.should be_true
+    error.data.not_nil!["requested"].should eq(2)
+    client.info.should eq(original)
+    client.initialization_result.should eq(previous)
+    client.closed?.should be_false
+    take_v2_frame(transport.outgoing)
+
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"accepted","version":"1"},"capabilities":{"session":{}}})
+    client.initialize_connection.info.name.should eq("accepted")
+    take_v2_frame(transport.outgoing)["params"]["info"]["name"].should eq(original.name)
+
+    transport.replies["_diagnostics"] = %("error":{"code":-32601,"message":"Unknown method"})
+    expect_raises(ACP::JsonRpcError, /Unknown method/) { client.ext_method("diagnostics") }
+    expect_raises(ACP::InvalidStateError, /precede other requests/) { client.initialize_connection }
+    transport.sent_messages.map(&.["method"].as_s).should eq(["initialize", "initialize", "initialize", "_diagnostics"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "prevents regular requests and a second handshake while a repeat is awaiting its response" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    initial = client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    transport.replies.delete("initialize")
+
+    response = Channel(ACP::Protocol::V2::InitializeResult | Exception).new(1)
+    spawn do
+      result = client.initialize_connection
+      response.send(result)
+    rescue ex
+      response.send(ex)
+    end
+    repeat = take_v2_frame(transport.outgoing)
+    client.initialization_result.should eq(initial)
+    expect_raises(ACP::InvalidStateError, /in progress/) { client.initialize_connection }
+    expect_raises(ACP::InvalidStateError, /in progress/) { client.ext_method("premature") }
+    transport.sent_messages.size.should eq(2)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{repeat["id"]},"result":{"protocolVersion":2,"info":{"name":"new-agent","version":"2"},"capabilities":{"session":{}}}}))
+    take_v2_frame(response).as(ACP::Protocol::V2::InitializeResult).info.name.should eq("new-agent")
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client.session_new("/work").session_id.should eq("s")
+    expect_raises(ACP::InvalidStateError, /precede other requests/) { client.initialize_connection }
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps the repeat window open when the first regular request fails its local write check" do
+    transport = QueuedRequestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    outcome = Channel(Exception?).new(1)
+    spawn do
+      declaration = ACP::Protocol::McpServerAcp.new("missing", "unknown-server")
+      server = ACP::Protocol::V2::McpServer.acp(declaration)
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [server]))
+      outcome.send(nil)
+    rescue ex
+      outcome.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    expect_raises(ACP::InvalidStateError, /precede other requests/) { client.initialize_connection }
+    transport.ready_to_write.send(nil)
+    failure = take_v2_frame(outcome)
+    failure.should be_a(ACP::InvalidStateError)
+    failure.not_nil!.message.should match(/registered/)
+    client.initialize_connection.info.name.should eq("agent")
+    transport.sent_messages.map(&.["method"].as_s).should eq(["initialize", "initialize"])
+  ensure
+    client.try(&.close)
+    transport.try(&.ready_to_write.close)
+  end
+
+  it "ignores initialize replies until the request reaches the writer and matches the numeric ID" do
+    transport = QueuedRequestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    checkpoint = Channel(Nil).new(1)
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      checkpoint.send(nil) if method == "_checkpoint"
+    end
+    transport.pause_initialize = true
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"accepted","version":"1"}})
+    outcome = Channel(ACP::Protocol::V2::InitializeResult | Exception).new(1)
+    spawn do
+      outcome.send(client.initialize_connection)
+    rescue ex
+      outcome.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    id = transport.queued_message.not_nil!["id"]
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"result":{"protocolVersion":2,"info":{"name":"early","version":"1"}}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_checkpoint"}))
+    take_v2_frame(checkpoint)
+    client.initialization_result.not_nil!.info.name.should eq("agent")
+
+    transport.before_reply = ->(_method : String) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":"#{id}","result":{"protocolVersion":2,"info":{"name":"string-id","version":"1"}}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id}.00000000000000001,"result":{"protocolVersion":2,"info":{"name":"fractional-id","version":"1"}}}))
+    end
+    transport.ready_to_write.send(nil)
+    take_v2_frame(outcome).as(ACP::Protocol::V2::InitializeResult).info.name.should eq("accepted")
+  ensure
+    client.try(&.close)
+    transport.try(&.ready_to_write.close)
+  end
+
+  it "stops dispatch before returning a malformed initialization outcome" do
+    result = %("result":{"protocolVersion":2,"info":{"name":"new-agent","version":"1"}})
+    {"2.0" => result + %(,"error":{"code":-32602,"message":"ambiguous"}), "1.0" => result}.each do |version, reply|
+      transport = V2InitializationDispatchTransport.new
+      client = ACP::V2::Client.new(transport)
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)
+
+      received_notification = false
+      client.on_notification = ->(method : String, _params : JSON::Any?) do
+        received_notification = true if method == "_after_invalid"
+        nil
+      end
+      barrier = Channel(Nil).new(2)
+      transport.before_reply = ->(_method : String) do
+        transport.read_barrier = barrier
+        nil
+      end
+      transport.after_reply = ->(_method : String) do
+        transport.inject_raw(%({"jsonrpc":"2.0","method":"_after_invalid"}))
+        take_v2_frame(barrier)
+        take_v2_frame(barrier)
+        transport.read_barrier = nil
+        nil
+      end
+      transport.response_version = version
+      transport.replies["initialize"] = reply
+      expect_raises(ACP::ProtocolError, /malformed initialization response/) { client.initialize_connection }
+      received_notification.should be_false
+      client.closed?.should be_true
+    ensure
+      barrier.try(&.close)
+      client.try(&.close)
+    end
+  end
+
+  it "rechecks queued notifications at write time after an ambiguous repeat" do
+    transport = QueuedRequestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    transport.replies.delete("initialize")
+
+    initialization = Channel(Exception?).new(1)
+    spawn do
+      client.initialize_connection
+      initialization.send(nil)
+    rescue ex
+      initialization.send(ex)
+    end
+    repeat = take_v2_frame(transport.outgoing)
+    notification = Channel(Exception?).new(1)
+    spawn do
+      client.ext_notification("queued")
+      notification.send(nil)
+    rescue ex
+      notification.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{repeat["id"]},"result":{"protocolVersion":2}}))
+    take_v2_frame(initialization).should be_a(ACP::ProtocolError)
+    transport.ready_to_write.send(nil)
+    take_v2_frame(notification).should be_a(ACP::ConnectionClosedError)
+    transport.sent_messages.map(&.["method"].as_s).should eq(["initialize", "initialize"])
+  ensure
+    client.try(&.close)
+    transport.try(&.ready_to_write.close)
+  end
+
+  it "closes a connection immediately if a repeat times out" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    transport.replies.delete("initialize")
+    client.request_timeout = 0.02
+    expect_raises(ACP::RequestTimeoutError) { client.initialize_connection }
+    take_v2_frame(transport.outgoing)["method"].should eq("initialize")
+    transport.sent_messages.map(&.["method"].as_s).should eq(["initialize", "initialize"])
+    client.closed?.should be_true
+  ensure
+    client.try(&.close)
   end
 end

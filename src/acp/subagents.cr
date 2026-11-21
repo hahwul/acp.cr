@@ -109,8 +109,8 @@ module ACP
         @closed_roots.includes?(session_id) || @setup_by_session.has_key?(session_id)
     end
 
-    def enable_skill_commands : Nil
-      @skill_names = {} of String => Set(String)
+    def configure_skill_commands(enabled : Bool) : Nil
+      @skill_names = enabled ? {} of String => Set(String) : nil
     end
 
     def skill_advertised?(session_id : String, name : String) : Bool
