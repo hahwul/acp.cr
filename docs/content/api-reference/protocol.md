@@ -150,6 +150,10 @@ Session updates are received via the `on_update` callback. They form a discrimin
 | `CompactionUpdate` | `compaction_id : String`, `status : String`, `summary : Array(JSON::Any)?`, `error : String?`, `summary_present?`, `error_present?`, `typed_summary` (needs `session.compaction`) |
 | `CompactionSummaryChunkUpdate` | `compaction_id : String`, `content : JSON::Any`, `text : String` (needs `session.compaction`) |
 
+Use `to_content_chunk` on agent message, user message, and thought updates
+to convert their payload to a typed `ContentChunk` with the same
+`message_id` and extension metadata.
+
 `CompactionUpdate`'s `summary`, `error` and `_meta` are patches. If a field is omitted, the stored value stays as it is. If it is `null`, the value is cleared. Both cases read as nil, so use `summary_present?` / `error_present?` / `meta_present?` to tell them apart.
 
 Set `plan: ACP::Protocol::PlanCapabilities.new` in the client capabilities to

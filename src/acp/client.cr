@@ -298,14 +298,17 @@ module ACP
     # - `transport` — the transport to use for communication.
     # - `client_name` — human-readable name of the client application.
     # - `client_version` — version string of the client.
-    # - `capabilities` — client capabilities to advertise. Default: minimal.
+    # - `client_capabilities` — client capabilities to advertise. Default: minimal.
+    # - `client_info` — full implementation metadata to send during initialization.
     def initialize(
       @transport : Transport,
       client_name : String = "acp-crystal",
       client_version : String = ACP::VERSION,
       @client_capabilities : Protocol::ClientCapabilities = Protocol::ClientCapabilities.new,
+      *,
+      client_info : Protocol::ClientInfo? = nil,
     )
-      @client_info = Protocol::ClientInfo.new(client_name, client_version)
+      @client_info = client_info || Protocol::ClientInfo.new(client_name, client_version)
       @subagent_registry = SubagentRegistry.new if @client_capabilities.subagents
       start_dispatcher
     end
@@ -423,7 +426,7 @@ module ACP
       raise AuthenticationError.new("Terminal authentication exited unsuccessfully") unless status.success?
       ensure_terminal_auth_state
 
-      replacement = Client.new(process_transport.reconnect, @client_info.name, @client_info.version, @client_capabilities)
+      replacement = Client.new(process_transport.reconnect, client_capabilities: @client_capabilities, client_info: @client_info)
       replacement.request_timeout = @request_timeout
       replacement.prompt_timeout = @prompt_timeout
       replacement.on_update = @on_update

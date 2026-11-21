@@ -17,7 +17,8 @@ ACP::Client.new(
   transport : ACP::Transport,
   client_name : String = "acp-crystal",
   client_version : String = ACP::VERSION,
-  client_capabilities : ACP::Protocol::ClientCapabilities = ACP::Protocol::ClientCapabilities.new
+  client_capabilities : ACP::Protocol::ClientCapabilities = ACP::Protocol::ClientCapabilities.new,
+  client_info : ACP::Protocol::ClientInfo? = nil
 )
 ```
 
@@ -27,6 +28,10 @@ ACP::Client.new(
 | `client_name` | `String` | `"acp-crystal"` | Client application name |
 | `client_version` | `String` | `ACP::VERSION` | Client version string |
 | `client_capabilities` | `ClientCapabilities` | `ClientCapabilities.new` | Advertised client capabilities |
+| `client_info` | `ClientInfo?` | `nil` | Optional full implementation info, including display title and `_meta` |
+
+When supplied, `client_info` supplies the name and version sent in the
+handshake. The same keyword is available on `ACP.connect`.
 
 ## Lifecycle Methods
 

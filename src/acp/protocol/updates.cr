@@ -56,11 +56,15 @@ module ACP
       # A single item of content (text, image, audio, resource, resource_link).
       property content : ContentBlock
 
+      # Optional ID linking this chunk to other chunks of the same message.
+      @[JSON::Field(key: "messageId")]
+      property message_id : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
-      def initialize(@content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil, @message_id : String? = nil)
       end
 
       # Convenience: returns the text if the content is a TextContentBlock.

@@ -138,6 +138,10 @@ describe "ACP terminal authentication" do
       while IFS= read -r wire; do
         case "$wire" in
           *'"method":"initialize"'*)
+            case "$wire" in
+              *'"clientInfo":'*'"title":"Test Client"'*'"example.test/client":true'*) ;;
+              *) exit 9 ;;
+            esac
             printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"type":"terminal","id":"login","name":"Terminal login","args":["--login","two words"],"env":{"ACP_SPEC_LOGIN":"interactive"}},{"type":"terminal","id":"fail","name":"Fail","args":["--fail"]}]}}'
             ;;
           *'"method":"session/new"'*)
@@ -149,7 +153,8 @@ describe "ACP terminal authentication" do
       SH
 
     caps = ACP::Protocol::ClientCapabilities.new(auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true))
-    client = ACP.connect("/bin/sh", [script, "base argument"], env: {"ACP_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps)
+    info = ACP::Protocol::ClientInfo.new("spec-client", "1", title: "Test Client", meta: {"example.test/client" => JSON::Any.new(true)})
+    client = ACP.connect("/bin/sh", [script, "base argument"], env: {"ACP_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps, client_info: info)
     client.request_timeout = 2.0
     notification_handler = ->(_method : String, _params : JSON::Any?) { nil }
     client.on_notification = notification_handler

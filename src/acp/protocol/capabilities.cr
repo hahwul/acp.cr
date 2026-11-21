@@ -661,7 +661,11 @@ module ACP
       # Version of the implementation.
       property version : String
 
-      def initialize(@name : String, @version : String, @title : String? = nil)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
@@ -681,7 +685,11 @@ module ACP
       # Version of the implementation.
       property version : String
 
-      def initialize(@name : String, @version : String, @title : String? = nil)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
       end
 
       # Returns the display-friendly name (title if available, otherwise name).
@@ -702,7 +710,11 @@ module ACP
       # The value of the environment variable.
       property value : String
 
-      def initialize(@name : String, @value : String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@name : String, @value : String, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
@@ -716,7 +728,11 @@ module ACP
       # The value to set for the HTTP header.
       property value : String
 
-      def initialize(@name : String, @value : String)
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      def initialize(@name : String, @value : String, @meta : Hash(String, JSON::Any)? = nil)
       end
     end
 
@@ -738,11 +754,16 @@ module ACP
       # Environment variables to set when launching the MCP server.
       property env : Array(EnvVariable) = [] of EnvVariable
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @name : String,
         @command : String,
         @args : Array(String) = [] of String,
         @env : Array(EnvVariable) = [] of EnvVariable,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
       end
     end
@@ -766,10 +787,15 @@ module ACP
       # HTTP headers to set when making requests to the MCP server.
       property headers : Array(HttpHeader) = [] of HttpHeader
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @name : String,
         @url : String,
         @headers : Array(HttpHeader) = [] of HttpHeader,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
         @transport_type = "http"
       end
@@ -795,10 +821,15 @@ module ACP
       # HTTP headers to set when establishing the SSE connection.
       property headers : Array(HttpHeader) = [] of HttpHeader
 
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
       def initialize(
         @name : String,
         @url : String,
         @headers : Array(HttpHeader) = [] of HttpHeader,
+        @meta : Hash(String, JSON::Any)? = nil,
       )
         @transport_type = "sse"
       end

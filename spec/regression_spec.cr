@@ -1505,3 +1505,21 @@ describe "ACP terminal authentication logging" do
     end
   end
 end
+
+describe "ACP typed content chunks" do
+  it "retains the message ID and metadata from each message update" do
+    %w(agent_message_chunk user_message_chunk agent_thought_chunk).each do |kind|
+      wire = %({"sessionUpdate":#{kind.to_json},"messageId":"message-1","content":{"type":"text","text":"chunk"},"_meta":{"example.test/chunk":true}})
+      update = ACP::Protocol::SessionUpdate.from_json(wire)
+      wire_chunk = case update
+                   when ACP::Protocol::AgentMessageChunkUpdate, ACP::Protocol::UserMessageChunkUpdate, ACP::Protocol::AgentThoughtChunkUpdate
+                     JSON.parse(update.to_content_chunk.not_nil!.to_json)
+                   else
+                     raise "expected a chunk update"
+                   end
+
+      wire_chunk["messageId"].should eq("message-1")
+      wire_chunk["_meta"].should eq(JSON.parse(%({"example.test/chunk":true})))
+    end
+  end
+end
