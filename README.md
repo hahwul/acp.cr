@@ -60,6 +60,9 @@ To select ACP v1 or v2 Preview automatically, use `ACP.connect_negotiated`.
 It returns an initialized `ACP::Client` or `ACP::V2::Client` according to the
 Agent's selection. [Client API](https://acp.cr.hahwul.com/api-reference/client/#automatic-version-negotiation)
 
+To build a draft ACP proxy chain, compose `ACP::Proxy` and `ACP::Conductor`
+over stdio. [Proxy Chains guide](https://acp.cr.hahwul.com/user-guide/proxy-chains/)
+
 ## Examples
 
 Several examples are provided in the `examples/` directory:

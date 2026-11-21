@@ -89,11 +89,14 @@ module ACP
     # unbounded line.
     DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
 
+    private DEFAULT_BUFFER_SIZE = 256
+    private EXACT_BUFFER_SIZE   =   4
+
     # JSON-RPC method names whose `params` are treated as sensitive. The
     # transport redacts these from DEBUG-level frame logs so a session
     # with debug logging enabled does not write credentials/tokens to log
     # files. Add to this set if new methods carry secrets.
-    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update", Protocol::AgentMethod::MCP_MESSAGE}
+    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update", Protocol::AgentMethod::MCP_MESSAGE, Protocol::ProxyMethod::SUCCESSOR}
 
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).
@@ -138,6 +141,9 @@ module ACP
     # construction so the read loop's `@max_line_bytes + 1` cannot overflow.
     @max_line_bytes : Int32
 
+    # Whether every input frame is retained for lossless forwarding.
+    getter? exact_frames : Bool
+
     # Creates a new stdio transport.
     #
     # - `reader` — the IO to read incoming JSON-RPC messages from
@@ -145,19 +151,24 @@ module ACP
     # - `writer` — the IO to write outgoing JSON-RPC messages to
     #   (typically the agent process's stdin).
     # - `buffer_size` — how many messages to buffer in the channel
-    #   before back-pressuring the reader fiber. Default 256.
+    #   before back-pressuring the reader fiber. Defaults to 256 in ordinary
+    #   mode and 4 in exact mode.
     # - `max_line_bytes` — abort and log a warning if a single incoming
     #   line exceeds this many bytes. Default 16 MiB.
+    # - `exact_frames` — retain every frame as exact JSON and apply the line
+    #   limit in both directions for a relay.
     def initialize(
       @reader : IO,
       @writer : IO,
-      buffer_size : Int32 = 256,
+      buffer_size : Int32? = nil,
       max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
+      *,
+      @exact_frames : Bool = false,
     )
       # Clamp so the read loop's `@max_line_bytes + 1` can never overflow Int32
       # (and a pathological non-positive value can't disable line reads).
       @max_line_bytes = max_line_bytes.clamp(1, Int32::MAX - 1)
-      @incoming = Channel(IncomingFrame?).new(buffer_size)
+      @incoming = Channel(IncomingFrame?).new(buffer_size || (@exact_frames ? EXACT_BUFFER_SIZE : DEFAULT_BUFFER_SIZE))
       start_reader
     end
 
@@ -183,6 +194,9 @@ module ACP
       raise ProtocolError.new("ACP frames must be JSON objects") unless pull.kind.begin_object?
 
       wire = frame.json.includes?('\n') ? Protocol::WireFrame.read_raw(pull) : frame.json
+      if @exact_frames && wire.bytesize > @max_line_bytes
+        raise TransportError.new("Outgoing ACP frame exceeds the relay line limit")
+      end
       Log.debug { ">>> [REDACTED exact frame]" }
       write_line(wire + '\n', &preflight)
     end
@@ -343,7 +357,7 @@ module ACP
 
     private def track_provider_request(message : Hash(String, JSON::Any)) : Nil
       return unless (method = message["method"]?.try(&.as_s?)) &&
-                    Protocol::AgentMethod::PROVIDER_METHODS.includes?(method)
+                    (Protocol::AgentMethod::PROVIDER_METHODS.includes?(method) || method == Protocol::ProxyMethod::SUCCESSOR)
       return unless id = Protocol.extract_id(JSON::Any.new(message))
 
       @provider_log_mutex.synchronize do
@@ -476,6 +490,10 @@ module ACP
         # with '\n' here and is correctly treated as a valid, complete line
         # rather than being misclassified as oversize and dropped.
         if raw.bytesize > @max_line_bytes && !raw.ends_with?('\n')
+          if @exact_frames
+            Log.warn { "Closing relay after oversized incoming ACP frame" }
+            break
+          end
           drained = drain_oversize_line
           Log.warn { "Dropped oversized incoming line (> #{@max_line_bytes} bytes; drained #{drained} more bytes to re-sync)" }
           next
@@ -485,16 +503,7 @@ module ACP
         next if line.empty?
 
         begin
-          parsed = begin
-            value = JSON.parse(line)
-            if value.as_h?.try(&.["method"]?).try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
-              Protocol::WireFrame.new(line, exact_params: true)
-            else
-              value
-            end
-          rescue JSON::ParseException
-            Protocol::WireFrame.new(line)
-          end
+          parsed = @exact_frames ? Protocol::WireFrame.new(line, exact_params: true) : decode_frame(line)
           Log.debug { "<<< #{redact_raw_frame(line, parsed)}" }
           @incoming.send(parsed)
         rescue JSON::Error
@@ -519,6 +528,17 @@ module ACP
           # Already closed, fine.
         end
       end
+    end
+
+    private def decode_frame(line : String) : IncomingFrame
+      value = JSON.parse(line)
+      if value.as_h?.try(&.["method"]?).try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
+        Protocol::WireFrame.new(line, exact_params: true)
+      else
+        value
+      end
+    rescue JSON::ParseException
+      Protocol::WireFrame.new(line)
     end
   end
 
@@ -546,7 +566,7 @@ module ACP
     @agent_env : Process::Env
     @agent_directory : String
     @agent_stderr : IO
-    @agent_buffer_size : Int32
+    @agent_buffer_size : Int32?
 
     # Spawns an agent process with the given command and arguments,
     # and sets up the stdio transport.
@@ -556,9 +576,12 @@ module ACP
     # - `env` — optional environment variables.
     # - `chdir` — optional working directory for the process.
     # - `stderr` — where to send the agent's stderr (default: STDERR).
-    # - `buffer_size` — channel buffer size (default: 256).
+    # - `buffer_size` — channel buffer size. Defaults to 256 in ordinary
+    #   mode and 4 in exact mode.
     # - `max_line_bytes` — abort and log a warning if a single incoming
     #   line exceeds this many bytes. Default 16 MiB.
+    # - `exact_frames` — retain every frame as exact JSON and apply the line
+    #   limit in both directions for a relay.
     #
     # Raises `TransportError` if the process cannot be started.
     def initialize(
@@ -567,8 +590,10 @@ module ACP
       env : Process::Env = nil,
       chdir : String? = nil,
       stderr : IO = STDERR,
-      buffer_size : Int32 = 256,
+      buffer_size : Int32? = nil,
       max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
+      *,
+      exact_frames : Bool = false,
     )
       @agent_command = command
       @agent_args = args.dup
@@ -597,7 +622,7 @@ module ACP
         raise TransportError.new("Failed to start agent: #{ex.message}", ex)
       end
 
-      super(@process.output, @process.input, buffer_size, max_line_bytes)
+      super(@process.output, @process.input, buffer_size, max_line_bytes, exact_frames: exact_frames)
     end
 
     # Runs the configured Agent in a terminal with the approved login additions.
@@ -623,7 +648,7 @@ module ACP
     # Starts another ACP connection using the original process configuration.
     def reconnect : ProcessTransport
       ProcessTransport.new(@agent_command, @agent_args, @agent_env, @agent_directory,
-        @agent_stderr, @agent_buffer_size, @max_line_bytes)
+        @agent_stderr, @agent_buffer_size, @max_line_bytes, exact_frames: @exact_frames)
     end
 
     # Closes the transport and terminates the agent process if it's
