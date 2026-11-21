@@ -4855,3 +4855,151 @@ describe "ACP v2 exact configuration options" do
     end
   end
 end
+
+describe "ACP v2 exact command advertisements" do
+  it "preserves exact slash inputs and skill metadata in typed setup and update lists" do
+    meta = %({"example.test/count":18446744073709551615,"example.test/ratio":0.1234567890123456789})
+    command = %({"type":"command","name":"status","description":"Inspect state","input":{"type":"text","hint":"Scope","_meta":#{meta}}})
+    skill = %({"type":"skill","name":"notes","description":"Notes","path":"/work/skills/notes/SKILL.md","_meta":#{meta}})
+    future = %({"type":"future","name":"next","description":"Future","payload":[0.1234567890123456789]})
+    list = "[false,#{command},#{skill},#{future}]"
+    setup = ACP::Protocol::V2::SessionNewResult.from_json(%({"sessionId":"s","availableCommands":#{list}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"available_commands_update","availableCommands":#{list}})).typed.as(ACP::Protocol::V2::AvailableCommandsUpdate)
+
+    {setup, update}.each do |wrapper|
+      slash, advertised_skill, extension = wrapper.typed_available_commands
+      slash.name.should eq("status")
+      slash.input.not_nil!.text_hint.should eq("Scope")
+      slash.input.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      advertised_skill.skill.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      extension.raw.field("payload").not_nil!.json.should eq("[0.1234567890123456789]")
+      wrapper.available_commands_raw.json.should eq(list)
+      wrapper.to_json.should contain(%("availableCommands":#{list}))
+    end
+  end
+
+  it "ignores ambiguous names and exposes malformed optional inputs as absent" do
+    list = <<-JSON
+      [
+        {"type":"command","name":"collision","description":"First"},
+        {"type":"skill","name":"collision","description":"Second"},
+        {"type":"future","name":"old","name":"duplicate","description":"Ambiguous envelope"},
+        {"type":"command","name":"missing-hint","description":"Usable","input":{"type":"text","hint":false}},
+        {"type":"command","name":"ambiguous-input","description":"Usable","input":{"type":"text","type":"future","hint":"First"}},
+        {"type":"command","name":"valid","description":"Usable","input":{"type":"future","arbitrary":null}}
+      ]
+      JSON
+    update = ACP::Protocol::V2::AvailableCommandsUpdate.from_json(%({"availableCommands":#{list}}))
+    update.typed_available_commands.map(&.name).should eq(["missing-hint", "ambiguous-input", "valid"])
+    update.typed_available_commands.first(2).each { |command| command.input.should be_nil }
+    update.typed_available_commands.last.input.not_nil!.type.should eq("future")
+    update.typed_available_skills.should be_empty
+  end
+
+  it "preserves nested exact fields when editing the projected input hint" do
+    meta = %({"example.test/count":18446744073709551615,"example.test/ratio":0.1234567890123456789})
+    command = %({"type":"command","name":"status","description":"Inspect","input":{"type":"text","hint":"Before","_meta":#{meta}}})
+    future = %({"type":"future","name":"next","description":"Next"})
+    options = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"availableCommands":[false,#{command},#{future}]}))
+    options.available_commands.size.should eq(2)
+    hint = options.available_commands.first["input"].as_h
+    hint["hint"] = JSON::Any.new("After")
+    options.available_commands.reverse!
+    slash = options.typed_available_commands.last
+    slash.input.not_nil!.text_hint.should eq("After")
+    slash.input.not_nil!.meta_raw.not_nil!.field("example.test/count").not_nil!.json.should eq(UInt64::MAX.to_s)
+    slash.input.not_nil!.meta_raw.not_nil!.field("example.test/ratio").not_nil!.json.should eq("0.1234567890123456789")
+
+    options.available_commands = [] of JSON::Any
+    options.available_commands_raw.json.should eq("[]")
+  end
+
+  it "applies input deletion and replacement without keeping the old metadata" do
+    input = %({"type":"text","hint":"Before","_meta":{"example.test/count":18446744073709551615}})
+    command = %({"type":"command","name":"status","description":"Inspect","input":#{input}})
+    wire = %({"availableCommands":[#{command}]})
+    removed = ACP::Protocol::V2::SessionOptionsResult.from_json(wire)
+    removed.available_commands.first.as_h.delete("input")
+    removed.typed_available_commands.first.input.should be_nil
+    removed.available_commands_raw.elements?.not_nil!.first.field("input").should be_nil
+
+    replaced = ACP::Protocol::V2::SessionOptionsResult.from_json(wire)
+    # Even an identical JSON::Any view is a new input when its hash is replaced.
+    replaced.available_commands.first.as_h["input"] = JSON.parse(%({"type":"text","hint":"Before"}))
+    replaced.typed_available_commands.first.input.not_nil!.meta_raw.should be_nil
+  end
+
+  it "preserves rejected duplicate input members during unrelated edits" do
+    command = %({"type":"command","name":"status","description":"Inspect","input":{"type":"text","type":"future","hint":"Before"}})
+    options = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"availableCommands":[#{command}]}))
+    options.typed_available_commands.first.input.should be_nil
+    options.available_commands.first.as_h["description"] = JSON::Any.new("Edited")
+    options.typed_available_commands.first.input.should be_nil
+    options.available_commands.first["input"].as_h["hint"] = JSON::Any.new("After")
+    options.typed_available_commands.first.input.should be_nil
+    options.available_commands_raw.json.should contain(%("type":"text","type":"future","hint":"After"))
+  end
+
+  it "keeps a rejected command ambiguous when editing its repeated input property" do
+    wire = %({"availableCommands":[{"type":"command","name":"status","description":"Inspect","input":{"type":"text","hint":"First"},"input":{"type":"text","hint":"Second"}}]})
+    options = ACP::Protocol::V2::SessionOptionsResult.from_json(wire)
+    options.typed_available_commands.should be_empty
+    options.available_commands.first["input"].as_h["hint"] = JSON::Any.new("Edited")
+    options.typed_available_commands.should be_empty
+    options.available_commands_raw.json.should contain(%("input":{"type":"text","hint":"First"},"input":{"type":"text","hint":"Edited"}))
+  end
+
+  it "keeps the typed stdio list and prompt skill grants in sync with the raw cache" do
+    with_wide_stdio do |transport, feed, outgoing|
+      command_capabilities = ACP::Protocol::V2::CommandsCapabilities.new(skill: ACP::Protocol::V2::CommandsSkillCapabilities.new)
+      capabilities = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(commands: command_capabilities))
+      client = ACP::V2::Client.new(transport, capabilities: capabilities)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+
+      skill = %({"type":"skill","name":"notes","description":"Notes","_meta":{"example.test/rank":18446744073709551615}})
+      command = %({"type":"command","name":"status","description":"Status","input":{"type":"text","hint":"Branch","_meta":{"example.test/rank":0.1234567890123456789}}})
+      list = "[false,#{skill},#{command}]"
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"options":{},"prompt":{"skill":{}}}}}})
+        preview = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{preview["id"]},"result":{"availableCommands":[#{command}]}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s","availableCommands":#{list}}})
+      end
+      client.initialize_connection
+      preview = client.session_options("/work")
+      preview.typed_available_commands.first.input.not_nil!.meta_raw.not_nil!.field("example.test/rank").not_nil!.json.should eq("0.1234567890123456789")
+      setup = client.session_new("/work")
+      setup.available_commands_raw.json.should eq(list)
+      client.session_available_commands_raw("s").not_nil!.json.should eq(list)
+      client.session_available_commands("s").not_nil!.map(&.name).should eq(["notes", "status"])
+
+      duplicate = %("availableCommands":false,"availableCommands":[])
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionResumeResult.from_json(%({#{duplicate}})) }
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update",#{duplicate}}}})
+      next_exact_session_update(observed).update.typed.should be_nil
+      client.session_available_commands_raw("s").not_nil!.json.should eq(list)
+
+      collision = %({"type":"future","name":"notes","description":"Ambiguous"})
+      next_list = "[#{skill},#{collision},#{command}]"
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":#{next_list},"_meta":{"example.test/rank":18446744073709551615}}}})
+      update = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::AvailableCommandsUpdate)
+      update.meta_raw.not_nil!.field("example.test/rank").not_nil!.json.should eq(UInt64::MAX.to_s)
+      update.available_commands_raw.json.should eq(client.session_available_commands_raw("s").not_nil!.json)
+      update.typed_available_commands.map(&.name).should eq(["status"])
+      client.session_available_commands("s").not_nil!.map(&.name).should eq(["status"])
+
+      blocks = [ACP::Protocol::V2::SkillReference.new("notes"), ACP::Protocol::TextContentBlock.new("Review")] of ACP::Protocol::V2::PromptContentBlock
+      params = ACP::Protocol::V2::SessionPromptParams.new("s", blocks)
+      expect_raises(ACP::InvalidStateError, /not currently advertised/) { client.session_prompt(params) }
+    ensure
+      client.try(&.close)
+    end
+  end
+end

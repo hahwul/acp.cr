@@ -164,8 +164,7 @@ module ACP
       end
 
       def entries : Array(Protocol::V2::AvailableCommand)
-        values = @raw.elements?.not_nil!.compact_map { |entry| Protocol::V2::AvailableCommandsJson.typed_command(entry.json) }
-        Protocol::V2::AvailableCommandsJson.unique(values)
+        Protocol::V2::AvailableCommandsJson.decode_list(@raw)
       end
 
       def skill_names : Set(String)
@@ -200,7 +199,7 @@ module ACP
       modes = nil unless modes.try(&.object?)
       options = array_field(result, "configOptions", unique: @v2)
       if @v2
-        @commands[session_id] = Commands.new(array_field(result, "availableCommands") || EMPTY_COMMANDS)
+        @commands[session_id] = Commands.new(array_field(result, "availableCommands", unique: true) || EMPTY_COMMANDS)
       end
       if reattach && (snapshot = @sessions[session_id]?)
         snapshot.replace(modes, options)
@@ -342,7 +341,7 @@ module ACP
     end
 
     def observe_commands(session_id : String, update : String) : Nil
-      if (state = @commands[session_id]?) && !replaying?(session_id) && (commands = array_field(update, "availableCommands"))
+      if (state = @commands[session_id]?) && !replaying?(session_id) && (commands = array_field(update, "availableCommands", unique: true))
         state.replace(commands)
       end
     end

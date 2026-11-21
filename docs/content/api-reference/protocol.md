@@ -286,9 +286,17 @@ expose flat or grouped choices through `select_options`.
 
 Configuration lists, groups, and individual values retain exact JSON
 metadata. Use `ConfigOptionGroup#options_raw` or `meta_raw` to read values
-outside `JSON::Any`. Session updates and setup responses also expose
-`typed_available_commands`. Commands with `slash_command?` set expose
-their input specification, including text hints.
+outside `JSON::Any`.
+
+Session setup, option previews, and command updates expose
+`available_commands_raw` and `typed_available_commands`. The raw list
+preserves the received entries and reflects edits to the projected list.
+Replacing an input object also replaces its previous extension data.
+The typed list skips duplicate names and retains unrecognized command
+types for inspection. Use `slash_command?`
+to identify slash commands and `input` for their input specification.
+Command inputs and typed skills expose exact metadata through `meta_raw`.
+[ACP v2 slash commands](https://agentclientprotocol.com/protocol/v2/slash-commands)
 
 ## Capabilities
 
