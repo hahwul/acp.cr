@@ -61,6 +61,16 @@ module ACP
         JSON.parse(@json).as_s if @json.starts_with?('"')
       end
 
+      # Reads an object's members without narrowing their values.
+      def members? : Hash(String, RawJson)?
+        return unless object?
+
+        members = {} of String => RawJson
+        pull = JSON::PullParser.new(@json)
+        pull.read_object { |key| members[key] = RawJson.new(pull) }
+        members
+      end
+
       # Reads a member without projecting the rest of the object.
       def field(name : String) : RawJson?
         if object? && (value = WireFrame.field(@json, name))
@@ -71,6 +81,13 @@ module ACP
       # Decodes values that fit within JSON::Any.
       def to_json_any : JSON::Any
         JSON.parse(@json)
+      end
+
+      # Projects representable values into JSON::Any.
+      def to_json_any? : JSON::Any?
+        to_json_any
+      rescue JSON::ParseException
+        nil
       end
 
       # Writes the JSON value directly.
@@ -106,6 +123,66 @@ module ACP
           end
         end
         RawJson.new(JSON::PullParser.new(wire))
+      end
+    end
+
+    # :nodoc:
+    # Keeps exact JSON behind an existing mutable JSON::Any accessor.
+    struct PreservedJson
+      getter value : JSON::Any?
+      getter? partial = false
+      @source : RawJson?
+      @projected : String?
+
+      def initialize(@value : JSON::Any)
+      end
+
+      def initialize(pull : JSON::PullParser, *, project_object_members : Bool = false)
+        source = RawJson.new(pull)
+        @source = source
+        @value = source.to_json_any?
+        if @value.nil? && project_object_members && (members = source.members?)
+          projection = {} of String => JSON::Any
+          members.each do |key, member|
+            if value = member.to_json_any?
+              projection[key] = value
+            end
+          end
+          @value = JSON::Any.new(projection)
+          @partial = true
+        end
+        @projected = @value.try { |value| WireFrame.encode(value) }
+      end
+
+      def raw : RawJson
+        if value = @value
+          rendered = RawJson.new(value)
+          if source = @source
+            return source if rendered.json == @projected
+
+            merged = WireFrame.merge_projection(source.json, value, partial_object: partial?)
+            return RawJson.new(JSON::PullParser.new(merged))
+          end
+
+          rendered
+        else
+          @source.not_nil!
+        end
+      end
+
+      def to_json(builder : JSON::Builder) : Nil
+        raw.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module PreservedMetadata
+      def self.from_json(pull : JSON::PullParser) : PreservedJson
+        PreservedJson.new(pull, project_object_members: true)
+      end
+
+      def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+        value.to_json(builder)
       end
     end
 

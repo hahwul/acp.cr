@@ -48,10 +48,10 @@ module ACP
       # Presence advertises support for a feature with no named fields.
       struct Capability
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a support marker.

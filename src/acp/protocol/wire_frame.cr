@@ -9,12 +9,24 @@ module ACP
       @[JSON::Field(ignore: true)]
       @raw_fields : Hash(String, String)?
 
+      @[JSON::Field(ignore: true)]
+      @exact_fields : Hash(String, Tuple(String, String))?
+
       protected def on_unknown_json_attribute(pull, key, key_location)
         json = WireFrame.read_raw(pull)
         @json_unmapped.delete(key)
         @raw_fields.try(&.delete(key))
+        @exact_fields.try(&.delete(key))
         begin
-          @json_unmapped[key] = JSON.parse(json)
+          value = JSON.parse(json)
+          @json_unmapped[key] = value
+          if keep_exact_unmapped?(key)
+            projected = WireFrame.encode(value)
+            if json != projected
+              fields = @exact_fields ||= {} of String => Tuple(String, String)
+              fields[key] = {json, projected}
+            end
+          end
         rescue JSON::ParseException
           fields = @raw_fields ||= {} of String => String
           fields[key] = json
@@ -22,10 +34,35 @@ module ACP
       end
 
       protected def on_to_json(json)
-        super
+        @json_unmapped.each do |key, value|
+          if raw = retained_unmapped_json(key, value)
+            json.field(key) { json.raw(raw) }
+          else
+            json.field(key, value)
+          end
+        end
         @raw_fields.try &.each do |key, value|
           json.field(key) { json.raw(value) } unless @json_unmapped.has_key?(key)
         end
+      end
+
+      protected def keep_exact_unmapped?(key : String) : Bool
+        false
+      end
+
+      protected def exact_unmapped_json(key : String) : String?
+        if value = @json_unmapped[key]?
+          retained_unmapped_json(key, value) || WireFrame.encode(value)
+        else
+          raw_field(key)
+        end
+      end
+
+      private def retained_unmapped_json(key : String, value : JSON::Any) : String?
+        return unless entry = @exact_fields.try(&.[key]?)
+        return entry[0] if WireFrame.encode(value) == entry[1]
+
+        WireFrame.merge_projection(entry[0], value)
       end
 
       # A field's exact JSON when it cannot be represented as JSON::Any.
@@ -43,6 +80,45 @@ module ACP
           json.max_nesting = 512
           value.to_json(json)
         end
+      end
+
+      # Writes edits to a JSON::Any view while keeping unchanged wire values.
+      # :nodoc:
+      def self.merge_projection(source : String, value : JSON::Any, *, partial_object : Bool = false) : String
+        JSON.build do |builder|
+          builder.max_nesting = 512
+          write_merged_projection(source, value, builder, partial_object: partial_object)
+        end
+      end
+
+      private def self.write_merged_projection(source : String?, value : JSON::Any, builder : JSON::Builder, *, partial_object : Bool = false) : Nil
+        if source && source.starts_with?('{') && (fields = value.as_h?)
+          prior = {} of String => String
+          pull = JSON::PullParser.new(source)
+          pull.read_object { |key| prior[key] = read_raw(pull) }
+          builder.object do
+            if partial_object
+              prior.each do |key, member|
+                if !fields.has_key?(key) && !parse_projection(member)
+                  builder.field(key) { builder.raw(member) }
+                end
+              end
+            end
+            fields.each do |key, member|
+              builder.field(key) { write_merged_projection(prior[key]?, member, builder) }
+            end
+          end
+        elsif source && (original = parse_projection(source)) && encode(original) == encode(value)
+          builder.raw(source)
+        else
+          value.to_json(builder)
+        end
+      end
+
+      private def self.parse_projection(source : String) : JSON::Any?
+        JSON.parse(source)
+      rescue JSON::ParseException
+        nil
       end
 
       # Returns the exact payload of a successful JSON-RPC response.

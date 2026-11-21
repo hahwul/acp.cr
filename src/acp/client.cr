@@ -1942,7 +1942,15 @@ module ACP
         if obj["id"].raw.nil? && obj["method"].as_s == Protocol::AgentMethod::SESSION_UPDATE
           handle_notification(msg, wire_frame)
         else
-          return handle_agent_request(msg, wire_frame.try(&.params_json))
+          params_json = wire_frame.try(&.params_json)
+          if wire_frame && obj["method"].as_s == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+            if v2_wire?
+              params_json ||= Protocol::WireFrame.field(wire_frame.json, "params")
+            elsif wire_frame.representable
+              params_json = nil
+            end
+          end
+          return handle_agent_request(msg, params_json)
         end
       when Protocol::MessageKind::Response
         handle_response(msg, wire_frame)

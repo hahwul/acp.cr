@@ -273,12 +273,12 @@ module ACP
           if input.options.empty? || input.options.map(&.option_id).uniq.size != input.options.size
             return invalid_permission("Permission requests require a non-empty list of unique option IDs")
           end
-          if subject && subject.tool_call
-            fields = subject.json_unmapped["toolCall"].as_h.dup
-            fields["sessionUpdate"] = JSON::Any.new("tool_call_update")
-            if observe_v2_session_update(input.session_id, fields)
-              fields.delete("sessionUpdate")
-              update = Wire::SessionUpdate.new("tool_call_update", fields)
+          if subject && subject.tool_call && (raw = subject.tool_call_raw)
+            kind = Protocol::RawJson.new(JSON::Any.new("tool_call_update"))
+            wire = raw.with_field("sessionUpdate", kind).json
+            fields = Protocol::WireFrame.new(wire, exact_params: true).project_for_routing.as_h
+            if observe_v2_session_update(input.session_id, fields, wire)
+              update = Wire::SessionUpdate.from_json(wire)
               deliver_update(Wire::SessionUpdateParams.new(input.session_id, update))
             end
           end

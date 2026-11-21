@@ -535,8 +535,8 @@ module ACP
       envelope = value.as_h?
       method = envelope.try(&.["method"]?).try(&.as_s?)
       update = envelope.try(&.["params"]?).try(&.as_h?).try(&.["update"]?).try(&.as_h?) if method == Protocol::AgentMethod::SESSION_UPDATE
-      exact_params = method == Protocol::ClientMethod::MCP_MESSAGE ||
-                     (update.try(&.["sessionUpdate"]?) || update.try(&.["type"]?)).try(&.as_s?).in?("config_option_update", "config_options_update", "available_commands_update", "state_update")
+      exact_params = method.in?(Protocol::ClientMethod::MCP_MESSAGE, Protocol::ClientMethod::SESSION_REQUEST_PERMISSION) ||
+                     (update.try(&.["sessionUpdate"]?) || update.try(&.["type"]?)).try(&.as_s?).in?("config_option_update", "config_options_update", "available_commands_update", "state_update", "tool_call_update", "tool_call_content_chunk")
       result = envelope.try(&.["result"]?).try(&.as_h?)
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
       if exact_params || choices_result

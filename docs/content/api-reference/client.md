@@ -87,8 +87,11 @@ is unavailable until the Agent confirms the request failed or a successful
 resume supplies a new list.
 [ACP v2 Slash Commands](https://agentclientprotocol.com/protocol/v2/slash-commands)
 
-In a permission callback, `typed_subject` exposes the optional tool-call patch
-or command details. Future subjects retain their raw fields. A tool-call
+In a permission callback, `typed_subject` exposes the optional tool-call
+patch or command details. Use `subject_raw` for exact JSON, including future
+subjects and values outside `JSON::Any`. Tool-call patches also expose
+`raw_input_raw`, `raw_output_raw`, and `meta_raw`. Changes to a `JSON::Any`
+array are serialized from that view at its numeric precision. A tool-call
 patch from a permission request reaches `on_update` in receive order before
 the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.

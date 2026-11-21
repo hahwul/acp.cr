@@ -20,6 +20,7 @@ module ACP
         {% end %}
 
         protected def on_to_json(json : ::JSON::Builder)
+          super
           {% for name, declaration in fields %}
             json.field({{declaration[1]}}, nil) if @{{name.id}}_present && @{{name.id}}.nil?
           {% end %}
