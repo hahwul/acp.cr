@@ -55,6 +55,7 @@ describe "ACP stable v1 capabilities" do
     json.as_h.has_key?("elicitation").should be_false
     json.as_h.has_key?("plan").should be_false
     json.as_h.has_key?("subagents").should be_false
+    json.as_h.has_key?("auth").should be_false
   end
 
   it "serializes session and elicitation client capabilities under their schema keys" do
@@ -96,6 +97,30 @@ describe "ACP stable v1 capabilities" do
     bare.session_capabilities.as(ACP::Protocol::SessionCapabilities).delete?.should be_false
     bare.session_capabilities.as(ACP::Protocol::SessionCapabilities).system_prompt.as(ACP::Protocol::SessionSystemPromptCapabilities).override?.should be_false
     bare.auth.as(ACP::Protocol::AgentAuthCapabilities).logout?.should be_false
+  end
+end
+
+describe "ACP authentication methods" do
+  it "advertises terminal support and only sends authenticate for the protocol flow" do
+    transport = AutoReplyTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"authMethods":[{"id":"login","name":"Agent sign-in"},{"id":"terminal","name":"Terminal sign-in","type":"terminal"},{"id":"future","name":"Future flow","type":"future"}]})
+    transport.replies["authenticate"] = %("result":{})
+    caps = ACP::Protocol::ClientCapabilities.new(auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true))
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.request_timeout = 2.0
+    client.initialize_connection
+
+    sent(transport, "initialize")["params"]["clientCapabilities"]["auth"]["terminal"].should be_true
+    client.typed_auth_methods.map(&.id).should eq(["login", "terminal"])
+    expect_raises(ACP::InvalidStateError) { client.authenticate("terminal") }
+    expect_raises(ACP::InvalidStateError) { client.authenticate("future") }
+    expect_raises(ACP::InvalidStateError) { client.authenticate("unlisted") }
+    expect_raises(ACP::InvalidStateError) { client.logout }
+    transport.sent_messages.count { |frame| frame["method"]? == "authenticate" }.should eq(0)
+    client.authenticate("login")
+    sent(transport, "authenticate")["params"]["methodId"].should eq("login")
+  ensure
+    client.try(&.close)
   end
 end
 

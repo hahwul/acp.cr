@@ -1,5 +1,32 @@
 require "./spec_helper"
 
+describe "ACP authentication descriptors" do
+  it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
+    response = ACP::Protocol::InitializeResult.from_json(%({
+      "protocolVersion": 1,
+      "authMethods": [
+        {"id": "agent", "name": "Agent sign-in"},
+        {"type": "agent", "id": "agent-explicit", "name": "Explicit sign-in"},
+        {"type": "terminal", "id": "terminal", "name": "Terminal sign-in",
+         "args": ["--login"], "env": {"ACP_LOGIN_MODE": "terminal"}},
+        {"type": "terminal", "id": "default-terminal", "name": "Default terminal", "args": null},
+        {"type": "next", "id": "next", "name": "Future flow"}
+      ]
+    }))
+    response.auth_methods.not_nil!.size.should eq(5)
+    methods = response.typed_auth_methods
+    methods.map(&.id).should eq(["agent", "agent-explicit", "terminal", "default-terminal"])
+    methods[0].as(ACP::Protocol::AuthMethod).method_type.should be_nil
+    methods[1].as(ACP::Protocol::AuthMethod).method_type.should eq("agent")
+    terminal = methods[2].as(ACP::Protocol::TerminalAuthMethod)
+    terminal.args.should eq(["--login"])
+    terminal.env.should eq({"ACP_LOGIN_MODE" => "terminal"})
+    JSON.parse(terminal.to_json)["type"].should eq("terminal")
+    methods[3].as(ACP::Protocol::TerminalAuthMethod).args.should be_empty
+    methods[3].as(ACP::Protocol::TerminalAuthMethod).env.should be_empty
+  end
+end
+
 describe "ACP identified plan types" do
   it "round-trips checklist plans with independent plan and update metadata" do
     wire = JSON.parse(<<-JSON)

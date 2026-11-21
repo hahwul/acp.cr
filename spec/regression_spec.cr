@@ -1489,3 +1489,19 @@ describe "ACP::Client requests pending at disconnect" do
     transport.wait.exit_code.should eq(3)
   end
 end
+
+# Debug logs need to hide launch descriptors while keeping the actual
+# initialize response available to the application.
+describe "ACP terminal authentication logging" do
+  it "redacts authentication methods from transport logs only" do
+    frame = %({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"type":"terminal","id":"t","name":"Terminal","env":{"EXAMPLE_VALUE":"sample-value"}}]}})
+    Log.capture("acp.transport", level: :debug) do |logs|
+      transport = ACP::StdioTransport.new(IO::Memory.new(frame + "\n"), IO::Memory.new)
+      transport.receive.not_nil!["result"]["authMethods"][0]["env"]["EXAMPLE_VALUE"].should eq("sample-value")
+      logs.check(:debug, /"authMethods":"\[REDACTED\]"/)
+      logs.entry.message.should_not contain("sample-value")
+    ensure
+      transport.try(&.close)
+    end
+  end
+end

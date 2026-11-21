@@ -177,7 +177,8 @@ ACP::Protocol::ClientCapabilities.new(
   session : ClientSessionCapabilities? = nil,
   elicitation : ElicitationCapabilities? = nil,
   plan : PlanCapabilities? = nil,
-  subagents : SubagentCapabilities? = nil
+  subagents : SubagentCapabilities? = nil,
+  auth : ClientAuthCapabilities? = nil
 )
 ```
 
@@ -189,6 +190,7 @@ ACP::Protocol::ClientCapabilities.new(
 | `elicitation` | `ElicitationCapabilities?` | Supported `elicitation/create` modes (`form`, `url`) |
 | `plan` | `PlanCapabilities?` | Support for identified plan updates and removals |
 | `subagents` | `SubagentCapabilities?` | Support for child sessions and session-directed messages |
+| `auth` | `ClientAuthCapabilities?` | Opt-in terminal authentication |
 
 Nothing is advertised by default. Only set a capability once the client handles it.
 

@@ -228,6 +228,22 @@ module ACP
       end
     end
 
+    # Authentication flows the client can perform.
+    struct ClientAuthCapabilities
+      include JSON::Serializable
+
+      # Whether the client can run the configured agent in a terminal for login.
+      property? terminal : Bool = false
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the client's advertised authentication capabilities.
+      def initialize(@terminal : Bool = false, @meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # The full set of capabilities the client advertises to the agent
     # during the `initialize` handshake.
     #
@@ -260,6 +276,9 @@ module ACP
       # Support for Agent-owned child sessions.
       property subagents : SubagentCapabilities?
 
+      # Authentication flows supported by this client.
+      property auth : ClientAuthCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -272,6 +291,7 @@ module ACP
         @elicitation : ElicitationCapabilities? = nil,
         @plan : PlanCapabilities? = nil,
         @subagents : SubagentCapabilities? = nil,
+        @auth : ClientAuthCapabilities? = nil,
       )
       end
     end
@@ -820,8 +840,8 @@ module ACP
 
     # ─── Auth Method ──────────────────────────────────────────────────
 
-    # Describes an available authentication method.
-    # See: https://agentclientprotocol.com/protocol/initialization
+    # Describes an Agent-managed authentication method for `authenticate`.
+    # See: https://agentclientprotocol.com/protocol/v1/authentication
     struct AuthMethod
       include JSON::Serializable
 
@@ -834,6 +854,10 @@ module ACP
       # Optional description providing more details.
       property description : String?
 
+      # Explicit wire type. Omission also selects Agent-managed authentication.
+      @[JSON::Field(key: "type")]
+      property method_type : String?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -843,7 +867,66 @@ module ACP
         @name : String,
         @description : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
+        @method_type : String? = nil,
       )
+      end
+    end
+
+    # Describes login arguments and environment for the configured Agent program.
+    struct TerminalAuthMethod
+      include JSON::Serializable
+
+      # Always `terminal` for this flow.
+      @[JSON::Field(key: "type", ignore_deserialize: true)]
+      getter method_type : String = "terminal"
+
+      # Unique identifier for this authentication method.
+      property id : String
+
+      # Human-readable name of the login flow.
+      property name : String
+
+      # Optional description providing more details.
+      property description : String?
+
+      # Additional arguments for the configured Agent executable.
+      property args : Array(String) = [] of String
+
+      # Values to override in the configured Agent's environment.
+      property env : Hash(String, String) = {} of String => String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates a terminal login descriptor.
+      def initialize(
+        @id : String,
+        @name : String,
+        @description : String? = nil,
+        @args : Array(String) = [] of String,
+        @env : Hash(String, String) = {} of String => String,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+    end
+
+    # The authentication methods supported by ACP v1.
+    alias AuthenticationMethod = AuthMethod | TerminalAuthMethod
+
+    # Parses the implemented authentication methods, skipping unknown wire types.
+    def self.typed_auth_methods(methods : Array(JSON::Any)?) : Array(AuthenticationMethod)
+      return [] of AuthenticationMethod unless methods
+
+      methods.compact_map do |value|
+        next unless fields = value.as_h?
+
+        case fields["type"]?.try(&.raw)
+        when nil, "agent" then AuthMethod.from_json(value.to_json)
+        when "terminal"   then TerminalAuthMethod.from_json(value.to_json)
+        end
+      rescue JSON::ParseException
+        nil
       end
     end
   end

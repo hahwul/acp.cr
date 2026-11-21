@@ -114,3 +114,67 @@ describe "ACP::ProcessTransport spawn failures" do
     expect_raises(ACP::TransportError) { ACP.connect("acp-no-such-agent-r31") }
   end
 end
+
+describe "ACP terminal authentication" do
+  it "uses the configured invocation and reconnects after an approved login" do
+    directory = File.join(Dir.tempdir, "acp-terminal-auth-#{Random::Secure.hex(8)}")
+    Dir.mkdir(directory)
+    script = File.join(directory, "agent.sh")
+    marker = File.join(directory, "authorized")
+    File.write(script, <<-'SH')
+      #!/bin/sh
+      [ "$1" = "base argument" ] || exit 4
+      case "$2" in
+        --login)
+          [ "$3" = "two words" ] && [ "$ACP_SPEC_LOGIN" = "interactive" ] || exit 5
+          printf approved > authorized
+          exit 0
+          ;;
+        --fail)
+          exit 6
+          ;;
+      esac
+      [ "$ACP_SPEC_LOGIN" = "base" ] || exit 7
+      while IFS= read -r wire; do
+        case "$wire" in
+          *'"method":"initialize"'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"type":"terminal","id":"login","name":"Terminal login","args":["--login","two words"],"env":{"ACP_SPEC_LOGIN":"interactive"}},{"type":"terminal","id":"fail","name":"Fail","args":["--fail"]}]}}'
+            ;;
+          *'"method":"session/new"'*)
+            [ -f authorized ] || exit 8
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"logged-in"}}'
+            ;;
+        esac
+      done
+      SH
+
+    caps = ACP::Protocol::ClientCapabilities.new(auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true))
+    client = ACP.connect("/bin/sh", [script, "base argument"], env: {"ACP_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps)
+    client.request_timeout = 2.0
+    notification_handler = ->(_method : String, _params : JSON::Any?) { nil }
+    client.on_notification = notification_handler
+
+    expect_raises(ACP::AuthenticationError, /declined/) { client.authenticate_terminal("login") { false } }
+    File.exists?(marker).should be_false
+    expect_raises(ACP::AuthenticationError, /unsuccessfully/) { client.authenticate_terminal("fail") { true } }
+    File.exists?(marker).should be_false
+    client.closed?.should be_false
+
+    replacement = client.authenticate_terminal("login") do |method|
+      method.args.should eq(["--login", "two words"])
+      method.env.should eq({"ACP_SPEC_LOGIN" => "interactive"})
+      true
+    end
+    File.read(marker).should eq("approved")
+    client.closed?.should be_true
+    replacement.request_timeout.should eq(2.0)
+    replacement.on_notification.should eq(notification_handler)
+    replacement.session_new(directory).session_id.should eq("logged-in")
+  ensure
+    replacement.try(&.close)
+    client.try(&.close)
+    File.delete(marker) if marker && File.exists?(marker)
+    File.delete(script) if script && File.exists?(script)
+    Dir.delete(directory) if directory && Dir.exists?(directory)
+  end
+end

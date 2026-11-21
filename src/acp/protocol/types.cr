@@ -188,6 +188,11 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
       )
       end
+
+      # Supported Agent-managed and terminal authentication descriptors.
+      def typed_auth_methods : Array(AuthenticationMethod)
+        Protocol.typed_auth_methods(@auth_methods)
+      end
     end
 
     # ─── Authenticate Method ──────────────────────────────────────────
