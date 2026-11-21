@@ -225,17 +225,15 @@ module ACP
       # Agent notification marking the end of a requested history replay.
       struct ReplayCompleteUpdate
         include JSON::Serializable
+        include LosslessMetadata
 
         # Discriminator for this session update.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "replay_complete"
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates a replay completion update.
-        def initialize(@meta : Hash(String, JSON::Any)? = nil)
+        def initialize(meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
 
@@ -317,7 +315,7 @@ module ACP
           when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
             MessageChunkUpdate.from_json(WireFrame.encode(self))
           when "replay_complete"
-            ReplayCompleteUpdate.from_json(to_json)
+            ReplayCompleteUpdate.from_json(WireFrame.encode(self))
           when "cursor_update"
             CursorUpdate.from_json(WireFrame.encode(self))
           when "tool_call_update"
@@ -345,7 +343,7 @@ module ACP
           when "plan_removed"
             Protocol::PlanRemovedUpdate.from_json(WireFrame.encode(self))
           when "notice"
-            Protocol::NoticeUpdate.from_json(to_json)
+            Protocol::NoticeUpdate.from_json(WireFrame.encode(self))
           when "available_commands_update"
             AvailableCommandsUpdate.from_json(WireFrame.encode(self))
           when "config_option_update"

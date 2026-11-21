@@ -863,12 +863,13 @@ module ACP
 
     # ─── Notice ──────────────────────────────────────────────────────
 
-    # A live, user-facing notice that is not part of session history. Only
-    # sent to clients that advertise `clientCapabilities.session.notices`.
-    # Severity is a presentation hint only; it never fails a request.
-    # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-notices
+    # A live, user-facing notice scoped to one event. ACP v1 delivery requires
+    # the Client's `clientCapabilities.session.notices` capability.
+    # Severity is a presentation hint and leaves request and session state alone.
+    # See: https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-notices
     struct NoticeUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
 
       # "info", "warning", "error", or a future/`_`-prefixed value (required).
       property severity : String
@@ -877,19 +878,24 @@ module ACP
       property title : String
 
       # Optional supporting detail.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property description : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a notice with an open severity value.
       def initialize(
         @severity : String,
         @title : String,
         @description : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "notice"
+        self.meta = meta
+      end
+
+      private def after_initialize : Nil
+        if @title.empty?
+          raise JSON::ParseException.new("Notice title must not be empty", 0, 0)
+        end
       end
     end
 
