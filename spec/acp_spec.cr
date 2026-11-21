@@ -6246,6 +6246,135 @@ describe "ACP draft authentication status" do
   end
 end
 
+describe "ACP draft session status" do
+  it "queries a v1 session without making it active and supports a closed wrapper" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"status":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"active"})
+    transport.replies["session/status"] = %("result":{"status":"_future","_meta":{"example.test/source":"fixture"}})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    ACP::Session.create(client, "/work")
+    take_v2_frame(transport.outgoing)
+    other = ACP::Session.new(client, "other")
+    other.close(notify_agent: false)
+
+    metadata = {"example.test/source" => JSON::Any.new("client")}
+    result = other.status(meta: metadata)
+    result.status.should eq("saved")
+    result.raw_status.should eq("_future")
+    result.open?.should be_false
+    result.meta.not_nil!["example.test/source"].should eq("fixture")
+    wire = take_v2_frame(transport.outgoing)
+    wire["method"].should eq("session/status")
+    wire["params"].should eq(JSON.parse(%({"sessionId":"other","_meta":{"example.test/source":"client"}})))
+    client.session_id.should eq("active")
+    client.state.should eq(ACP::ClientState::SessionActive)
+
+    transport.replies["session/status"] = %("error":{"code":-32002,"message":"Resource not found","data":{"sessionId":"missing"}})
+    error = expect_raises(ACP::JsonRpcError) { client.session_status("missing") }
+    error.code.should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    error.received?.should be_true
+    error.data.not_nil!["sessionId"].should eq("missing")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a v2 foreground snapshot local to its response" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"status":{}}}})
+    transport.replies["session/status"] = %("result":{"status":"open","state":{"state":"idle","stopReason":"end_turn"}})
+    updates = Channel(String).new(2)
+    client = ACP::V2::Client.new(transport)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      updates.send(note.update.session_update)
+      nil
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    result = client.session_status("elsewhere")
+    result.open?.should be_true
+    result.state.not_nil!.stop_reason.should eq("end_turn")
+    JSON.parse(result.to_json)["state"].should eq(JSON.parse(%({"state":"idle","stopReason":"end_turn"})))
+    request = take_v2_frame(transport.outgoing)
+    request["method"].should eq("session/status")
+    request["params"]["sessionId"].should eq("elsewhere")
+
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+    take_v2_frame(updates).should eq("subagent_update")
+    expect_raises(ACP::InvalidStateError) { client.session_status("child") }
+    transport.sent_messages.size.should eq(2)
+  ensure
+    client.try(&.close)
+  end
+
+  it "leaves omitted, null, and malformed v2 foreground state unknown" do
+    {"", %(,"state":null), %(,"state":[]), %(,"state":{}), %(,"state":{"state":42})}.each do |state|
+      result = ACP::Protocol::V2::SessionStatusResult.from_json(%({"status":"open"#{state},"_meta":true}))
+      result.open?.should be_true
+      result.state.should be_nil
+      result.meta.should be_nil
+    end
+  end
+
+  it "decodes v2 status over stdio before interpreting wide foreground fields" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::V2::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 2.0
+    spawn do
+      {
+        %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"status":{}}}}),
+        %({"status":"open","state":18446744073709551615}),
+        %({"status":"open","state":{"state":"running","_meta":{"counter":18446744073709551615}}}),
+      }.each do |result|
+        break unless line = outgoing.gets
+
+        id = JSON.parse(line)["id"]
+        feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"result":#{result}})
+      end
+    end
+    client.initialize_connection
+    client.session_status("s").state.should be_nil
+    snapshot = client.session_status("s").state.not_nil!
+    snapshot.state.should eq("running")
+    snapshot.raw_field("_meta").should eq(%({"counter":18446744073709551615}))
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "does not send requests without a capability marker object" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"status":true}}})
+    v1 = ACP::Client.new(transport)
+    v1.initialize_connection
+    expect_raises(ACP::InvalidStateError, /sessionCapabilities.status/) { v1.session_status("s") }
+    transport.sent_messages.size.should eq(1)
+
+    v2_transport = V2TestTransport.new
+    v2 = ACP::V2::Client.new(v2_transport)
+    v2.initialize_connection
+    expect_raises(ACP::InvalidStateError, /session.status/) { v2.session_status("s") }
+    v2_transport.sent_messages.size.should eq(1)
+
+    marker = ACP::Protocol::SessionStatusCapabilities.new
+    v1_caps = ACP::Protocol::SessionCapabilities.new(status: marker)
+    v2_caps = ACP::Protocol::V2::SessionCapabilities.new(status: marker)
+    JSON.parse(v1_caps.to_json)["status"].should eq(JSON.parse("{}"))
+    JSON.parse(v2_caps.to_json)["status"].should eq(JSON.parse("{}"))
+    ACP::Protocol::SessionCapabilities.from_json(%({"status":{"_meta":true}})).status.not_nil!.meta.should be_nil
+    ACP::Protocol::V2::SessionCapabilities.from_json(%({"status":{"_meta":null}})).status.not_nil!.meta.should be_nil
+  ensure
+    v1.try(&.close)
+    v2.try(&.close)
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

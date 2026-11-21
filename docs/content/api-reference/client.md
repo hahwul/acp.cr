@@ -206,6 +206,20 @@ client.session_load(
 
 Resumes a previous session by ID.
 
+### `#session_status` (draft)
+
+Call `client.session_status(session_id)` to query a session without attaching
+to it. The Agent advertises support through `sessionCapabilities.status` in v1
+or `session.status` in v2. `Session#status` queries the wrapped v1 session ID.
+Pass `meta:` to include extension metadata in the request.
+
+`status` returns `open` for a session in memory and `saved` for a persisted
+session or a future status. `raw_status` preserves the Agent's value. In v2,
+`state` can also carry a foreground snapshot. A missing snapshot leaves the
+foreground state unknown. An unknown session ID raises an `ACP::JsonRpcError`
+with code `-32002`.
+[ACP Session Status Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-status.mdx)
+
 ### `#session_delete`
 
 ```crystal

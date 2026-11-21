@@ -3,6 +3,7 @@ require "./client"
 require "./protocol/v2/methods"
 require "./protocol/v2/interactions"
 require "./protocol/v2/updates"
+require "./protocol/v2/session_status"
 
 module ACP
   # Explicit opt-in API for the ACP v2 Preview wire protocol.
@@ -19,6 +20,10 @@ module ACP
 
         def initialization_result : Protocol::V2::InitializeResult?
           v2_initialization_result
+        end
+
+        def query_session_status(params : Wire::SessionStatusParams) : Wire::SessionStatusResult
+          send_typed_request(AgentMethod::SESSION_STATUS, params, Wire::SessionStatusResult)
         end
 
         private def v2_wire? : Bool
@@ -263,6 +268,15 @@ module ACP
           raise ArgumentError.new("The ACP v2 session list directory must be absolute")
         end
         request(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
+      end
+
+      # Queries a session and its foreground snapshot without attaching to it.
+      def session_status(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionStatusResult
+        unless session_capabilities.status
+          raise InvalidStateError.new("The Agent did not advertise session.status")
+        end
+
+        @connection.query_session_status(Wire::SessionStatusParams.new(session_id, meta))
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.

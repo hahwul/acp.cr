@@ -146,6 +146,10 @@ module ACP
         @[JSON::Field(key: "systemPrompt")]
         property system_prompt : Protocol::SessionSystemPromptCapabilities?
 
+        # When present, the Agent supports the draft session/status query.
+        @[JSON::Field(converter: ::ACP::Protocol::SessionStatusCapabilities)]
+        property status : Protocol::SessionStatusCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -158,6 +162,7 @@ module ACP
           @additional_directories : Protocol::SessionAdditionalDirectoriesCapabilities? = nil,
           @system_prompt : Protocol::SessionSystemPromptCapabilities? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @status : Protocol::SessionStatusCapabilities? = nil,
         )
         end
       end
