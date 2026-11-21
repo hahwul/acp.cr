@@ -32,6 +32,10 @@ module ACP
 
         private def handle_session_update(params : JSON::Any?, params_json : String?) : Nil
           if params
+            raw_update = params.as_h?.try(&.["update"]?).try(&.as_h?)
+            suggestion_update = raw_update.try(&.["sessionUpdate"]?).try(&.as_s?) == "prompt_suggestions_update"
+            return if suggestion_update && !@suggestion_content_types
+
             begin
               update = Protocol::V2::SessionUpdateParams.from_json(params_json || Protocol::WireFrame.encode(params))
               if params_json && update.update.session_update.in?("state_update", "subagent_update")
@@ -41,12 +45,22 @@ module ACP
               if update.update.session_update == "cursor_update" && (cursor = update.update.typed.as?(Protocol::CursorUpdate))
                 observe_cursor_update(update.session_id, cursor)
               end
+              if suggestion_update && (types = @suggestion_content_types)
+                suggestions = update.update.typed.as?(Wire::PromptSuggestionsUpdate) || return
+                suggestions.suggestions.select! { |suggestion| suggestion.allowed?(types) }
+                suggestion_list = JSON.parse(Protocol::WireFrame.encode(suggestions.suggestions))
+                update.update.json_unmapped["suggestions"] = suggestion_list
+              end
             rescue ex : JSON::ParseException
               ClientLog.warn { "Failed to parse v2 session/update: #{ex.message}" }
-              deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
+              deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json || suggestion_update
               return
             end
             return if deliver_update(update)
+            if suggestion_list
+              deliver_suggestion_notification(params, params_json, suggestion_list)
+              return
+            end
           end
           deliver_raw_notification(Protocol::V2::ClientMethod::SESSION_UPDATE, params) unless params_json
         end
@@ -133,8 +147,9 @@ module ACP
         @info : Wire::Implementation = Wire::Implementation.new("acp-crystal", ACP::VERSION),
         @capabilities : Wire::ClientCapabilities = Wire::ClientCapabilities.new,
       )
+        session = Protocol::ClientSessionCapabilities.new(prompt_suggestions: @capabilities.session.try(&.prompt_suggestions))
         @connection = Connection.new(@transport,
-          client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation))
+          client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation, session: session))
         @connection.on_agent_request = ->handle_extension_request(String, JSON::Any)
       end
 

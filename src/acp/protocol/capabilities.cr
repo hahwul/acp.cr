@@ -13,6 +13,7 @@ require "./session_status"
 require "./session_title"
 require "./session_archive"
 require "./session_options"
+require "./prompt_suggestions"
 
 module ACP
   module Protocol
@@ -140,6 +141,10 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::SessionCursorsCapabilities)]
       property cursors : SessionCursorsCapabilities?
 
+      # Draft prompt suggestions presented to the user.
+      @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsCapabilities))]
+      property prompt_suggestions : PromptSuggestionsCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -150,6 +155,7 @@ module ACP
         @notices : NoticeCapabilities? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
         @cursors : SessionCursorsCapabilities? = nil,
+        @prompt_suggestions : PromptSuggestionsCapabilities? = nil,
       )
       end
     end

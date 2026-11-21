@@ -51,6 +51,36 @@ module ACP
         end
       end
 
+      # Advertises which prompt suggestions the client can present.
+      alias PromptSuggestionsCapabilities = Protocol::PromptSuggestionsCapabilities
+
+      # Presence advertises support for suggestions containing images.
+      alias PromptSuggestionsImageCapabilities = Protocol::PromptSuggestionsImageCapabilities
+
+      # Presence advertises support for suggestions containing audio.
+      alias PromptSuggestionsAudioCapabilities = Protocol::PromptSuggestionsAudioCapabilities
+
+      # Presence advertises support for suggestions containing embedded resources.
+      alias PromptSuggestionsEmbeddedContextCapabilities = Protocol::PromptSuggestionsEmbeddedContextCapabilities
+
+      # Session features that the v2 client can present.
+      struct ClientSessionCapabilities
+        include JSON::Serializable
+        include LosslessUnmapped
+
+        # Presence advertises support for draft prompt suggestions.
+        @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsCapabilities))]
+        property prompt_suggestions : PromptSuggestionsCapabilities?
+
+        # Extension metadata scoped to the session capabilities.
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates the session capability group.
+        def initialize(@prompt_suggestions : PromptSuggestionsCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
       # Optional capabilities sent by the v2 client during initialize.
       struct ClientCapabilities
         include JSON::Serializable
@@ -61,6 +91,10 @@ module ACP
         # Supported elicitation modes.
         property elicitation : Protocol::ElicitationCapabilities?
 
+        # Session features supported by the client.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::V2::ClientSessionCapabilities))]
+        property session : ClientSessionCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -70,6 +104,7 @@ module ACP
           @auth : ClientAuthCapabilities? = nil,
           @elicitation : Protocol::ElicitationCapabilities? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @session : ClientSessionCapabilities? = nil,
         )
         end
       end
