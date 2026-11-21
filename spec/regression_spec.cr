@@ -2505,3 +2505,180 @@ describe "ACP session choice state" do
     end
   end
 end
+
+describe "ACP v2 command snapshot retirement" do
+  it "retires workspace and commands on wide success metadata and a missing session error" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"delete":{}}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        commands = %([{"type":"command","name":"status","description":"Status"}])
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s","availableCommands":#{commands}}})
+        close = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{close["id"]},"result":{"_meta":{"wide":18446744073709551615}}})
+        resume = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"state_update","state":"idle"}}})
+        feed.puts %({"jsonrpc":"2.0","id":#{resume["id"]},"result":{"availableCommands":#{commands}}})
+        remove = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{remove["id"]},"error":{"code":-32002,"message":"Missing","data":{"sessionId":"s","extension":18446744073709551615}}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+      client.session_close("s").meta.should be_nil
+      client.session_available_commands("s").should be_nil
+      client.session_workspace("s").should be_nil
+
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+      client.session_available_commands("s").not_nil!.first.name.should eq("status")
+      client.session_delete("s").meta.should be_nil
+      client.session_available_commands_raw("s").should be_nil
+      client.session_workspace("s").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "invalidates commands on a timed-out close and retires state on the late reply" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"command","name":"status","description":"Status"}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    client.session_available_commands("s").not_nil!.first.name.should eq("status")
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    client.session_available_commands("s").should be_nil
+    next_answer(transport)["method"].as_s.should eq("initialize")
+    next_answer(transport)["method"].as_s.should eq("session/new")
+    close = next_answer(transport)
+    close["method"].as_s.should eq("session/close")
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.session_workspace("s").should be_nil
+    client.session_available_commands_raw("s").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "publishes staged live commands after a late retirement failure" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"command","name":"old","description":"Old"}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    close = next_answer(transport)
+    close["method"].as_s.should eq("session/close")
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"command","name":"live","description":"Live"}]}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.session_available_commands("s").should be_nil
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"error":{"code":-32800,"message":"Cancelled"}}))
+    choice_state_barrier(client, transport)
+    client.session_available_commands("s").not_nil!.map(&.name).should eq(["live"])
+    client.session_workspace("s").not_nil!.cwd.should eq("/work")
+
+    # A malformed response proves neither failure nor successful retirement.
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    close = transport.sent_messages.reverse.find! { |frame| frame["method"]?.try(&.as_s?) == "session/close" }
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{},"error":{"code":-32800}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.session_available_commands("s").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a newer attachment when an earlier retirement eventually succeeds" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"command","name":"old","description":"Old"}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    close = next_answer(transport)
+    close["method"].as_s.should eq("session/close")
+    client.request_timeout = 2.0
+    transport.replies["session/resume"] = %("result":{"availableCommands":[{"type":"command","name":"new","description":"New"}]})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("s").not_nil!.cwd.should eq("/work")
+    client.session_available_commands("s").not_nil!.map(&.name).should eq(["new"])
+  ensure
+    client.try(&.close)
+  end
+end
+
+describe "Exact ACP v2 command advertisements" do
+  it "keeps precise commands over stdio and still delivers ordinary raw notifications" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      slash = %({"type":"command","name":"review","description":"Review","input":{"type":"text","hint":"branch","extra":18446744073709551615}})
+      extension = %({"type":"_future","name":"next","description":"Next","value":0.12345678901234567891})
+      live = %({"type":"_future","name":"live","description":"Live","value":0.12345678901234567892})
+      delivered = Channel(JSON::Any).new(1)
+      client.on_notification = ->(method : String, params : JSON::Any?) do
+        delivered.send(params) if params && method == "session/update"
+        nil
+      end
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s","availableCommands":[#{slash},#{extension}]}})
+      end
+      client.initialize_connection
+      setup = client.session_new("/work")
+      setup.typed_available_commands.map(&.name).should eq(["review", "next"])
+      setup.typed_available_commands.first.input.not_nil!.text_hint.should eq("branch")
+      client.session_available_commands_raw("s").not_nil!.json.should eq("[#{slash},#{extension}]")
+      input = client.session_available_commands("s").not_nil!.first.input.not_nil!
+      input.raw_field("extra").should eq("18446744073709551615")
+      input.text_hint.should eq("branch")
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[#{live}]}}})
+      select
+      when params = delivered.receive
+        params["update"]["availableCommands"][0]["name"].as_s.should eq("live")
+      when timeout(2.seconds)
+        fail "command update did not reach the generic notification handler"
+      end
+      client.session_available_commands_raw("s").not_nil!.json.should eq("[#{live}]")
+      client.session_available_commands("s").not_nil!.map(&.name).should eq(["live"])
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","futureEnvelopeField":18446744073709551615,"params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[#{extension}]}}})
+      select
+      when params = delivered.receive
+        params["update"]["availableCommands"][0]["name"].as_s.should eq("next")
+      when timeout(2.seconds)
+        fail "representable params did not reach the generic notification handler"
+      end
+      client.session_available_commands_raw("s").not_nil!.json.should eq("[#{extension}]")
+    ensure
+      client.try(&.close)
+    end
+  end
+end

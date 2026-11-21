@@ -15,6 +15,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Treat ACP v2 close and delete responses for missing sessions as successful. Apply runtime cleanup even when response metadata contains wide numbers.
 - Track ACP v1 and v2 session choices per session. Setup, configuration replies, and Agent updates replace the cached lists in receive order. V2 exposes the exact JSON for extension options.
 - Preserve native MCP-over-ACP declarations in the typed `SessionNewParams` constructor.
 - Preserve full `UInt64` values when stdio dispatches typed ACP usage updates, terminal requests, and elicitation forms.
@@ -37,6 +38,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Read the latest ACP v2 command advertisements per session, with exact JSON for extension commands and one shared list for skill validation.
 - Allow ACP v2 clients to repeat initialization before their first other request and update advertised capabilities on success.
 - Expose draft ACP token usage from v1 prompt results and v2 idle state snapshots, with full unsigned 64-bit counters.
 - Add draft ACP Proxy Chains for v1 and v2 Preview. `ACP::Conductor` routes terminal and nested chains, and `ACP::Proxy` can forward or handle messages in either direction.

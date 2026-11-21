@@ -8194,6 +8194,90 @@ describe "ACP draft prompt suggestions" do
   end
 end
 
+describe "ACP v2 live command advertisements" do
+  it "keeps complete command lists per attached session through setup, preview, resume, and close" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"options":{},"fork":{},"delete":{}}}})
+    first = %({"type":"command","name":"review","description":"Review","input":{"type":"text","hint":"branch"}})
+    second = %({"type":"command","name":"plan","description":"Plan"})
+    invalid = %({"type":"command","name":"invalid name","description":"Invalid"})
+    duplicate = %({"type":"_custom","name":"review","description":"Duplicate"})
+    extension = %({"type":"_future","name":"show","description":"Extension"})
+    skill = %({"type":"skill","name":"skill","description":"Not negotiated"})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[#{first},#{second},#{invalid},#{duplicate},#{extension},#{skill}]})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_available_commands("s").should be_nil
+    client.session_available_commands_raw("s").should be_nil
+    client.session_new("/work")
+    client.session_available_commands("s").not_nil!.map(&.name).should eq(["plan", "show"])
+    client.session_available_commands("s").not_nil!.last.slash_command?.should be_false
+    client.session_available_commands_raw("s").not_nil!.elements?.not_nil!.size.should eq(6)
+
+    transport.replies["session/options"] = %("result":{"availableCommands":[#{first}]})
+    result = client.session_options(ACP::Protocol::V2::SessionOptionsParams.new("/work", session_id: "s"))
+    result.typed_available_commands.first.name.should eq("review")
+    client.session_available_commands("s").not_nil!.map(&.name).should eq(["plan", "show"])
+
+    transport.replies["session/fork"] = %("result":{"sessionId":"branch","availableCommands":[#{first}]})
+    client.session_fork("s", "/branch")
+    branch = client.session_available_commands("branch").not_nil!
+    branch.first.input.not_nil!.text_hint.should eq("branch")
+    branch.clear
+    client.session_available_commands("branch").not_nil!.map(&.name).should eq(["review"])
+
+    transport.replies["session/resume"] = %("result":{})
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    client.session_available_commands("s").should eq([] of ACP::Protocol::V2::AvailableCommand)
+    client.session_available_commands_raw("s").not_nil!.json.should eq("[]")
+    client.session_available_commands("branch").not_nil!.map(&.name).should eq(["review"])
+
+    transport.replies["session/close"] = %("result":{})
+    client.session_close("s")
+    client.session_available_commands("s").should be_nil
+    transport.replies["session/delete"] = %("result":{})
+    client.session_delete("branch")
+    client.session_available_commands_raw("branch").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "applies live replacements before callbacks and keeps replay from replacing live commands" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"command","name":"original","description":"Original"}]})
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"failed"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    seen = Channel(Array(String)).new(4)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      if note.update.session_update == "available_commands_update"
+        seen.send(client.session_available_commands(note.session_id).not_nil!.map(&.name))
+      end
+      nil
+    end
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"command","name":"historical","description":"History"}]}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"command","name":"current","description":"Current"}]}))
+      end
+      nil
+    end
+    resume = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    expect_raises(ACP::JsonRpcError) { client.session_resume(resume) }
+    take_v2_frame(seen).should eq(["original"])
+    take_v2_frame(seen).should eq(["current"])
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":true}))
+    take_v2_frame(seen).should eq(["current"])
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[]}))
+    take_v2_frame(seen).should be_empty
+  ensure
+    client.try(&.close)
+  end
+end
+
 private def v2_skill_client(transport : V2TestTransport) : ACP::V2::Client
   commands = ACP::Protocol::V2::CommandsCapabilities.new(skill: ACP::Protocol::V2::CommandsSkillCapabilities.new)
   session = ACP::Protocol::V2::ClientSessionCapabilities.new(commands: commands)
@@ -8280,6 +8364,7 @@ describe "ACP v2 draft agent skills" do
     client.initialize_connection
     take_v2_frame(transport.outgoing)["params"]["capabilities"]["session"]["commands"]["skill"].should eq(JSON.parse("{}"))
     client.session_new("/work").typed_available_skills.first.name.should eq("notes")
+    client.session_available_commands("s").not_nil!.first.skill.not_nil!.name.should eq("notes")
     take_v2_frame(transport.outgoing)
     prompt = v2_skill_prompt("s", "notes")
     expect_raises(ArgumentError, /first prompt block/) { client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("s", prompt.prompt.reverse)) }
@@ -8298,6 +8383,7 @@ describe "ACP v2 draft agent skills" do
 
     transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[]}))
     take_v2_frame(updates).typed_available_skills.should be_empty
+    client.session_available_commands("s").not_nil!.should be_empty
     expect_raises(ACP::InvalidStateError) { client.session_prompt(prompt) }
     expect_raises(ACP::InvalidStateError) { client.session_prompt(keyed) }
     client.session_prompt(keyed, retry_submission: true).message_id.should eq("message")

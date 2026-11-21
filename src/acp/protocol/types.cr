@@ -1074,7 +1074,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)
@@ -1105,7 +1105,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)

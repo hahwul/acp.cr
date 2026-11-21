@@ -261,9 +261,15 @@ module ACP
       fork_cursor : ForkCursorGrant?,
       on_result : (String -> Nil)?,
       on_response : (PendingResponse -> Nil)?,
-      choice_unarmed : Bool
+      armed : Bool,
+      retirement_generation : UInt64? = nil
 
     @pending = {} of String => PendingRequest
+
+    # A timed-out v2 close, archive, or delete can still retire runtime.
+    private record LateSessionRetirement, session_id : String, generation : UInt64, close_on_missing : Bool
+    @late_session_retirements = {} of String => LateSessionRetirement
+    private MAX_LATE_SESSION_RETIREMENTS = 128
 
     # V1 session IDs learned through successful setup, guarded by @pending_mutex.
     @known_session_ids = Set(String).new
@@ -975,15 +981,7 @@ module ACP
       end
 
       params = Protocol::SessionCloseParams.new(sid)
-      raw_result = begin
-        send_request(Protocol::AgentMethod::SESSION_CLOSE, params)
-      rescue ex : JsonRpcError
-        # session-setup#closing-active-sessions: "Clients SHOULD treat a
-        # -32002 response to `session/close` as a successful close."
-        raise ex unless ex.resource_not_found?
-        JSON::Any.new({} of String => JSON::Any)
-      end
-      result = decode_result(Protocol::SessionCloseResult, raw_result, Protocol::AgentMethod::SESSION_CLOSE)
+      result = send_session_retirement_request(Protocol::AgentMethod::SESSION_CLOSE, params, Protocol::SessionCloseResult)
 
       ClientLog.info { "Session closed: #{sid}" }
 
@@ -1007,15 +1005,7 @@ module ACP
       end
 
       params = Protocol::SessionDeleteParams.new(session_id)
-      raw_result = begin
-        send_request(Protocol::AgentMethod::SESSION_DELETE, params)
-      rescue ex : JsonRpcError
-        # session-delete#semantics: "Clients SHOULD treat a -32002 response
-        # to `session/delete` as a successful delete."
-        raise ex unless ex.resource_not_found?
-        JSON::Any.new({} of String => JSON::Any)
-      end
-      result = decode_result(Protocol::SessionDeleteResult, raw_result, Protocol::AgentMethod::SESSION_DELETE)
+      result = send_session_retirement_request(Protocol::AgentMethod::SESSION_DELETE, params, Protocol::SessionDeleteResult)
 
       ClientLog.info { "Session deleted: #{session_id}" }
 
@@ -1285,6 +1275,15 @@ module ACP
       decode_typed_response(method, response, type)
     end
 
+    # Close and delete are idempotent when the Agent reports a missing session.
+    protected def send_session_retirement_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
+      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
+      response = send_and_await_response(method, message_builder)
+      return T.new if missing_session_response?(response)
+
+      decode_typed_response(method, response, type)
+    end
+
     private def decode_typed_response(method : String, response : PendingResponse, type : T.class) : T forall T
       if response.is_a?(Protocol::WireFrame) && !Protocol::WireFrame.field(response.json, "error")
         return decode_result_json(type, Protocol::WireFrame.field(response.json, "result") || "null", method)
@@ -1471,7 +1470,8 @@ module ACP
       message = message_builder.call(id)
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
-      close_on_missing = method == Protocol::AgentMethod::SESSION_CLOSE
+      close_on_missing = method == Protocol::AgentMethod::SESSION_CLOSE ||
+                         (v2_wire? && method == Protocol::AgentMethod::SESSION_DELETE)
       if close_on_missing || method == Protocol::AgentMethod::SESSION_ARCHIVE
         closing_session = params.try(&.["sessionId"]?).try(&.as_s?)
       end
@@ -1489,6 +1489,8 @@ module ACP
       initialize = method == Protocol::AgentMethod::INITIALIZE
       v2_request = v2_wire? && !initialize
       changes_choice = @session_choices.change_method?(method)
+      v2_retirement_session = closing_session if v2_wire?
+      arm_at_write = changes_choice || !v2_retirement_session.nil?
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         check_v2_request_order(initialize) if v2_wire?
@@ -1505,7 +1507,7 @@ module ACP
         if loading_session && @suggestion_content_types
           @suggestion_loads[id_str] = loading_session
         end
-        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result, on_response, changes_choice)
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor, on_result, on_response, !arm_at_write)
         if initialize
           @initialize_request = id_str
           @v2_initialize_armed = false if v2_wire?
@@ -1520,16 +1522,19 @@ module ACP
               @v2_initialize_armed = true
             end
           end
-        elsif fork_cursor || changes_choice || before_send || mcp_servers
+        elsif fork_cursor || arm_at_write || before_send || mcp_servers
           @transport.send_checked(message) do
             refresh_fork_grant(id_str, params) if fork_cursor
-            if changes_choice
+            if arm_at_write
               @pending_mutex.synchronize do
                 raise ConnectionClosedError.new if @disconnected
 
-                @session_choices.start_change(id_str, method, params, validate: validate_choice,
-                  allow_boolean: v2_wire? || @v1_boolean_config_supported)
-                @pending[id_str] = @pending[id_str].copy_with(choice_unarmed: false)
+                if changes_choice
+                  @session_choices.start_change(id_str, method, params, validate: validate_choice,
+                    allow_boolean: v2_wire? || @v1_boolean_config_supported)
+                end
+                generation = v2_retirement_session.try { |sid| @session_choices.command_generation(sid) }
+                @pending[id_str] = @pending[id_str].copy_with(armed: true, retirement_generation: generation)
               end
             end
             before_send.try(&.call)
@@ -1719,6 +1724,7 @@ module ACP
         @disconnected = true
         @pending.each_value { |request| request.response.close }
         @pending.clear
+        @late_session_retirements.clear
         @initialize_request = nil
         @known_session_ids.clear
         @session_choices.clear
@@ -1765,6 +1771,12 @@ module ACP
           if pending
             @session_choices.expire_attachment(id)
             @session_choices.expire_change(id)
+            if (session_id = pending.closing_session) && (generation = pending.retirement_generation)
+              if @session_choices.retirement_timed_out(session_id, generation)
+                @late_session_retirements[id] = LateSessionRetirement.new(session_id, generation, pending.close_on_missing)
+                @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
+              end
+            end
             @subagent_registry.try(&.request_finished(id))
             initialization = v2_wire? && @initialize_request == id
             @v2_contract_unknown.set(true) if initialization
@@ -1907,7 +1919,7 @@ module ACP
         # serializers write `"id": null` on notifications, so don't turn
         # those into a -32601 answer and lose the update.
         if obj["id"].raw.nil? && obj["method"].as_s == Protocol::AgentMethod::SESSION_UPDATE
-          handle_notification(msg, wire_frame.try(&.params_json))
+          handle_notification(msg, wire_frame)
         else
           return handle_agent_request(msg, wire_frame.try(&.params_json))
         end
@@ -1915,7 +1927,7 @@ module ACP
         handle_response(msg, wire_frame)
       when Protocol::MessageKind::Notification
         if obj["method"]?.try(&.as_s?)
-          handle_notification(msg, wire_frame.try(&.params_json))
+          handle_notification(msg, wire_frame)
         elsif obj.has_key?("method") || !(obj.has_key?("result") || obj.has_key?("error"))
           # Neither a call nor a response (`{}`, a non-string method): an
           # Invalid Request. An id-less response has nothing to answer.
@@ -1969,17 +1981,17 @@ module ACP
       cancelled_inputs = nil
       wide_frame = wire_frame if wire_frame.try(&.wide_response?)
       response = wide_frame || msg
-      choice_reply = false
+      observed_reply = false
       channel = @pending_mutex.synchronize do
         initializing = v2_wire? && @initialize_request == id_str
         next if initialization_only && !initializing
         next if initializing && (!@v2_initialize_armed || !msg["id"]?.try(&.as_i64?))
 
-        next if @pending[id_str]?.try(&.choice_unarmed)
+        next if (waiting = @pending[id_str]?) && !waiting.armed
 
         @cursor_registry.try(&.finish_replay(id_str, msg, wide_frame))
         @session_choices.finish_attachment(id_str)
-        if choice_reply = @session_choices.change_pending?(id_str)
+        if observed_reply = @session_choices.change_pending?(id_str)
           @session_choices.finish_change(id_str, Protocol::WireFrame.result_json(msg, wire_frame))
         end
         @suggestion_loads.delete(id_str)
@@ -1997,22 +2009,30 @@ module ACP
             response = error
             @subagent_registry.try(&.request_finished(id_str))
           else
-            closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg, wide_frame))
+            @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
             request.on_response.try(&.call(response))
             if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
             end
           end
-          if (session_id = request.closing_session) && closes_session?(request, msg, wide_frame)
-            closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
-            closed_sessions.each { |sid| @plan_ids.delete(sid) }
-            forget_active_session(session_id)
-          end
-          if closed_sessions
-            closed_sessions.each { |closed_id| @session_choices.drop(closed_id) }
-            cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true) unless v2_wire?
+          if (session_id = request.closing_session) && closes_session?(msg, request.close_on_missing)
+            if !v2_wire? || @session_choices.command_generation(session_id) == request.retirement_generation
+              closed_sessions = retire_session_runtime(session_id)
+              cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true) unless v2_wire?
+            end
           end
           request.response
+        elsif retirement = @late_session_retirements.delete(id_str)
+          observed_reply = true
+          session_id = retirement.session_id
+          if @session_choices.command_generation(session_id) == retirement.generation
+            if closes_session?(msg, retirement.close_on_missing)
+              retire_session_runtime(session_id)
+            elsif response_error_code(msg)
+              @session_choices.retirement_failed(session_id, retirement.generation)
+            end
+          end
+          nil
         end
       end
       if channel
@@ -2021,7 +2041,7 @@ module ACP
         ensure
           channel.send(response)
         end
-      elsif !choice_reply
+      elsif !observed_reply
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
       end
     end
@@ -2037,21 +2057,38 @@ module ACP
       end
     end
 
-    # Close and archive retire runtime before any later attachment is applied.
-    private def closes_session?(request : PendingRequest, msg : JSON::Any, wire_frame : Protocol::WireFrame?) : Bool
-      if error = msg["error"]?
-        return request.close_on_missing && !wire_frame && error.as_h?.try(&.["code"]?).try(&.as_i64?) == JsonRpcError::RESOURCE_NOT_FOUND
+    private def retire_session_runtime(session_id : String) : Array(String)
+      closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
+      closed_sessions.each do |sid|
+        @plan_ids.delete(sid)
+        @session_choices.drop(sid)
       end
-      return false unless result = msg["result"]?
+      forget_active_session(session_id)
+      closed_sessions
+    end
 
-      # Archive results default malformed optional metadata on decode.
-      return !result.as_h?.nil? unless request.close_on_missing
-      return false if wire_frame
+    # Close, archive, and v2 delete retire runtime in receive order.
+    private def closes_session?(response : JSON::Any, close_on_missing : Bool) : Bool
+      return false unless response["jsonrpc"]?.try(&.as_s?) == "2.0"
 
-      Protocol::SessionCloseResult.from_json(result.to_json)
-      true
-    rescue JSON::Error
-      false
+      if response["error"]?
+        close_on_missing && missing_session_response?(response)
+      else
+        # These result objects have only optional metadata.
+        !!response["result"]?.try(&.as_h?)
+      end
+    end
+
+    private def missing_session_response?(response : PendingResponse) : Bool
+      message = response.is_a?(Protocol::WireFrame) ? response.project_for_routing : response
+      message.is_a?(JSON::Any) && response_error_code(message) == JsonRpcError::RESOURCE_NOT_FOUND
+    end
+
+    private def response_error_code(response : JSON::Any) : Int64?
+      return unless response["jsonrpc"]?.try(&.as_s?) == "2.0" && !response["result"]?
+      return unless (error = response["error"]?.try(&.as_h?)) && error["message"]?.try(&.as_s?)
+
+      error["code"]?.try(&.as_i64?)
     end
 
     # Runs under the pending-request mutex before releasing the initialize waiter.
@@ -2427,8 +2464,8 @@ module ACP
         when "config_option_update"
           @session_choices.observe_options(session_id, update_json || Protocol::WireFrame.encode(update))
         when "available_commands_update"
-          unless @cursor_registry.try(&.replaying?(session_id))
-            registry.observe_available_commands(session_id, update, update_json)
+          if registry.current_updates?(session_id) && !@cursor_registry.try(&.replaying?(session_id))
+            @session_choices.observe_commands(session_id, update_json || Protocol::WireFrame.encode(update))
           end
         end
         true
@@ -2459,11 +2496,15 @@ module ACP
     end
 
     # Handles an incoming notification from the agent.
-    private def handle_notification(msg : JSON::Any, params_json : String? = nil) : Nil
+    private def handle_notification(msg : JSON::Any, frame : Protocol::WireFrame? = nil) : Nil
       method_name = msg["method"]?.try(&.as_s?)
       return unless method_name
 
       params = msg["params"]?
+      params_json = frame.try(&.params_json)
+      if frame && !params_json && method_name == Protocol::AgentMethod::SESSION_UPDATE
+        params_json = Protocol::WireFrame.field(frame.json, "params")
+      end
       if params_json && !method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
         ClientLog.warn { "Ignoring notification with parameters outside the range of JSON::Any" }
         return

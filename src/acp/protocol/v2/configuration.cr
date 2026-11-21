@@ -137,7 +137,7 @@ module ACP
       # An open input specification for an advertised command.
       struct CommandInput
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Input discriminator, including the standard text kind.
         @[JSON::Field(key: "type")]
@@ -161,7 +161,7 @@ module ACP
       # An advertised command, including open variants that are not slash commands.
       struct AvailableCommand
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Command discriminator, such as command for slash commands.
         @[JSON::Field(key: "type")]
@@ -192,10 +192,15 @@ module ACP
 
         # Input specification for a recognized slash command, when available.
         def input : CommandInput?
-          return unless slash_command? && (input = @json_unmapped["input"]?)
+          return unless slash_command?
 
-          CommandInput.from_json(input.to_json) if input.as_h?
-        rescue JSON::ParseException
+          raw = raw_field("input")
+          raw ||= @json_unmapped["input"]?.try(&.as_h?).try { |value| WireFrame.encode(value) }
+          return unless raw
+
+          input = CommandInput.from_json(raw)
+          input if input.type != "text" || input.text_hint
+        rescue JSON::Error
           nil
         end
 
@@ -226,19 +231,12 @@ module ACP
       module AvailableCommandList
         # Parses entries that carry a v2 command discriminator, name, and description.
         def typed_available_commands : Array(AvailableCommand)
-          available_commands.compact_map do |raw|
-            command = AvailableCommand.from_json(WireFrame.encode(raw))
-            command if command.type != "skill" || command.skill
-          rescue JSON::Error
-            nil
-          end
+          available_commands.compact_map { |raw| AvailableCommandsJson.typed_command(WireFrame.encode(raw)) }
         end
 
         # Parses skill entries whose names are unique across the command list.
         def typed_available_skills : Array(Skill)
-          commands = typed_available_commands
-          names = commands.map(&.name).tally
-          commands.compact_map { |command| command.skill if names[command.name] == 1 }
+          AvailableCommandsJson.unique(typed_available_commands).compact_map(&.skill)
         end
       end
 
@@ -261,18 +259,38 @@ module ACP
           commands
         end
 
+        def self.typed_command(raw : String) : AvailableCommand?
+          command = AvailableCommand.from_json(raw)
+          return unless Skill.valid_name?(command.name)
+          return if command.slash_command? && command.name.starts_with?('/')
+          return if command.type == "skill" && !command.skill
+
+          command
+        rescue JSON::Error
+          nil
+        end
+
+        def self.unique(commands : Array(AvailableCommand)) : Array(AvailableCommand)
+          names = commands.map(&.name).tally
+          commands.select { |command| names[command.name] == 1 }
+        end
+
         private def self.parse_command(raw : String) : JSON::Any?
           JSON.parse(raw)
-        rescue JSON::ParseException
-          # A known skill can still be used when an optional field is too
-          # wide for JSON::Any. Decode its recognized fields from the wire.
-          begin
-            if WireFrame.field(raw, "type") == %("skill")
-              skill = Skill.from_json(raw)
-              JSON.parse(WireFrame.encode(skill))
+        rescue JSON::Error
+          # Keep a typed view when only an optional field is outside JSON::Any.
+          # The session's exact list still retains all of the original fields.
+          if command = typed_command(raw)
+            fields = command.json_unmapped.dup
+            fields["type"] = JSON::Any.new(command.type)
+            fields["name"] = JSON::Any.new(command.name)
+            fields["description"] = JSON::Any.new(command.description)
+            if (input = command.input) && !fields.has_key?("input")
+              attributes = input.json_unmapped.dup
+              attributes["type"] = JSON::Any.new(input.type)
+              fields["input"] = JSON::Any.new(attributes)
             end
-          rescue JSON::Error
-            nil
+            JSON::Any.new(fields)
           end
         end
 
@@ -331,7 +349,7 @@ module ACP
         property config_options : Array(JSON::Any)
 
         # Extension metadata scoped to the update.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates an update with replacement configuration options.

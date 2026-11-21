@@ -139,10 +139,50 @@ module ACP
       end
     end
 
+    private class Commands
+      getter raw : Raw
+      getter generation : UInt64
+      @skill_names : Set(String)?
+      @unconfirmed_retirements = 0_u64
+
+      def initialize(@raw : Raw, @generation : UInt64)
+      end
+
+      def replace(raw : Raw) : Nil
+        @raw = raw
+        @skill_names = nil
+      end
+
+      def current? : Bool
+        @unconfirmed_retirements.zero?
+      end
+
+      def retirement_timed_out : Nil
+        @unconfirmed_retirements += 1
+      end
+
+      def retirement_failed : Nil
+        @unconfirmed_retirements -= 1
+      end
+
+      def entries : Array(Protocol::V2::AvailableCommand)
+        values = @raw.elements?.not_nil!.compact_map { |entry| Protocol::V2::AvailableCommandsJson.typed_command(entry.json) }
+        Protocol::V2::AvailableCommandsJson.unique(values)
+      end
+
+      def skill_names : Set(String)
+        @skill_names ||= entries.compact_map { |command| command.name if command.type == "skill" }.to_set
+      end
+    end
+
     private record Change, session_id : String, snapshot : Snapshot, mode : String?, revision : UInt64 = 0_u64, write : UInt64 = 0_u64
     private record Attachment, session_id : String, loading : Bool, replaying : Bool, expired : Bool = false
 
+    EMPTY_COMMANDS = Raw.from_json("[]")
+
     @sessions = {} of String => Snapshot
+    @commands = {} of String => Commands
+    @command_generation = 0_u64
     @attachments = {} of String => Attachment
     @attaching = {} of String => String
     @changes = {} of String => Change
@@ -161,7 +201,11 @@ module ACP
     def replace(session_id : String, result : String, *, reattach : Bool) : Nil
       modes = field(result, "modes") unless @v2
       modes = nil unless modes.try(&.object?)
-      options = option_list(result)
+      options = array_field(result, "configOptions")
+      if @v2
+        @command_generation += 1
+        @commands[session_id] = Commands.new(array_field(result, "availableCommands") || EMPTY_COMMANDS, @command_generation)
+      end
       if reattach && (snapshot = @sessions[session_id]?)
         snapshot.replace(modes, options)
       else
@@ -210,9 +254,9 @@ module ACP
 
     def expire_attachment(request_id : String) : Nil
       # Disregard late snapshots until the Agent answers this attachment. A
-      # timeout leaves the previously selected configuration uncertain.
+      # timeout leaves the previously advertised session choices uncertain.
       if attach = @attachments[request_id]?
-        @sessions.delete(attach.session_id)
+        drop(attach.session_id)
         if attach.replaying
           @attachments[request_id] = attach.copy_with(expired: true)
         else
@@ -264,7 +308,7 @@ module ACP
       if mode = change.mode
         Protocol::SessionSetModeResult.from_json(result)
         change.snapshot.confirm_mode(mode, change.revision, change.write)
-      elsif options = option_list(result)
+      elsif options = array_field(result, "configOptions")
         change.snapshot.options = options
       end
     rescue JSON::Error
@@ -296,17 +340,60 @@ module ACP
     end
 
     def observe_options(session_id : String, update : String) : Nil
-      if (state = @sessions[session_id]?) && !replaying?(session_id) && (options = option_list(update))
+      if (state = @sessions[session_id]?) && !replaying?(session_id) && (options = array_field(update, "configOptions"))
         state.options = options
       end
     end
 
-    def drop(session_id : String) : Bool
-      !@sessions.delete(session_id).nil?
+    def observe_commands(session_id : String, update : String) : Nil
+      if (state = @commands[session_id]?) && !replaying?(session_id) && (commands = array_field(update, "availableCommands"))
+        state.replace(commands)
+      end
+    end
+
+    def commands_raw(session_id : String) : Raw?
+      current_commands(session_id).try(&.raw)
+    end
+
+    def commands(session_id : String) : Array(Protocol::V2::AvailableCommand)?
+      current_commands(session_id).try(&.entries)
+    end
+
+    def command_skill_names(session_id : String) : Set(String)?
+      current_commands(session_id).try(&.skill_names) unless @attaching.has_key?(session_id)
+    end
+
+    def command_generation(session_id : String) : UInt64?
+      @commands[session_id]?.try(&.generation)
+    end
+
+    def retirement_timed_out(session_id : String, generation : UInt64) : Bool
+      if (state = @commands[session_id]?) && state.generation == generation
+        state.retirement_timed_out
+        return true
+      end
+      false
+    end
+
+    def retirement_failed(session_id : String, generation : UInt64) : Nil
+      if (state = @commands[session_id]?) && state.generation == generation
+        state.retirement_failed
+      end
+    end
+
+    private def current_commands(session_id : String) : Commands?
+      state = @commands[session_id]?
+      state if state.try(&.current?)
+    end
+
+    def drop(session_id : String) : Nil
+      @sessions.delete(session_id)
+      @commands.delete(session_id)
     end
 
     def clear : Nil
       @sessions.clear
+      @commands.clear
       @attachments.clear
       @attaching.clear
       @changes.clear
@@ -317,8 +404,8 @@ module ACP
       !!@attaching[session_id]?.try { |id| @attachments[id]?.try(&.replaying) }
     end
 
-    private def option_list(wire : String) : Raw?
-      value = field(wire, "configOptions")
+    private def array_field(wire : String, name : String) : Raw?
+      value = field(wire, name)
       value if value.try(&.array?)
     end
 
