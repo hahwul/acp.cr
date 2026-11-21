@@ -141,11 +141,10 @@ module ACP
 
     private class Commands
       getter raw : Raw
-      getter generation : UInt64
       @skill_names : Set(String)?
       @unconfirmed_retirements = 0_u64
 
-      def initialize(@raw : Raw, @generation : UInt64)
+      def initialize(@raw : Raw)
       end
 
       def replace(raw : Raw) : Nil
@@ -182,7 +181,6 @@ module ACP
 
     @sessions = {} of String => Snapshot
     @commands = {} of String => Commands
-    @command_generation = 0_u64
     @attachments = {} of String => Attachment
     @attaching = {} of String => String
     @changes = {} of String => Change
@@ -203,8 +201,7 @@ module ACP
       modes = nil unless modes.try(&.object?)
       options = array_field(result, "configOptions")
       if @v2
-        @command_generation += 1
-        @commands[session_id] = Commands.new(array_field(result, "availableCommands") || EMPTY_COMMANDS, @command_generation)
+        @commands[session_id] = Commands.new(array_field(result, "availableCommands") || EMPTY_COMMANDS)
       end
       if reattach && (snapshot = @sessions[session_id]?)
         snapshot.replace(modes, options)
@@ -363,22 +360,12 @@ module ACP
       current_commands(session_id).try(&.skill_names) unless @attaching.has_key?(session_id)
     end
 
-    def command_generation(session_id : String) : UInt64?
-      @commands[session_id]?.try(&.generation)
+    def retirement_timed_out(session_id : String) : Nil
+      @commands[session_id]?.try(&.retirement_timed_out)
     end
 
-    def retirement_timed_out(session_id : String, generation : UInt64) : Bool
-      if (state = @commands[session_id]?) && state.generation == generation
-        state.retirement_timed_out
-        return true
-      end
-      false
-    end
-
-    def retirement_failed(session_id : String, generation : UInt64) : Nil
-      if (state = @commands[session_id]?) && state.generation == generation
-        state.retirement_failed
-      end
+    def retirement_failed(session_id : String) : Nil
+      @commands[session_id]?.try(&.retirement_failed)
     end
 
     private def current_commands(session_id : String) : Commands?

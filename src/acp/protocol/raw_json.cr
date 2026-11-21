@@ -80,6 +80,15 @@ module ACP
 
       # Replaces an object member, preserving the other fields as exact JSON.
       def with_field(name : String, value : RawJson) : RawJson
+        replace_field(name, value)
+      end
+
+      # Removes an object member, preserving the other fields as exact JSON.
+      def without_field(name : String) : RawJson
+        replace_field(name, nil)
+      end
+
+      private def replace_field(name : String, value : RawJson?) : RawJson
         raise ArgumentError.new("JSON value must be an object") unless object?
 
         pull = JSON::PullParser.new(@json)
@@ -93,7 +102,7 @@ module ACP
                 builder.field(key) { pull.read_raw(builder) }
               end
             end
-            builder.field(name, value)
+            builder.field(name, value) if value
           end
         end
         RawJson.new(JSON::PullParser.new(wire))

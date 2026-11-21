@@ -50,6 +50,10 @@ module ACP
           @pending_mutex.synchronize { @session_choices[session_id].try(&.options) }
         end
 
+        def state_raw(session_id : String) : Protocol::RawJson?
+          @pending_mutex.synchronize { @subagent_registry.try(&.root_state(session_id)) }
+        end
+
         def available_commands(session_id : String) : Array(Wire::AvailableCommand)?
           @pending_mutex.synchronize do
             commands = @session_choices.commands(session_id)
@@ -670,6 +674,18 @@ module ACP
 
           @connection.retire_session(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
         end
+      end
+
+      # Latest foreground and background snapshot for an attached root session.
+      def session_state(session_id : String) : Wire::StateSnapshot?
+        if snapshot = session_state_raw(session_id)
+          Wire::StateSnapshot.from_json(snapshot.json)
+        end
+      end
+
+      # Session state with exact extension fields and numeric values.
+      def session_state_raw(session_id : String) : Protocol::RawJson?
+        @connection.state_raw(session_id)
       end
 
       # Latest unambiguous command advertisements for an attached session.

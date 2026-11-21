@@ -2682,3 +2682,85 @@ describe "Exact ACP v2 command advertisements" do
     end
   end
 end
+
+describe "Exact ACP v2 foreground state" do
+  it "retires the root on a late close even if a resume timed out in the meantime" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    client.session_state("s").not_nil!.idle?.should be_true
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    expect_raises(ACP::RequestTimeoutError) do
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    end
+    client.session_available_commands("s").should be_nil
+    client.session_state("s").not_nil!.idle?.should be_true
+
+    close = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/close" }
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.session_state("s").should be_nil
+    client.session_workspace("s").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps usable background and error fields beside wide extension values" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      received = Channel(ACP::Protocol::V2::StateUpdate).new(1)
+      client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+        if update = params.update.typed.as?(ACP::Protocol::V2::StateUpdate)
+          received.send(update)
+        end
+        nil
+      end
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"terminal_update","terminalId":"t"}}})
+      update = %({"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32603,"message":"Failed","data":{"big":18446744073709551615}},"background":[{"type":"terminal","terminalId":"t","extension":18446744073709551615},{"type":"_future","precise":0.1234567890123456789}]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update},"_meta":{"wide":18446744073709551615}}})
+      select
+      when observed = received.receive
+        observed.error.not_nil!.code.should eq(-32603)
+        observed.background.not_nil!.map(&.entity_type).should eq(["terminal", "_future"])
+      when timeout(2.seconds)
+        fail "state update was not delivered"
+      end
+      snapshot = client.session_state("s").not_nil!
+      snapshot.error.not_nil!.message.should eq("Failed")
+      snapshot.background.not_nil!.first.raw_field("extension").should eq("18446744073709551615")
+      exact = client.session_state_raw("s").not_nil!
+      exact.field("sessionUpdate").should be_nil
+      exact.field("error").not_nil!.field("data").not_nil!.field("big").not_nil!.json.should eq("18446744073709551615")
+      exact.json.should contain("0.1234567890123456789")
+
+      narrow = %({"sessionUpdate":"state_update","state":"running","background":[{"type":"tool_call"}],"extension":0.9876543210987654321})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{narrow}}})
+      select
+      when observed = received.receive
+        observed.state.should eq("running")
+        observed.background.should be_nil
+      when timeout(2.seconds)
+        fail "next state update was not delivered"
+      end
+      client.session_state_raw("s").not_nil!.json.should contain("0.9876543210987654321")
+    ensure
+      client.try(&.close)
+    end
+  end
+end
