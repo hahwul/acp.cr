@@ -11,6 +11,7 @@ require "json"
 require "./auth_status"
 require "./session_status"
 require "./session_title"
+require "./session_archive"
 
 module ACP
   module Protocol
@@ -531,6 +532,10 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::SessionTitleCapabilities)]
       property title : SessionTitleCapabilities?
 
+      # When present, the Agent supports archiving, restoration, and archive filters.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionArchiveCapabilities)]
+      property archive : SessionArchiveCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -545,6 +550,7 @@ module ACP
         @system_prompt : SessionSystemPromptCapabilities? = nil,
         @status : SessionStatusCapabilities? = nil,
         @title : SessionTitleCapabilities? = nil,
+        @archive : SessionArchiveCapabilities? = nil,
       )
       end
 

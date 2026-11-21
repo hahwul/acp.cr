@@ -263,11 +263,14 @@ module ACP
 
       # Lists available sessions using the provided filter and cursor.
       def session_list(params : Wire::SessionListParams = Wire::SessionListParams.new) : Wire::SessionListResult
-        session_capabilities
+        caps = session_capabilities
+        if params.archived && !caps.archive
+          raise InvalidStateError.new("The Agent did not advertise session.archive")
+        end
         if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
           raise ArgumentError.new("The ACP v2 session list directory must be absolute")
         end
-        request(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
+        @connection.request_typed(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
       end
 
       # Queries a session and its foreground snapshot without attaching to it.
@@ -286,6 +289,18 @@ module ACP
         end
 
         @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult)
+      end
+
+      # Closes and archives the session while preserving its saved history.
+      def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionArchiveResult
+        ensure_archive_support
+        @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult)
+      end
+
+      # Restores the session to default list results without attaching to it.
+      def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionUnarchiveResult
+        ensure_archive_support
+        @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult)
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.
@@ -374,6 +389,12 @@ module ACP
 
       private def session_capabilities : Wire::SessionCapabilities
         ready.capabilities.session || raise InvalidStateError.new("The Agent did not advertise ACP v2 sessions")
+      end
+
+      private def ensure_archive_support : Nil
+        unless session_capabilities.archive
+          raise InvalidStateError.new("The Agent did not advertise session.archive")
+        end
       end
 
       private def request(method : String, params : JSON::Serializable, type : T.class) : T forall T

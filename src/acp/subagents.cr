@@ -128,7 +128,7 @@ module ACP
           raise InvalidStateError.new("A session setup is already pending for #{sid.inspect}")
         end
         clear_descendant_runtime(sid)
-      when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_CLOSE
+      when Protocol::AgentMethod::SESSION_NEW
       when Protocol::AgentMethod::SESSION_DELETE
         return unless @v2
       else
@@ -170,13 +170,18 @@ module ACP
         if workspace && raw_result && !response.try(&.["error"]?) && (created_id = raw_result.as_h?.try(&.["sessionId"]?).try(&.as_s?))
           @workspace[created_id] = workspace
         end
-      when Protocol::AgentMethod::SESSION_CLOSE, Protocol::AgentMethod::SESSION_DELETE
+      when Protocol::AgentMethod::SESSION_DELETE
         if sid && closed_session?(response, raw_result)
-          drop_runtime(sid)
-          return descendants(sid).push(sid)
+          return close_runtime(sid)
         end
       end
       nil
+    end
+
+    # Releases runtime tracking and returns the affected session IDs.
+    def close_runtime(session_id : String) : Array(String)
+      drop_runtime(session_id)
+      descendants(session_id).push(session_id)
     end
 
     def drop_runtime(session_id : String) : Nil

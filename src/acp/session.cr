@@ -92,6 +92,7 @@ module ACP
     # - `client` — an initialized ACP::Client.
     # - `cwd` — optional filter: only return sessions with this working directory.
     # - `cursor` — optional pagination cursor.
+    # - `archived` — optional archive filter when the agent supports archiving.
     #
     # Requires the agent to advertise `sessionCapabilities.list`.
     # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
@@ -99,8 +100,10 @@ module ACP
       client : Client,
       cwd : String? = nil,
       cursor : String? = nil,
+      *,
+      archived : String? = nil,
     ) : Protocol::SessionListResult
-      client.session_list(cwd: cwd, cursor: cursor)
+      client.session_list(cwd: cwd, cursor: cursor, archived: archived)
     end
 
     # ─── Constructor ──────────────────────────────────────────────────
@@ -256,6 +259,18 @@ module ACP
       @client.session_set_title(@id, title, meta: meta)
     end
 
+    # Closes and archives the session. A failed archive leaves the wrapper open.
+    def archive(*, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionArchiveResult
+      result = @client.session_archive(@id, meta: meta)
+      @closed = true
+      result
+    end
+
+    # Restores the session to default list results. Resume or load to use it again.
+    def unarchive(*, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionUnarchiveResult
+      @client.session_unarchive(@id, meta: meta)
+    end
+
     # Closes the session.
     #
     # If the agent advertised the `session/close` capability
@@ -276,6 +291,7 @@ module ACP
       if notify_agent && agent_supports_close?
         begin
           @client.session_close(@id)
+          remote_closed = true
         rescue ex
           raise ex if raise_on_error
           # Best-effort: the agent may already be gone or not honor the call.
@@ -283,13 +299,9 @@ module ACP
         end
       end
 
-      # Drop the client's cached pointer at this session on every path.
-      # `Client#session_close` already does so on success, but the other
-      # routes here — agent without the capability, `notify_agent: false`,
-      # or a failed remote close — would otherwise leave the client
-      # reporting this dead session as active, so a `client.session_prompt`
-      # that omits an explicit ID would keep prompting it.
-      @client.forget_session(@id)
+      # A successful remote close cleared the cache in response order.
+      # Other paths still need to retire the local session.
+      @client.forget_session(@id) unless remote_closed
 
       @closed = true
     end

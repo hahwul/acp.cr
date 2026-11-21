@@ -6439,6 +6439,267 @@ describe "ACP draft session titles" do
   end
 end
 
+describe "ACP draft session archive" do
+  it "preserves archive filters and treats invalid reported flags as unknown" do
+    params = ACP::Protocol::SessionListParams.from_json(%({"archived":"_future"}))
+    JSON.parse(params.to_json)["archived"].should eq("_future")
+    expect_raises(JSON::ParseException) { ACP::Protocol::SessionListParams.from_json(%({"archived":true})) }
+
+    {"", %(,"archived":null), %(,"archived":{}), %(,"archived":"false")}.each do |field|
+      ACP::Protocol::SessionInfo.from_json(%({"sessionId":"s","cwd":"/work"#{field}})).archived.should be_nil
+    end
+    row = ACP::Protocol::SessionInfo.new("s", "/work", archived: false)
+    JSON.parse(row.to_json)["archived"].should eq(false)
+  end
+
+  it "preserves v1 runtime on archive failure and closes it on success" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{},"archive":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/archive"] = %("error":{"code":-32002,"message":"Unknown session","data":{"sessionId":"s"}})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    session = ACP::Session.create(client, "/work")
+    take_v2_frame(transport.outgoing)
+
+    error = expect_raises(ACP::JsonRpcError) { session.archive }
+    error.resource_not_found?.should be_true
+    error.data.not_nil!["sessionId"].should eq("s")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/archive")
+    session.closed?.should be_false
+    client.session_id.should eq("s")
+
+    transport.replies["session/archive"] = %("result":[])
+    expect_raises(ACP::ProtocolError) { session.archive }
+    take_v2_frame(transport.outgoing)["method"].should eq("session/archive")
+    client.session_id.should eq("s")
+
+    meta = {"example.test/source" => JSON::Any.new("editor")}
+    transport.replies["session/archive"] = %("result":{"_meta":{"example.test/source":"agent"}})
+    session.archive(meta: meta).meta.not_nil!["example.test/source"].should eq("agent")
+    take_v2_frame(transport.outgoing)["params"].should eq(JSON.parse(%({"sessionId":"s","_meta":{"example.test/source":"editor"}})))
+    session.closed?.should be_true
+    client.session_id.should be_nil
+    expect_raises(ACP::NoActiveSessionError) { client.session_prompt_text("hello") }
+
+    transport.replies["session/unarchive"] = %("result":{})
+    session.unarchive
+    take_v2_frame(transport.outgoing)["method"].should eq("session/unarchive")
+    session.closed?.should be_true
+    client.session_id.should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "passes archive filters and pagination to v1 and v2 Agents" do
+    {"v1", "v2"}.each do |version|
+      transport = V2TestTransport.new
+      transport.replies["initialize"] = if version == "v1"
+                                          %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{},"archive":{}}}})
+                                        else
+                                          %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"archive":{}}}})
+                                        end
+      transport.replies["session/list"] = %("result":{"sessions":[{"sessionId":"saved","cwd":"/work","archived":true}],"nextCursor":"page3"})
+      client = version == "v1" ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+      begin
+        client.initialize_connection
+        take_v2_frame(transport.outgoing)
+        page = if client.is_a?(ACP::Client)
+                 ACP::Session.list(client, "/work", "page2", archived: "only")
+               else
+                 client.session_list(ACP::Protocol::V2::SessionListParams.new(cwd: "/work", cursor: "page2", archived: "only"))
+               end
+        page.sessions.first.archived.should be_true
+        page.next_cursor.should eq("page3")
+        take_v2_frame(transport.outgoing)["params"].should eq(JSON.parse(%({"cwd":"/work","cursor":"page2","archived":"only"})))
+      ensure
+        client.close
+      end
+    end
+  end
+
+  it "cancels v1 user input for the archived session only" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{},"archive":{}}}})
+    transport.replies["session/archive"] = %("result":{})
+    client = ACP::Client.new(transport)
+    entered = Channel(String).new(2)
+    release = Channel(Nil).new
+    selected = JSON.parse(%({"outcome":{"outcome":"selected","optionId":"allow"}}))
+    client.on_agent_request = ->(_method : String, params : JSON::Any) do
+      entered.send(params["sessionId"].as_s)
+      release.receive?
+      selected
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    {"kept", "archived"}.each do |sid|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{sid.to_json},"method":"session/request_permission","params":{"sessionId":#{sid.to_json}}}))
+      take_v2_frame(entered).should eq(sid)
+    end
+
+    client.session_archive("archived")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/archive")
+    cancelled = take_v2_frame(transport.outgoing)
+    cancelled["id"].should eq("archived")
+    cancelled["result"]["outcome"]["outcome"].should eq("cancelled")
+
+    release.close
+    remaining = take_v2_frame(transport.outgoing)
+    remaining["id"].should eq("kept")
+    remaining["result"].should eq(selected)
+  ensure
+    release.try(&.close)
+    client.try(&.close)
+  end
+
+  it "applies overlapping v1 resume and archive results in receive order" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{},"resume":{},"archive":{}}}})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    active_sessions = Channel(String?).new(2)
+    client.on_notification = ->(_method : String, _params : JSON::Any?) do
+      active_sessions.send(client.session_id)
+      nil
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    completed = Channel(Nil).new(2)
+    spawn do
+      client.session_resume("s", "/work")
+      completed.send(nil)
+    end
+    resume = take_v2_frame(transport.outgoing)
+    spawn do
+      client.session_archive("s")
+      completed.send(nil)
+    end
+    archive = take_v2_frame(transport.outgoing)
+
+    {resume, archive}.each do |request|
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"].to_json},"result":{}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"_check_state","params":{}}))
+    end
+    take_v2_frame(active_sessions).should eq("s")
+    take_v2_frame(active_sessions).should be_nil
+    2.times { take_v2_frame(completed) }
+    client.session_id.should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a v1 attachment received after an overlapping remote close" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"close":{},"resume":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    session = ACP::Session.create(client, "/work")
+    take_v2_frame(transport.outgoing)
+
+    completed = Channel(Nil).new(2)
+    spawn do
+      session.close(raise_on_error: true)
+      completed.send(nil)
+    end
+    close = take_v2_frame(transport.outgoing)
+    spawn do
+      client.session_resume("s", "/work")
+      completed.send(nil)
+    end
+    resume = take_v2_frame(transport.outgoing)
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"].to_json},"result":{}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"].to_json},"result":{}}))
+    2.times { take_v2_frame(completed) }
+    session.closed?.should be_true
+    client.session_id.should eq("s")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a v2 stdio list page when an invalid archive flag exceeds Int64" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::V2::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 2.0
+    spawn do
+      {
+        %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"archive":{}}}}),
+        %({"sessions":[{"sessionId":"s","cwd":"/work","archived":18446744073709551615}],"nextCursor":"page2"}),
+      }.each do |result|
+        break unless line = outgoing.gets
+
+        id = JSON.parse(line)["id"]
+        feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"result":#{result}})
+      end
+    end
+    client.initialize_connection
+    page = client.session_list(ACP::Protocol::V2::SessionListParams.new(archived: "include"))
+    page.sessions.first.session_id.should eq("s")
+    page.sessions.first.archived.should be_nil
+    page.next_cursor.should eq("page2")
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "blocks archive operations and list filters unless advertised" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"archive":true}}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /session.archive/) { client.session_archive("s") }
+    expect_raises(ACP::InvalidStateError, /session.archive/) { client.session_unarchive("s") }
+    expect_raises(ACP::InvalidStateError, /session.archive/) do
+      client.session_list(ACP::Protocol::V2::SessionListParams.new(archived: "exclude"))
+    end
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "revokes v2 runtime and descendant control on a successful archive" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"archive":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/archive"] = %("result":{})
+    transport.replies["session/unarchive"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    updates = Channel(Nil).new(1)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      updates.send(nil)
+      nil
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    client.session_new("/work")
+    take_v2_frame(transport.outgoing)
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+    take_v2_frame(updates)
+    client.session_workspace("child").not_nil!.cwd.should eq("/work")
+    client.subagent("child").not_nil!.cancel?.should be_true
+    expect_raises(ACP::InvalidStateError) { client.session_archive("child") }
+
+    client.session_archive("root")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/archive")
+    client.subagent("child").not_nil!.cancel?.should be_false
+    client.session_workspace("root").should be_nil
+    client.session_unarchive("root")
+    take_v2_frame(transport.outgoing)["method"].should eq("session/unarchive")
+    client.session_workspace("root").should be_nil
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

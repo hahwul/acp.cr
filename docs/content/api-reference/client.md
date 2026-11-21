@@ -112,6 +112,9 @@ ACP::Client.new(
 When supplied, `client_info` supplies the name and version sent in the
 handshake. The same keyword is available on `ACP.connect`.
 
+Use the `Transport` interface to instrument or substitute the wire connection.
+Typed client methods can handle responses directly in the dispatcher.
+
 ## Lifecycle Methods
 
 ### `#initialize_connection`
@@ -228,6 +231,26 @@ The session can be inactive on the connection. Use `result.title` for display
 because the Agent can normalize the title before storing it.
 `Session#set_title` uses the wrapped v1 session ID.
 [ACP Session Title Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-set-title.mdx)
+
+### `#session_archive` and `#session_unarchive` (draft)
+
+Call `client.session_archive(session_id)` to close a session and hide it from
+the default list while retaining its ID and saved conversation. Call
+`client.session_unarchive(session_id)` to restore it to the default list. Load
+or resume it separately before prompting. Both operations require the Agent's
+`sessionCapabilities.archive` capability in v1 or `session.archive` in v2.
+A missing session produces JSON-RPC error `-32002`. The v1 `Session` wrapper
+also exposes `archive` and `unarchive`.
+
+If a request times out, the Agent may still commit the change. Check the
+session's archive state in a later list response.
+
+Use `client.session_list(archived: "only")` in v1 or pass
+`ACP::Protocol::V2::SessionListParams.new(archived: "only")` in v2 to list
+archived sessions. Use `"include"` to list both archived and unarchived
+sessions. Preserve the filter when following `next_cursor`. The Agent reports
+the archive state as `SessionInfo#archived`.
+[ACP Session Archive Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-archive.mdx)
 
 ### `#session_delete`
 

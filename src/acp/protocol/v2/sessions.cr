@@ -225,6 +225,18 @@ module ACP
       # Successful session/delete response with optional metadata.
       alias SessionDeleteResult = Protocol::SessionDeleteResult
 
+      # Archives a session and closes its runtime.
+      alias SessionArchiveParams = Protocol::SessionArchiveParams
+
+      # Successful session/archive response with optional metadata.
+      alias SessionArchiveResult = Protocol::SessionArchiveResult
+
+      # Restores a session to the default list without attaching to it.
+      alias SessionUnarchiveParams = Protocol::SessionUnarchiveParams
+
+      # Successful session/unarchive response with optional metadata.
+      alias SessionUnarchiveResult = Protocol::SessionUnarchiveResult
+
       # Cancels ongoing work in one session.
       alias SessionCancelParams = Protocol::SessionCancelParams
 
