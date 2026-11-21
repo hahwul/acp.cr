@@ -247,6 +247,8 @@ Call `client.session_fork(source_id, cwd)` when the Agent advertises
 
 Use `SessionForkParams` in the protocol version's namespace to supply extra
 workspace roots, MCP servers, a system prompt, or ordered initial settings.
+For a custom system prompt mode, check the Agent's extension advertisement
+before supplying the mode.
 Pass `cursor_id:` to fork at a cursor reported as forkable on the source
 session on this connection. A `-32602` reply retires the fork grant used by
 that request. A later announcement can grant fork access again.

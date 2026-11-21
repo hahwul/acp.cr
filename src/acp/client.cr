@@ -677,8 +677,8 @@ module ACP
       end
       if prompt = params.system_prompt
         support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
-        unless support.supports_mode?(prompt.mode)
-          raise InvalidStateError.new("The Agent did not advertise systemPrompt mode #{prompt.mode.inspect}")
+        if prompt.mode == "override" && !support.override?
+          raise InvalidStateError.new("The Agent did not advertise systemPrompt override")
         end
         if prompt.content.empty? || !prompt.content.all?(Protocol::TextContentBlock)
           raise ArgumentError.new("ACP system prompts require one or more text content blocks")

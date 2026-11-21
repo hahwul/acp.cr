@@ -7236,7 +7236,7 @@ describe "ACP draft session fork" do
 
   it "sets the v1 fork active in wire order and forwards initial choices from Session" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{},"options":{},"additionalDirectories":{},"systemPrompt":{"mode":{"_concise":{}}}}}})
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{},"options":{},"additionalDirectories":{},"systemPrompt":{"_meta":{"example.com/modes":["_concise"]}}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"source"})
     transport.replies["session/fork"] = %("result":{"sessionId":"forked","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"large","options":[]}]})
     transport.replies["session/prompt"] = %("result":{"stopReason":"end_turn"})
@@ -7265,15 +7265,16 @@ describe "ACP draft session fork" do
 
   it "forks a v2 cursor with a distinct workspace and cursors" do
     transport = V2TestTransport.new
-    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{},"options":{},"additionalDirectories":{}}}})
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{},"options":{},"additionalDirectories":{},"systemPrompt":{"_meta":{"example.com/modes":["_concise"]}}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"source"})
     transport.replies["session/fork"] = %("result":{"sessionId":"forked","availableCommands":[{"type":"command","name":"review","description":"Review the fork"}]})
     transport.replies["session/prompt"] = %("result":{"messageId":"prompt"})
     client = ACP::V2::Client.new(transport)
     client.initialize_connection
     take_v2_frame(transport.outgoing)
-    client.session_new("/source")
-    take_v2_frame(transport.outgoing)
+    prompt = ACP::Protocol::SystemPrompt.new("_concise", [ACP::Protocol::TextContentBlock.new("Keep it short.").as(ACP::Protocol::ContentBlock)])
+    client.session_new(ACP::Protocol::V2::SessionNewParams.new("/source", system_prompt: prompt))
+    take_v2_frame(transport.outgoing)["params"]["systemPrompt"]["mode"].should eq("_concise")
     seen = Channel(String).new(2)
     client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
       seen.send(note.update.session_update)
@@ -7287,13 +7288,13 @@ describe "ACP draft session fork" do
     expect_raises(ACP::InvalidStateError, /child/) { client.session_fork("child", "/fork") }
 
     choices = [ACP::Protocol::V2::InitialSessionConfigOption.new("fast", false)]
-    params = ACP::Protocol::V2::SessionForkParams.new("source", "/fork", cursor_id: "c", additional_directories: ["/extra"], config_options: choices)
+    params = ACP::Protocol::V2::SessionForkParams.new("source", "/fork", cursor_id: "c", additional_directories: ["/extra"], config_options: choices, system_prompt: prompt)
     result = client.session_fork(params)
     result.session_id.should eq("forked")
     result.typed_available_commands.first.name.should eq("review")
     wire = take_v2_frame(transport.outgoing)
     wire["method"].should eq("session/fork")
-    wire["params"].should eq(JSON.parse(%({"sessionId":"source","cwd":"/fork","cursorId":"c","additionalDirectories":["/extra"],"configOptions":[{"configId":"fast","type":"boolean","value":false}]})))
+    wire["params"].should eq(JSON.parse(%({"sessionId":"source","cwd":"/fork","cursorId":"c","additionalDirectories":["/extra"],"configOptions":[{"configId":"fast","type":"boolean","value":false}],"systemPrompt":{"mode":"_concise","content":[{"type":"text","text":"Keep it short."}]}})))
     client.session_workspace("source").not_nil!.cwd.should eq("/source")
     client.session_workspace("forked").not_nil!.cwd.should eq("/fork")
     client.session_cursor("source", "c").not_nil!.fork?.should be_true

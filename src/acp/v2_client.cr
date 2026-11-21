@@ -470,8 +470,8 @@ module ACP
         validate_mcp_servers(caps.mcp, servers) if servers
         if system_prompt
           support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
-          unless support.supports_mode?(system_prompt.mode)
-            raise InvalidStateError.new("The Agent did not advertise systemPrompt mode #{system_prompt.mode.inspect}")
+          if system_prompt.mode == "override" && !support.override?
+            raise InvalidStateError.new("The Agent did not advertise systemPrompt override")
           end
           if system_prompt.content.empty? || !system_prompt.content.all?(Protocol::TextContentBlock)
             raise ArgumentError.new("ACP v2 system prompts require one or more text content blocks")
