@@ -232,6 +232,11 @@ module ACP
     # Guarded by `@pending_mutex`.
     @disconnected : Bool = false
 
+    # Matches the v2 initialize response at the dispatcher boundary, before
+    # the Agent can send a request after successful negotiation.
+    @v2_initialize_request : String?
+    @v2_initialization_result : Protocol::V2::InitializeResult?
+
     # IDs announced through plan_update, grouped by session. Guarded by
     # @pending_mutex so forgetting a session or disconnecting can clear them.
     @plan_ids = {} of String => Set(String)
@@ -309,8 +314,16 @@ module ACP
       client_info : Protocol::ClientInfo? = nil,
     )
       @client_info = client_info || Protocol::ClientInfo.new(client_name, client_version)
-      @subagent_registry = SubagentRegistry.new if @client_capabilities.subagents
+      @subagent_registry = SubagentRegistry.new(v2: v2_wire?) if v2_wire? || @client_capabilities.subagents
       start_dispatcher
+    end
+
+    private def v2_wire? : Bool
+      false
+    end
+
+    protected def v2_initialization_result : Protocol::V2::InitializeResult?
+      @pending_mutex.synchronize { @v2_initialization_result }
     end
 
     # ─── Lifecycle ──────────────────────────────────────────────────
@@ -1061,6 +1074,7 @@ module ACP
         raise ConnectionClosedError.new if @disconnected
         @subagent_registry.try(&.request_sent(id_str, method, message["params"]?.try(&.as_h?)))
         @pending[id_str] = response_channel
+        @v2_initialize_request = id_str if v2_wire? && method == Protocol::AgentMethod::INITIALIZE
       end
       begin
         @transport.send(message)
@@ -1114,7 +1128,7 @@ module ACP
             raise InvalidStateError.new("#{method} is unavailable for child session #{sid.inspect}")
           end
         end
-        claim_session_inputs([sid], elicitations: !@subagent_registry.nil?) if sid && cancel
+        claim_session_inputs([sid], elicitations: !@subagent_registry.nil?) if sid && cancel && !v2_wire?
       end
 
       @transport.send(message)
@@ -1285,8 +1299,24 @@ module ACP
 
       kind = Protocol.classify_message(msg)
 
+      if v2_wire? && obj["jsonrpc"]?.try(&.as_s?) != "2.0"
+        reject_invalid_request("ACP v2 requires JSON-RPC 2.0") unless kind == Protocol::MessageKind::Response
+        return false
+      end
+
+      if v2_wire? && kind != Protocol::MessageKind::Response && !v2_initialization_result
+        if kind == Protocol::MessageKind::Request
+          respond_to_agent_error(Protocol.extract_id(msg), JsonRpcError::INVALID_REQUEST, "ACP v2 initialization is required")
+        end
+        return false
+      end
+
       case kind
       when Protocol::MessageKind::Request
+        if v2_wire? && obj["id"].raw.nil?
+          reject_invalid_request("ACP v2 request IDs must be strings or integers")
+          return false
+        end
         # `session/update` is only ever a notification in ACP; some JSON-RPC
         # serializers write `"id": null` on notifications, so don't turn
         # those into a -32601 answer and lose the update.
@@ -1341,7 +1371,12 @@ module ACP
       cancelled_inputs = nil
       channel = @pending_mutex.synchronize do
         if response_channel = @pending.delete(id_str)
-          if closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg))
+          if @v2_initialize_request == id_str
+            @v2_initialize_request = nil
+            @v2_initialization_result = parse_v2_initialize(msg)
+          end
+          closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg))
+          if closed_sessions && !v2_wire?
             cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
           end
           response_channel
@@ -1356,6 +1391,16 @@ module ACP
       else
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
       end
+    end
+
+    private def parse_v2_initialize(message : JSON::Any) : Protocol::V2::InitializeResult?
+      return if message["error"]?
+      return unless result = message["result"]?
+
+      typed = Protocol::V2::InitializeResult.from_json(result.to_json)
+      typed if typed.protocol_version == Protocol::V2::VERSION
+    rescue JSON::ParseException
+      nil
     end
 
     # Handles a method call from the agent (e.g., session/request_permission).
@@ -1455,10 +1500,36 @@ module ACP
       when Protocol::ClientMethod::ELICITATION_CREATE
         # elicitation#url-completion: "Requests using a mode the Client has
         # not advertised produce JSON-RPC -32602 (Invalid params)."
-        mode = params.try(&.as_h?).try(&.["mode"]?).try(&.as_s?)
+        fields = params.try(&.as_h?)
+        mode = fields.try(&.["mode"]?).try(&.as_s?)
         unless @client_capabilities.elicitation.try(&.supports?(mode))
-          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
+          code = v2_wire? && !@client_capabilities.elicitation ? JsonRpcError::METHOD_NOT_FOUND : JsonRpcError::INVALID_PARAMS
+          return Protocol::JsonRpcErrorObject.new(code,
             "Elicitation mode not advertised by the client: #{mode.inspect}")
+        end
+        if v2_wire? && fields
+          session = fields["sessionId"]?
+          request = fields["requestId"]?
+          valid_scope = if session
+                          !request && !session.as_s?.nil?
+                        elsif request
+                          !request.as_s?.nil? || !request.as_i64?.nil?
+                        else
+                          false
+                        end
+          unless valid_scope
+            return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
+              "ACP v2 elicitation requires exactly one sessionId or requestId")
+          end
+          valid_mode = if mode == "form"
+                         fields["requestedSchema"]?.try(&.as_h?)
+                       else
+                         fields["elicitationId"]?.try(&.as_s?) && fields["url"]?.try(&.as_s?)
+                       end
+          unless valid_mode
+            return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
+              "Missing ACP v2 elicitation fields for #{mode.inspect}")
+          end
         end
         handle_typed_client_method(params, @on_create_elicitation, Protocol::CreateElicitationParams, method_name)
       else
@@ -1635,6 +1706,8 @@ module ACP
         begin
           if entry.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
             respond_to_agent(id, cancelled_permission)
+          elsif v2_wire? && entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+            respond_to_agent(id, JSON.parse(Protocol::CreateElicitationResult.cancel.to_json))
           else
             respond_to_agent_error(id, JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
           end
@@ -1644,6 +1717,16 @@ module ACP
       end
 
       deliver_raw_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, params)
+    end
+
+    # Tracks v2 child associations and per-entity cancel markers before the
+    # next application callback sees the update.
+    protected def observe_v2_session_update(session_id : String, update : Hash(String, JSON::Any)) : Bool
+      @pending_mutex.synchronize do
+        return false if @disconnected
+
+        @subagent_registry.not_nil!.observe_v2_update(session_id, update)
+      end
     end
 
     # Handles an incoming notification from the agent.

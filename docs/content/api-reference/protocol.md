@@ -176,8 +176,8 @@ See [ACP Subagents](https://agentclientprotocol.com/protocol/v1/subagents).
 capabilities, authentication, session setup, configuration changes, and
 prompt acknowledgements. It includes method names and structured
 unsupported-version error data. Unknown authentication variants preserve
-their payload for inspection or forwarding. The high-level `ACP::Client`
-currently negotiates ACP v1.
+their payload for inspection or forwarding. `ACP::V2::Client` uses these
+types for v2 connections. [Client API](/api-reference/client/#acp-v2-preview)
 See [ACP v2 Initialization](https://agentclientprotocol.com/protocol/v2/initialization).
 
 Use `ReplayFrom.start` in v2 `SessionResumeParams` to request replay from the
