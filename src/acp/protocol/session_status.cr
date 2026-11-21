@@ -1,27 +1,13 @@
-require "json"
-require "./wire_frame"
+require "./optional_metadata"
 
 module ACP
   module Protocol
-    # :nodoc:
-    module SessionStatusMetadata
-      def self.from_json(pull : JSON::PullParser) : Hash(String, JSON::Any)?
-        JSON.parse(WireFrame.read_raw(pull)).as_h?
-      rescue JSON::ParseException
-        nil
-      end
-
-      def self.to_json(value : Hash(String, JSON::Any), builder : JSON::Builder) : Nil
-        value.to_json(builder)
-      end
-    end
-
     # Agent capability marker for draft session status queries.
     struct SessionStatusCapabilities
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::SessionStatusMetadata)]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       # Creates an optional status capability.
@@ -53,7 +39,7 @@ module ACP
       property session_id : String
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::SessionStatusMetadata)]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       # Creates a status query.
@@ -70,7 +56,7 @@ module ACP
       getter raw_status : String
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::SessionStatusMetadata)]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       # Returns open or saved. Future statuses behave like saved.

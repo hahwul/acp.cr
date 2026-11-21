@@ -15,6 +15,7 @@ module ACP
         SESSION_CANCEL            = "session/cancel"
         SESSION_LIST              = "session/list"
         SESSION_STATUS            = Protocol::AgentMethod::SESSION_STATUS
+        SESSION_SET_TITLE         = Protocol::AgentMethod::SESSION_SET_TITLE
         SESSION_DELETE            = "session/delete"
         SESSION_RESUME            = "session/resume"
         SESSION_CLOSE             = "session/close"

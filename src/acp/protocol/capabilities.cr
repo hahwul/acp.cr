@@ -10,6 +10,7 @@
 require "json"
 require "./auth_status"
 require "./session_status"
+require "./session_title"
 
 module ACP
   module Protocol
@@ -526,6 +527,10 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::SessionStatusCapabilities)]
       property status : SessionStatusCapabilities?
 
+      # When present, the Agent supports setting session titles.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionTitleCapabilities)]
+      property title : SessionTitleCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -539,6 +544,7 @@ module ACP
         @additional_directories : SessionAdditionalDirectoriesCapabilities? = nil,
         @system_prompt : SessionSystemPromptCapabilities? = nil,
         @status : SessionStatusCapabilities? = nil,
+        @title : SessionTitleCapabilities? = nil,
       )
       end
 

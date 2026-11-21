@@ -5,6 +5,12 @@ require "./configuration"
 module ACP
   module Protocol
     module V2
+      # Parameters of the draft session/set_title request.
+      alias SetSessionTitleParams = Protocol::SetSessionTitleParams
+
+      # The title the Agent stored after setting a session title.
+      alias SetSessionTitleResult = Protocol::SetSessionTitleResult
+
       # Checks absolute paths in the Agent's POSIX or Windows filesystem syntax.
       def self.absolute_path?(value : String) : Bool
         Path.posix(value).absolute? || Path.windows(value).absolute?

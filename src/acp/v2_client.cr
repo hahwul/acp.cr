@@ -22,8 +22,8 @@ module ACP
           v2_initialization_result
         end
 
-        def query_session_status(params : Wire::SessionStatusParams) : Wire::SessionStatusResult
-          send_typed_request(AgentMethod::SESSION_STATUS, params, Wire::SessionStatusResult)
+        def request_typed(method : String, params : JSON::Serializable, type : T.class) : T forall T
+          send_typed_request(method, params, type)
         end
 
         private def v2_wire? : Bool
@@ -276,7 +276,16 @@ module ACP
           raise InvalidStateError.new("The Agent did not advertise session.status")
         end
 
-        @connection.query_session_status(Wire::SessionStatusParams.new(session_id, meta))
+        @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult)
+      end
+
+      # Sets the title of a session and returns the title the Agent stored.
+      def session_set_title(session_id : String, title : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SetSessionTitleResult
+        unless session_capabilities.title
+          raise InvalidStateError.new("The Agent did not advertise session.title")
+        end
+
+        @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult)
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.
