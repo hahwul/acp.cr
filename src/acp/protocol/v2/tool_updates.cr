@@ -246,14 +246,17 @@ module ACP
       end
 
       # :nodoc:
-      module ToolPatchContentList
-        def self.from_json(pull : JSON::PullParser) : Array(ToolCallContent)?
-          OptionalContentList(ToolCallContent).from_json(pull) do |item|
-            decode(RawJson.new(item))
-          end
+      module ToolCallContentWire
+        def self.from_json(pull : JSON::PullParser) : ToolCallContent
+          location = pull.location
+          decode(RawJson.new(pull)) || raise JSON::ParseException.new("Malformed ACP tool-call content", *location)
         end
 
-        private def self.decode(wire : RawJson) : ToolCallContent?
+        def self.to_json(content : ToolCallContent, json : JSON::Builder) : Nil
+          content.to_json(json)
+        end
+
+        def self.decode(wire : RawJson) : ToolCallContent?
           return unless wire.object?
 
           unless WireFrame.unique_members?(wire.json, recursive: false)
@@ -272,6 +275,15 @@ module ACP
           end
         rescue JSON::ParseException
           nil
+        end
+      end
+
+      # :nodoc:
+      module ToolPatchContentList
+        def self.from_json(pull : JSON::PullParser) : Array(ToolCallContent)?
+          OptionalContentList(ToolCallContent).from_json(pull) do |item|
+            ToolCallContentWire.decode(RawJson.new(item))
+          end
         end
       end
 
@@ -389,25 +401,22 @@ module ACP
         property tool_call_id : String
 
         # Content item to append.
+        @[JSON::Field(converter: ::ACP::Protocol::V2::ToolCallContentWire)]
         property content : ToolCallContent
 
         # Creates a tool-call content chunk.
         def initialize(@tool_call_id : String, @content : ToolCallContent, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
         end
+
+        # Reads a chunk with one unambiguous tool-call ID and usable content.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "toolCallId", "content"))
+        end
       end
 
       # :nodoc:
       module TerminalOutputData
-        def self.read_envelope(pull : JSON::PullParser, *required : String) : JSON::PullParser
-          location = pull.location
-          wire = WireFrame.read_raw(pull)
-          unless WireFrame.repeated_members(wire, *required).empty?
-            raise JSON::ParseException.new("Ambiguous ACP terminal output fields", *location)
-          end
-          JSON::PullParser.new(wire)
-        end
-
         def self.from_json(pull : JSON::PullParser) : String
           location = pull.location
           data = pull.read_string
@@ -438,7 +447,7 @@ module ACP
 
         # Reads a snapshot with one unambiguous data field.
         def self.new(pull : JSON::PullParser) : self
-          previous_def(TerminalOutputData.read_envelope(pull, "data"))
+          previous_def(WireFrame.read_with_unique_members(pull, "data"))
         end
 
         # Decodes the terminal output bytes.
@@ -558,7 +567,7 @@ module ACP
 
         # Reads a chunk with an unambiguous terminal ID and data.
         def self.new(pull : JSON::PullParser) : self
-          previous_def(TerminalOutputData.read_envelope(pull, "terminalId", "data"))
+          previous_def(WireFrame.read_with_unique_members(pull, "terminalId", "data"))
         end
 
         # Decodes the newly appended output bytes.

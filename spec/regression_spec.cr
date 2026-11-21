@@ -5129,7 +5129,7 @@ describe "ACP v2 structured tool diffs" do
 
       ambiguous = %({"type":"diff","changes":[#{change}],"changes":[#{change}]})
       feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_content_chunk","toolCallId":"tool","content":#{ambiguous}}}})
-      next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk).content.diff.should be_nil
+      next_exact_session_update(observed).update.typed.should be_nil
     ensure
       client.try(&.close)
     end
@@ -5463,6 +5463,107 @@ describe "ACP v2 terminal patch decoding" do
       cleared.capabilities_present?.should be_true
       cleared.capabilities.should be_nil
       expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.terminal_cancel("s", "term") }
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+describe "ACP v2 streamed tool content" do
+  it "rejects invalid required content and ambiguous chunk fields on direct decoding" do
+    base = %("sessionUpdate":"tool_call_content_chunk","toolCallId":"tool")
+    [
+      "null",
+      "[]",
+      %({"type":"terminal","terminalId":42}),
+      %({"type":"session"}),
+      %({"type":"content","content":{"type":"text","text":false}}),
+      %({"type":"terminal","terminalId":"first","terminalId":"second"}),
+      %({"type":"terminal","type":"session","sessionId":"child"}),
+      %({"type":"diff","changes":[]}),
+    ].each do |content|
+      wire = %({#{base},"content":#{content}})
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::ToolCallContentChunk.from_json(wire) }
+      ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
+    end
+
+    valid = %({"type":"session","sessionId":"child"})
+    [
+      %({#{base},"content":false,"content":#{valid}}),
+      %({#{base},"toolCallId":"other","content":#{valid}}),
+      %({#{base}}),
+      %({"sessionUpdate":"tool_call_content_chunk","content":#{valid}}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::ToolCallContentChunk.from_json(wire) }
+      ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
+    end
+  end
+
+  it "shares diff fallback and open extension decoding with replacement content" do
+    meta = %({"example.test/value":18446744073709551615})
+    patch = %({"format":"git_patch","text":"example"})
+    diff = %({"type":"diff","changes":[false,{"operation":"modify","path":"/work/a"}],"patch":null,"patch":#{patch},"_meta":#{meta}})
+    future = %({"type":"_future","payload":{"value":0.1234567890123456789},"_meta":#{meta}})
+    update = ACP::Protocol::V2::ToolCallUpdate.from_json(%({"toolCallId":"tool","content":[#{diff},#{future}]}))
+    contents = update.content.not_nil!
+    contents.size.should eq(2)
+
+    [diff, future].each_with_index do |wire, idx|
+      chunk = ACP::Protocol::V2::ToolCallContentChunk.from_json(%({"toolCallId":"tool","content":#{wire},"_meta":"malformed"}))
+      chunk.content.raw.json.should eq(contents[idx].raw.json)
+      chunk.content.meta_raw.not_nil!.json.should eq(meta)
+      chunk.meta_raw.should be_nil
+      chunk.content.diff.not_nil!.patch.should be_nil if idx == 0
+    end
+    contents.last.raw.field("payload").not_nil!.field("value").not_nil!.json.should eq("0.1234567890123456789")
+  end
+
+  it "retains receive order and raw malformed frames through stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(6)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      append = %("sessionUpdate":"tool_call_content_chunk","toolCallId":"tool")
+      replace = %("sessionUpdate":"tool_call_update","toolCallId":"tool")
+      first = %({"type":"content","content":{"type":"text","text":"First"}})
+      replacement = %({"type":"content","content":{"type":"text","text":"Replacement"}})
+      future = %({"type":"future","details":{"sequence":18446744073709551615}})
+
+      [
+        %({#{append},"content":#{first}}),
+        %({#{append},"content":{"type":"terminal"}}),
+        %({#{append},"content":false,"content":#{first}}),
+        %({#{replace},"content":[#{replacement}]}),
+        %({#{append},"content":#{future},"_meta":{"example.test/time":0.1234567890123456789}}),
+        %({#{replace},"content":null}),
+      ].each do |wire|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{wire}}})
+      end
+
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+      chunk.content.content_block.as(ACP::Protocol::TextContentBlock).text.should eq("First")
+      next_exact_session_update(observed).update.typed.should be_nil
+      ambiguous = next_exact_session_update(observed)
+      ambiguous.update.typed.should be_nil
+      raw = ambiguous.raw.field("update").not_nil!.json
+      ACP::Protocol::WireFrame.repeated_members(raw, "content").should contain("content")
+      ACP::Protocol::V2::SessionUpdate.from_json(raw).typed.should be_nil
+
+      update = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      update.content.not_nil!.first.content_block.as(ACP::Protocol::TextContentBlock).text.should eq("Replacement")
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+      chunk.content.content_type.should eq("future")
+      chunk.content.raw.field("details").not_nil!.field("sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+      chunk.meta_raw.not_nil!.field("example.test/time").not_nil!.json.should eq("0.1234567890123456789")
+      chunk.content.meta_raw.should be_nil
+      clear = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      clear.content_present?.should be_true
+      clear.content.should be_nil
     ensure
       client.try(&.close)
     end
