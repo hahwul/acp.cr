@@ -55,9 +55,10 @@ module ACP
       *,
       additional_directories : Array(String)? = nil,
       system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Session
       result = client.session_new(cwd, mcp_servers || [] of JSON::Any,
-        additional_directories: additional_directories, system_prompt: system_prompt)
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
       new(client, result.session_id, result.modes, result.config_options)
     end
 
@@ -78,9 +79,10 @@ module ACP
       *,
       additional_directories : Array(String)? = nil,
       system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Session
       result = client.session_load(session_id, cwd, mcp_servers || [] of JSON::Any,
-        additional_directories: additional_directories, system_prompt: system_prompt)
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
       new(client, session_id, result.modes, result.config_options)
     end
 
@@ -252,6 +254,11 @@ module ACP
     # Reads the Agent's session status, including after a local close.
     def status(*, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionStatusResult
       @client.session_status(@id, meta: meta)
+    end
+
+    # Previews the options the Agent would use when restoring this session.
+    def options(cwd : String, *, additional_directories : Array(String)? = nil, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionOptionsResult
+      @client.session_options(Protocol::SessionOptionsParams.new(cwd, session_id: @id, additional_directories: additional_directories, meta: meta))
     end
 
     # Looks up an Agent-announced cursor in this session.

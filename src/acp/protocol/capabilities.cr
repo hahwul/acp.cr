@@ -12,6 +12,7 @@ require "./auth_status"
 require "./session_status"
 require "./session_title"
 require "./session_archive"
+require "./session_options"
 
 module ACP
   module Protocol
@@ -563,6 +564,14 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::SessionArchiveCapabilities)]
       property archive : SessionArchiveCapabilities?
 
+      # Presence advertises session/options and initial configuration values.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionOptionsCapabilities)]
+      property options : SessionOptionsCapabilities?
+
+      # Presence advertises session/fork and permits previewing its source options.
+      @[JSON::Field(converter: ::ACP::Protocol::SessionForkCapabilities)]
+      property fork : SessionForkCapabilities?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -578,6 +587,8 @@ module ACP
         @status : SessionStatusCapabilities? = nil,
         @title : SessionTitleCapabilities? = nil,
         @archive : SessionArchiveCapabilities? = nil,
+        @options : SessionOptionsCapabilities? = nil,
+        @fork : SessionForkCapabilities? = nil,
       )
       end
 

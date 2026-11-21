@@ -223,6 +223,21 @@ foreground state unknown. An unknown session ID raises an `ACP::JsonRpcError`
 with code `-32002`.
 [ACP Session Status Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-status.mdx)
 
+### `#session_options` (draft)
+
+Call `client.session_options(cwd)` to preview configuration for a new session.
+For a saved session, use `SessionOptionsParams.new(cwd, session_id: id)`.
+The Agent advertises this feature through `sessionCapabilities.options` in v1
+or `session.options` in v2. V1 previews include modes when available. V2
+previews can also include advisory slash commands.
+
+Pass chosen values as an ordered `config_options:` array of
+`InitialSessionConfigOption` values on `session/new`, v1 `session/load`,
+or `session/resume`. Use the protocol version's namespace. In v1, boolean choices require
+the Client's `session.configOptions.boolean` capability. Read the resulting
+configuration and, in v2, the available commands from the setup response.
+[ACP Session Options Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-options.mdx)
+
 ### `#session_set_title` (draft)
 
 Call `client.session_set_title(session_id, title)` on v1 or v2 when the Agent

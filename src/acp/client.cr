@@ -231,7 +231,7 @@ module ACP
       response : Channel(PendingResponse),
       closing_session : String?,
       close_on_missing : Bool,
-      on_result : (JSON::Any -> Nil)?
+      on_result : (String -> Nil)?
 
     @pending = {} of String => PendingRequest
 
@@ -546,11 +546,13 @@ module ACP
       *,
       additional_directories : Array(String)? = nil,
       system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, "session/new")
+      validate_initial_config_options(config_options) if config_options
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers,
-        additional_directories: additional_directories, system_prompt: system_prompt)
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
       result = attach_session(Protocol::AgentMethod::SESSION_NEW, params, Protocol::SessionNewResult)
 
       ClientLog.info { "Session created: #{result.session_id}" }
@@ -575,11 +577,13 @@ module ACP
       *,
       additional_directories : Array(String)? = nil,
       system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionLoadResult
       ensure_state(ClientState::Initialized, "session/load")
+      validate_initial_config_options(config_options) if config_options
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
-        additional_directories: additional_directories, system_prompt: system_prompt)
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
       result = attach_session(Protocol::AgentMethod::SESSION_LOAD, params, Protocol::SessionLoadResult, session_id)
 
       ClientLog.info { "Session loaded: #{session_id}" }
@@ -611,6 +615,28 @@ module ACP
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived)
       send_typed_request(Protocol::AgentMethod::SESSION_LIST, params, Protocol::SessionListResult)
+    end
+
+    # Previews options before creating or restoring a session.
+    def session_options(params : Protocol::SessionOptionsParams) : Protocol::SessionOptionsResult
+      method = Protocol::AgentMethod::SESSION_OPTIONS
+      ensure_state(ClientState::Initialized, method)
+      agent = @agent_capabilities
+      caps = agent.try(&.session_capabilities)
+      raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.options") unless caps.try(&.options)
+      if params.session_id && !(agent.try(&.load_session?) || caps.try(&.resume) || caps.try(&.fork))
+        raise InvalidStateError.new("The Agent did not advertise session load, resume, or fork")
+      end
+      unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
+        raise ArgumentError.new("ACP session directories must be absolute")
+      end
+
+      send_typed_request(method, params, Protocol::SessionOptionsResult)
+    end
+
+    # Previews options for a new session in the given workspace.
+    def session_options(cwd : String) : Protocol::SessionOptionsResult
+      session_options(Protocol::SessionOptionsParams.new(cwd))
     end
 
     # Queries a session without attaching to it. Requires draft status support.
@@ -656,6 +682,16 @@ module ACP
       end
     end
 
+    private def validate_initial_config_options(values : Array(Protocol::InitialSessionConfigOption)) : Nil
+      unless @agent_capabilities.try(&.session_capabilities).try(&.options)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.options")
+      end
+      Protocol.validate_initial_config_options(values)
+      if values.any? { |option| option.value_type == "boolean" } && !@client_capabilities.session.try(&.config_options).try(&.boolean)
+        raise InvalidStateError.new("The Client did not advertise boolean config options")
+      end
+    end
+
     # Resumes an existing session by ID without replaying conversation history.
     #
     # Unlike `session/load`, the agent will NOT emit `session/update`
@@ -682,11 +718,13 @@ module ACP
       *,
       additional_directories : Array(String)? = nil,
       system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionResumeResult
       ensure_state(ClientState::Initialized, "session/resume")
+      validate_initial_config_options(config_options) if config_options
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
-        additional_directories: additional_directories, system_prompt: system_prompt)
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
       result = attach_session(Protocol::AgentMethod::SESSION_RESUME, params, Protocol::SessionResumeResult, session_id)
 
       ClientLog.info { "Session resumed: #{session_id}" }
@@ -1011,10 +1049,14 @@ module ACP
     protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
       response = send_and_await_response(method, message_builder)
+      decode_typed_response(method, response, type)
+    end
+
+    private def decode_typed_response(method : String, response : PendingResponse, type : T.class) : T forall T
       if response.is_a?(Protocol::WireFrame) && !Protocol::WireFrame.field(response.json, "error")
         return decode_result_json(type, Protocol::WireFrame.field(response.json, "result") || "null", method)
       end
-      decode_result(type, response_result(response, method), method)
+      decode_result_json(type, Protocol::WireFrame.encode(response_result(response, method)), method)
     end
 
     # Sends a JSON-RPC notification (no response expected).
@@ -1128,9 +1170,9 @@ module ACP
     private def send_cached_request(method : String, params : JSON::Serializable, type : T.class, &apply : T -> Nil) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
       decoded = nil
-      observe = ->(payload : JSON::Any) do
+      observe = ->(payload : String) do
         begin
-          result = T.from_json(payload.to_json)
+          result = T.from_json(payload)
           apply.call(result)
           decoded = result
         rescue JSON::Error
@@ -1143,7 +1185,7 @@ module ACP
       cached_result = decoded
       return cached_result if cached_result
 
-      decode_result(type, response_result(response, method), method)
+      decode_typed_response(method, response, type)
     end
 
     # Core implementation for sending a JSON-RPC request and awaiting
@@ -1154,7 +1196,7 @@ module ACP
     # - `message_builder` — a proc that receives the request ID and returns
     #   the serialized message hash ready for transport.
     # - `timeout` — optional timeout in seconds (nil = no timeout).
-    # - `on_result` — internal cache update for ordinary successful results.
+    # - `on_result` — internal cache update from a successful result's JSON.
     #
     # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
@@ -1164,7 +1206,7 @@ module ACP
       message_builder : Int64 -> Hash(String, JSON::Any),
       timeout : Float64? = @request_timeout,
       *,
-      on_result : (JSON::Any -> Nil)? = nil,
+      on_result : (String -> Nil)? = nil,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1510,15 +1552,15 @@ module ACP
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
       channel = @pending_mutex.synchronize do
-        @cursor_registry.try(&.finish_replay(id_str, wire_frame ? nil : msg))
+        @cursor_registry.try(&.finish_replay(id_str, msg, wire_frame))
         if request = @pending.delete(id_str)
           if @initialize_request == id_str
             @initialize_request = nil
             observe_initialize_response(msg) unless wire_frame
           end
-          closed_sessions = @subagent_registry.try(&.request_finished(id_str, wire_frame ? nil : msg))
-          if wire_frame.nil? && !msg["error"]? && (result = msg["result"]?)
-            request.on_result.try(&.call(result))
+          closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
+          if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
+            observer.call(result)
           end
           if (session_id = request.closing_session) && closes_session?(request, msg, wire_frame)
             closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
