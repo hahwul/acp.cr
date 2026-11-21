@@ -53,6 +53,8 @@ module ACP
       getter workspace : SessionWorkspace?
       getter replay_markers : Set(String)?
       property state_revision : UInt64?
+      property write_order : UInt64?
+      property? retired = false
       property state : Protocol::RawJson?
 
       def initialize(@method : String, @session_id : String?, @workspace : SessionWorkspace?,
@@ -66,9 +68,13 @@ module ACP
       def written? : Bool
         !@state_revision.nil?
       end
+
+      def observe_state(snapshot : Protocol::RawJson, *, retained : Bool) : Nil
+        @state = snapshot.json.bytesize > MAX_EARLY_STATE_SIZE && retained ? nil : snapshot
+      end
     end
 
-    private record RootState, snapshot : Protocol::RawJson, generation : UInt64
+    private record RootState, snapshot : Protocol::RawJson, attachment_order : UInt64
     private record EarlyState, payload : Protocol::RawJson, revision : UInt64
 
     private IDLE_STATE    = Protocol::RawJson.from_json(%({"state":"idle"}))
@@ -76,17 +82,21 @@ module ACP
     # Unknown IDs can only be staged during new/fork and have a bounded wire size.
     private MAX_EARLY_STATES     = 64
     private MAX_EARLY_STATE_SIZE = 64 * 1024
+    private MAX_LATE_RESUMES     = 128
 
     @children = {} of String => Child
     @workspace = {} of String => SessionWorkspace
     @root_states = {} of String => RootState
-    @root_generation = 0_u64
     @early_states = {} of String => EarlyState
     @state_revision = 0_u64
     @setups = {} of String => SetupRequest
     @setup_by_session = {} of String => SetupRequest
+    @late_resumes = {} of String => SetupRequest
+    # An evicted or malformed reply cannot confirm the runtime. Keep the
+    # session gated until a later successful attachment.
+    @unconfirmed_roots = Set(String).new
     @closed_roots = Set(String).new
-    @cancellable_entities = Set(Tuple(String, String, String)).new
+    @cancellable_entities = {} of Tuple(String, String, String) => UInt64
 
     def initialize(@v2 : Bool = false)
     end
@@ -98,7 +108,7 @@ module ACP
     def snapshot(session_id : String) : SubagentSession?
       return unless child = @children[session_id]?
 
-      attaching = !setup_for(session_id).nil?
+      attaching = runtime_sync_pending?(session_id)
       state = child.state.try(&.dup) unless attaching
       config = child.config_options.try(&.dup) unless attaching
       SubagentSession.new(session_id, child.parent_id, child.title, child.description, state, config, cancel?(session_id))
@@ -134,8 +144,8 @@ module ACP
       @root_states[session_id]?.try(&.snapshot)
     end
 
-    def root_generation(session_id : String) : UInt64?
-      @root_states[session_id]?.try(&.generation)
+    def attachment_order(session_id : String) : UInt64?
+      @root_states[session_id]?.try(&.attachment_order)
     end
 
     def setup_waiting_to_write?(session_id : String) : Bool
@@ -145,17 +155,27 @@ module ACP
       false
     end
 
-    def root_setup_written(id : String) : Nil
+    def resume_timed_out?(session_id : String) : Bool
+      !late_resume(ancestors(session_id).last).nil?
+    end
+
+    def root_setup_written(id : String, order : UInt64) : Nil
       if setup = @setups[id]?
         setup.state_revision = @state_revision
+        setup.write_order = order
+        if setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
+          # An already attached root can keep its current entities without replay.
+          clear_descendant_runtime(sid, include_root_entities: !!setup.replay_markers || !@root_states.has_key?(sid))
+        end
       end
     end
 
     def observe_root_state(session_id : String, update : String) : Nil
       return if child?(session_id)
 
-      setup = @setup_by_session[session_id]?
-      setup = nil unless setup.try(&.written?)
+      written_setup = @setup_by_session[session_id]?
+      written_setup = nil unless written_setup.try(&.written?)
+      setup = written_setup || late_resume(session_id)
       if setup
         return unless current_updates?(session_id)
       elsif @closed_roots.includes?(session_id)
@@ -170,7 +190,7 @@ module ACP
       return unless wire.field("state").try(&.as_s?)
 
       state = wire.without_field("sessionUpdate")
-      setup.state = state if setup
+      setup.try(&.observe_state(state, retained: written_setup.nil?))
       @root_states[session_id] = attached.copy_with(snapshot: state) if attached
       stage_early_state(session_id, state) if early
     end
@@ -185,24 +205,25 @@ module ACP
     end
 
     def cancel?(session_id : String) : Bool
-      return false if setup_for(session_id)
+      return false if runtime_sync_pending?(session_id)
 
       !@children[session_id]?.try(&.capabilities).try(&.cancel).nil?
     end
 
     def known_session?(session_id : String) : Bool
-      @workspace.has_key?(session_id) || @children.has_key?(session_id) ||
-        @closed_roots.includes?(session_id) || @setup_by_session.has_key?(session_id)
+      child?(session_id) || reserved_root?(session_id)
+    end
+
+    private def reserved_root?(session_id : String) : Bool
+      @workspace.has_key?(session_id) || @closed_roots.includes?(session_id) ||
+        @setup_by_session.has_key?(session_id) || @unconfirmed_roots.includes?(session_id) || !late_resume(session_id).nil?
     end
 
     def request_sent(id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
       sid = params.try(&.["sessionId"]?).try(&.as_s?)
-      if @v2 && (key = entity_cancel_key(method))
-        entity_id = params.try(&.[key]?).try(&.as_s?)
-        if sid && entity_id && !setup_for(sid) && @cancellable_entities.includes?({sid, key, entity_id})
-          return
-        end
-        raise InvalidStateError.new("#{method} requires a current cancel capability for this entity")
+      if entity_cancel?(method)
+        check_entity_cancel(method, params)
+        return
       end
 
       if sid && child?(sid)
@@ -215,7 +236,7 @@ module ACP
         if @setup_by_session.has_key?(sid)
           raise InvalidStateError.new("A session setup is already pending for #{sid.inspect}")
         end
-        clear_descendant_runtime(sid)
+        clear_descendant_runtime(sid) unless @v2
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
       else
         return
@@ -232,6 +253,73 @@ module ACP
       end
     end
 
+    def request_timed_out(id : String) : Nil
+      if @v2 && (setup = @setups[id]?) && !setup.retired? && setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
+        @setups.delete(id)
+        @setup_by_session.delete(sid)
+        if (snapshot = setup.state) && snapshot.json.bytesize > MAX_EARLY_STATE_SIZE
+          setup.state = nil
+        end
+        @late_resumes[id] = setup
+        if @late_resumes.size > MAX_LATE_RESUMES
+          _, evicted = @late_resumes.shift
+          @unconfirmed_roots.add(evicted.session_id.not_nil!)
+        end
+      else
+        request_finished(id)
+      end
+    end
+
+    # Preserve provisional updates until the actual result retires or
+    # activates the attachment, even after the client stops waiting.
+    def finish_late_resume(id : String, response : JSON::Any, frame : Protocol::WireFrame?, *, rejected : Bool) : {String, String?}?
+      return unless (setup = @late_resumes.delete(id)) && (sid = setup.session_id)
+      return {sid, nil} if child?(sid)
+
+      if response["jsonrpc"]?.try(&.as_s?) == "2.0"
+        result = Protocol::WireFrame.result_json(response, frame)
+        if result && attach_result(setup.method, result)
+          finish_resume(sid, setup)
+          return {sid, result}
+        end
+      end
+
+      pending = @setup_by_session[sid]?
+      pending = nil unless pending.try(&.written?)
+      newer = pending || late_resume(sid)
+      unless newer && newer.write_order.not_nil! > setup.write_order.not_nil!
+        active = @root_states.has_key?(sid)
+        clear_descendant_runtime(sid, include_root_entities: !active)
+        @unconfirmed_roots.add(sid) unless rejected && active
+      end
+      {sid, nil}
+    end
+
+    private def finish_resume(session_id : String, setup : SetupRequest) : Nil
+      @closed_roots.delete(session_id)
+      if workspace = setup.workspace
+        @workspace[session_id] = workspace
+      end
+      if @v2
+        order = setup.write_order.not_nil!
+        attach_root_state(session_id, setup.state || root_state(session_id) || UNKNOWN_STATE, order)
+        discard_late_resumes(session_id, before: order)
+        @unconfirmed_roots.delete(session_id)
+      end
+    end
+
+    private def late_resume(session_id : String) : SetupRequest?
+      latest = nil
+      @late_resumes.each_value do |setup|
+        latest = setup if setup.session_id == session_id
+      end
+      latest
+    end
+
+    def retired_setup?(request_id : String) : Bool
+      !!@setups[request_id]?.try(&.retired?)
+    end
+
     # Applies a response at the dispatch boundary, before the next update.
     def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Nil
       return unless setup = @setups.delete(id)
@@ -244,12 +332,12 @@ module ACP
         return unless sid
 
         @setup_by_session.delete(sid)
+        return if setup.retired?
+
         if attach_result(method, Protocol::WireFrame.result_json(response, frame))
-          @closed_roots.delete(sid)
-          @workspace[sid] = workspace if workspace
-          attach_root_state(sid, setup.state || root_state(sid) || UNKNOWN_STATE) if @v2
-        else
-          clear_descendant_runtime(sid)
+          finish_resume(sid, setup)
+        elsif !@v2 || setup.written?
+          clear_descendant_runtime(sid, include_root_entities: !@root_states.has_key?(sid))
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
         if workspace && (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
@@ -260,7 +348,7 @@ module ACP
             if early && (started = setup.state_revision) && early.revision > started
               initial = early.payload
             end
-            attach_root_state(new_id, initial || IDLE_STATE)
+            attach_root_state(new_id, initial || IDLE_STATE, setup.write_order.not_nil!)
           end
         end
         @early_states.clear unless @setups.each_value.any?(&.creates_session?)
@@ -268,24 +356,53 @@ module ACP
       nil
     end
 
-    private def attach_root_state(session_id : String, snapshot : Protocol::RawJson) : Nil
-      @root_generation += 1
-      @root_states[session_id] = RootState.new(snapshot, @root_generation)
+    private def attach_root_state(session_id : String, snapshot : Protocol::RawJson, order : UInt64) : Nil
+      @root_states[session_id] = RootState.new(snapshot, order)
+    end
+
+    private def discard_late_resumes(session_id : String, *, before order : UInt64) : Nil
+      @late_resumes.reject! do |_id, setup|
+        setup.session_id == session_id && setup.write_order.not_nil! < order
+      end
     end
 
     # Releases runtime tracking and returns the affected session IDs.
-    def close_runtime(session_id : String) : Array(String)
-      drop_runtime(session_id)
+    def close_runtime(session_id : String, order : UInt64? = nil) : Array(String)
+      preserve_after = nil
+      if order
+        @closed_roots.add(session_id) if reserved_root?(session_id)
+        discard_late_resumes(session_id, before: order)
+        if pending = @setup_by_session[session_id]?
+          if written = pending.write_order
+            pending.retired = true if written < order
+            preserve_after = order if written > order
+          end
+        end
+        preserve_after = order if late_resume(session_id)
+      end
+      drop_runtime(session_id, preserve_after: preserve_after)
       descendants(session_id).push(session_id)
     end
 
-    def drop_runtime(session_id : String) : Nil
+    def drop_runtime(session_id : String, *, preserve_after : UInt64? = nil) : Nil
       return if child?(session_id)
 
       @closed_roots.add(session_id) if @workspace.delete(session_id) || @children.any? { |_, child| child.parent_id == session_id }
       @root_states.delete(session_id)
       @early_states.delete(session_id)
-      clear_descendant_runtime(session_id)
+      @unconfirmed_roots.delete(session_id)
+      if preserve_after
+        # A newer resume already cleared the previous child runtime at its
+        # write. Hold the replacement until that resume's actual result.
+        discard_old_entity_grants(session_id, preserve_after)
+      else
+        clear_descendant_runtime(session_id)
+      end
+    end
+
+    def discard_old_entity_grants(session_id : String, order : UInt64) : Nil
+      affected = descendants(session_id).push(session_id)
+      @cancellable_entities.reject! { |entity, written| affected.includes?(entity[0]) && written < order }
     end
 
     def clear : Nil
@@ -295,34 +412,51 @@ module ACP
       @early_states.clear
       @setups.clear
       @setup_by_session.clear
+      @late_resumes.clear
+      @unconfirmed_roots.clear
       @closed_roots.clear
       @cancellable_entities.clear
     end
 
     # Observes v2 capabilities at the wire boundary. Each replaying session
     # has its own marker. A marked parent's upsert can authorize its child.
-    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?) : Bool
+    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?, *, replaying : Bool) : Bool
       case update["sessionUpdate"]?.try(&.as_s?)
       when "replay_complete"
         if (setup = setup_for(session_id)) && setup.written?
           setup.replay_markers.try(&.add(session_id))
         end
       when "subagent_update"
-        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update)))
+        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update)),
+          live: !replaying)
       when "state_update"
-        if (child = @children[session_id]?) && current_updates?(session_id)
+        if (child = @children[session_id]?) && !replaying && current_updates?(session_id)
           state = Protocol::SubagentState.from_json(update_json || Protocol::WireFrame.encode(update))
           state.json_unmapped.delete("sessionUpdate")
           child.state = state
         end
       when "tool_call_update"
-        observe_cancel_marker(session_id, "toolCallId", update)
+        observe_cancel_marker(session_id, "toolCallId", update) unless replaying
       when "terminal_update"
-        observe_cancel_marker(session_id, "terminalId", update)
+        observe_cancel_marker(session_id, "terminalId", update) unless replaying
       end
       true
     rescue JSON::ParseException
       false
+    end
+
+    def entity_cancel?(method : String) : Bool
+      @v2 && !entity_cancel_key(method).nil?
+    end
+
+    def check_entity_cancel(method : String, params : Hash(String, JSON::Any)?) : Nil
+      key = entity_cancel_key(method).not_nil!
+      sid = params.try(&.["sessionId"]?).try(&.as_s?)
+      entity_id = params.try(&.[key]?).try(&.as_s?)
+      if sid && entity_id && !runtime_sync_pending?(sid) && @cancellable_entities.has_key?({sid, key, entity_id})
+        return
+      end
+      raise InvalidStateError.new("#{method} requires a current cancel capability for this entity")
     end
 
     private def entity_cancel_key(method : String) : String?
@@ -337,7 +471,10 @@ module ACP
 
       entity = {session_id, key, entity_id}
       if caps.as_h?.try(&.["cancel"]?).try(&.as_h?)
-        @cancellable_entities.add(entity)
+        root = ancestors(session_id).last
+        pending = @setup_by_session[root]?
+        order = pending.try(&.write_order) || late_resume(root).try(&.write_order) || attachment_order(root)
+        @cancellable_entities[entity] = order || 0_u64
       else
         @cancellable_entities.delete(entity)
       end
@@ -345,12 +482,12 @@ module ACP
 
     # Updates the association and effective child state. A historical update
     # can introduce a child but its state and capabilities stay unconfirmed.
-    def announce(parent_id : String, patch : Protocol::SubagentUpdate) : Bool
+    def announce(parent_id : String, patch : Protocol::SubagentUpdate, *, live : Bool = true) : Bool
       sid = patch.session_id
       if child = @children[sid]?
         return false if child.parent_id != parent_id
       else
-        return false if @workspace.has_key?(sid) || @setup_by_session.has_key?(sid) || @closed_roots.includes?(sid)
+        return false if reserved_root?(sid)
         return false if ancestors(parent_id).includes?(sid)
         child = Child.new(parent_id)
         @children[sid] = child
@@ -361,7 +498,7 @@ module ACP
       child.cwd = patch.cwd if patch.cwd_present?
       child.additional_directories = patch.additional_directories.try(&.dup) if patch.additional_directories_present?
 
-      if current_updates?(@v2 ? parent_id : sid)
+      if live && current_updates?(@v2 ? parent_id : sid)
         child.capabilities = patch.capabilities if patch.capabilities_present?
         if patch.state_present?
           child.state = patch.state.try(&.dup)
@@ -382,13 +519,23 @@ module ACP
 
     def current_updates?(session_id : String) : Bool
       ids = ancestors(session_id)
-      if setup = setup_for_ancestors(ids)
+      if (setup = setup_for_ancestors(ids)) && (!@v2 || setup.written?)
+        return false if setup.retired?
+
         if markers = setup.replay_markers
           return markers.includes?(session_id)
         end
         return setup.method == Protocol::AgentMethod::SESSION_RESUME
       end
-      !@closed_roots.includes?(ids.last)
+      !@closed_roots.includes?(ids.last) || !late_resume(ids.last).nil?
+    end
+
+    private def runtime_sync_pending?(session_id : String) : Bool
+      ids = ancestors(session_id)
+      if (setup = setup_for_ancestors(ids)) && (!@v2 || setup.written?)
+        return true
+      end
+      @unconfirmed_roots.includes?(ids.last) || !late_resume(ids.last).nil?
     end
 
     private def setup_for(session_id : String) : SetupRequest?
@@ -418,10 +565,12 @@ module ACP
       @children.keys.select { |sid| sid != session_id && ancestors(sid).includes?(session_id) }
     end
 
-    private def clear_descendant_runtime(session_id : String) : Nil
+    private def clear_descendant_runtime(session_id : String, *, include_root_entities : Bool = true) : Nil
       children = descendants(session_id)
       children.each { |sid| @children[sid].clear_runtime }
-      @cancellable_entities.reject! { |entity| entity[0] == session_id || children.includes?(entity[0]) }
+      @cancellable_entities.reject! do |entity, _order|
+        (include_root_entities && entity[0] == session_id) || children.includes?(entity[0])
+      end
     end
 
     private def attach_result(method : String, result : String?)

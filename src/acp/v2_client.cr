@@ -34,7 +34,7 @@ module ACP
         def attach_with_choices(method : String, params : JSON::Serializable, type : T.class, session_id : String? = nil) : T forall T
           send_cached_request(method, params, type) do |result, wire|
             sid = result.is_a?(Wire::SessionNewResult) ? result.session_id : session_id
-            @session_choices.replace(sid, wire, reattach: !session_id.nil?) if sid && !closed?
+            apply_session_choices(sid, wire, reattach: !session_id.nil?) if sid && !closed?
           end
         end
 
@@ -726,7 +726,7 @@ module ACP
       def tool_call_cancel(session_id : String, tool_call_id : String) : Wire::ToolCallCancelResult
         @connection.with_request do
           session_capabilities
-          request(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult)
+          @connection.request_typed(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult)
         end
       end
 
@@ -734,7 +734,7 @@ module ACP
       def terminal_cancel(session_id : String, terminal_id : String) : Wire::TerminalCancelResult
         @connection.with_request do
           session_capabilities
-          request(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult)
+          @connection.request_typed(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult)
         end
       end
 
