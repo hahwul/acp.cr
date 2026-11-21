@@ -4,10 +4,11 @@
 # updates. These replace raw JSON::Any representations with proper
 # Crystal structs for type-safe handling of tool call output.
 #
-# Tool calls can produce three types of content:
+# Tool calls can produce these types of content:
 #   - `content`  — Standard ContentBlock wrapper (text, images, resources)
 #   - `diff`     — File modifications shown as diffs
 #   - `terminal` — Live terminal output from command execution
+#   - `session`  — Reference to a subagent session
 #
 # Additionally defines `ToolCallLocation` for file location tracking
 # that enables "follow-along" features in clients.
@@ -32,6 +33,7 @@ module ACP
         "content"  => ToolCallContentBlock,
         "diff"     => ToolCallDiff,
         "terminal" => ToolCallTerminal,
+        "session"  => ToolCallSessionReference,
       }
 
       # The discriminator field present on every tool call content item.
@@ -158,6 +160,22 @@ module ACP
 
       def initialize(@terminal_id : String, @meta : Hash(String, JSON::Any)? = nil)
         @type = "terminal"
+      end
+    end
+
+    # A display reference to a session the tool call operates on.
+    struct ToolCallSessionReference < ToolCallContent
+      # ID of the referenced session.
+      @[JSON::Field(key: "sessionId")]
+      property session_id : String
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates a session reference.
+      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        @type = "session"
       end
     end
 

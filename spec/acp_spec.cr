@@ -34,6 +34,86 @@ describe "ACP identified plan types" do
   end
 end
 
+describe "ACP subagent update types" do
+  it "preserves omitted, cleared and empty child fields independently" do
+    wire = JSON.parse(%({
+      "sessionId": "parent",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "child",
+        "title": null,
+        "capabilities": {"cancel": {}},
+        "cwd": "/work/child",
+        "additionalDirectories": [],
+        "_meta": null
+      }
+    }))
+    params = ACP::Protocol::SessionUpdateParams.from_json(wire.to_json)
+    params.session_id.should eq("parent")
+    update = params.update.as(ACP::Protocol::SubagentUpdate)
+    update.session_id.should eq("child")
+    update.title_present?.should be_true
+    update.title.should be_nil
+    update.description_present?.should be_false
+    update.capabilities.not_nil!.cancel.should be_a(ACP::Protocol::SessionCancelCapabilities)
+    update.cwd.should eq("/work/child")
+    update.additional_directories.should eq([] of String)
+    JSON.parse(params.to_json).should eq(wire)
+  end
+
+  it "retains the payload of an unrecognized state or stop reason" do
+    future = JSON.parse(%({"state":"_waiting","stopReason":"_deferred","hint":{"priority":2}}))
+    snapshot = ACP::Protocol::SubagentState.from_json(future.to_json)
+    snapshot.state.should eq("_waiting")
+    snapshot.stop_reason.should eq("_deferred")
+    JSON.parse(snapshot.to_json).should eq(future)
+
+    failed = ACP::Protocol::SubagentState.from_json(%({"state":"idle","stopReason":"error","error":{"code":-32000,"message":"Authentication required"}}))
+    failed.error.not_nil!["code"].as_i.should eq(-32000)
+  end
+
+  it "round-trips message views, content clears and typed chunks" do
+    update = ACP::Protocol::SessionMessageUpdate.new("incoming")
+    update.sender_session_id = "parent"
+    update.recipient_session_id = "child"
+    update.sender_message_id = "outgoing"
+    update.recipient_message_id = nil
+    update.content = [ACP::Protocol::TextContentBlock.new("Review tests")] of ACP::Protocol::ContentBlock
+    wire = JSON.parse(%({
+      "sessionUpdate": "session_message",
+      "messageId": "incoming",
+      "senderSessionId": "parent",
+      "recipientSessionId": "child",
+      "senderMessageId": "outgoing",
+      "recipientMessageId": null,
+      "content": [{"type":"text","text":"Review tests"}]
+    }))
+    JSON.parse(update.to_json).should eq(wire)
+    decoded = ACP::Protocol::SessionUpdate.from_json(wire.to_json).as(ACP::Protocol::SessionMessageUpdate)
+    decoded.recipient_message_id_present?.should be_true
+    decoded.recipient_message_id.should be_nil
+    decoded.content.not_nil!.first.as(ACP::Protocol::TextContentBlock).text.should eq("Review tests")
+    decoded.content = nil
+    JSON.parse(decoded.to_json)["content"].raw.should be_nil
+
+    chunk_wire = JSON.parse(%({"sessionUpdate":"session_message_chunk","messageId":"incoming","content":{"type":"text","text":" now"},"_meta":{"example.test/chunk":true}}))
+    chunk = ACP::Protocol::SessionUpdate.from_json(chunk_wire.to_json).as(ACP::Protocol::SessionMessageChunkUpdate)
+    chunk.message_id.should eq("incoming")
+    chunk.content.as(ACP::Protocol::TextContentBlock).text.should eq(" now")
+    JSON.parse(chunk.to_json).should eq(chunk_wire)
+  end
+
+  it "decodes a typed session reference inside tool call content" do
+    update = ACP::Protocol::SessionUpdate.from_json(%({
+      "sessionUpdate": "tool_call", "toolCallId": "call", "title": "Review tests",
+      "content": [{"type": "session", "sessionId": "child", "_meta": {"example.test/ref": true}}]
+    })).as(ACP::Protocol::ToolCallUpdate)
+    reference = update.typed_content.not_nil!.first.as(ACP::Protocol::ToolCallSessionReference)
+    reference.session_id.should eq("child")
+    JSON.parse(reference.to_json).should eq(update.content.not_nil!.first)
+  end
+end
+
 # ─── Helper: In-Memory Transport ──────────────────────────────────────
 #
 # A test transport that uses IO::Memory pairs so we can simulate
