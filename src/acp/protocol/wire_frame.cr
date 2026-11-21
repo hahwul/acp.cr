@@ -146,6 +146,18 @@ module ACP
         repeated
       end
 
+      # Reads an object for typed decoding, rejecting repeated fields named by the caller.
+      # :nodoc:
+      def self.read_with_unique_members(pull : JSON::PullParser, *fields : String) : JSON::PullParser
+        location = pull.location
+        wire = read_raw(pull)
+        repeated = repeated_members(wire, *fields)
+        unless repeated.empty?
+          raise JSON::ParseException.new("Ambiguous JSON fields: #{repeated.join(", ")}", *location)
+        end
+        JSON::PullParser.new(wire)
+      end
+
       private def self.unique_members?(pull : JSON::PullParser, *, recursive : Bool) : Bool
         case pull.kind
         when .begin_object?

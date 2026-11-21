@@ -267,6 +267,9 @@ module ACP
         include JSON::Serializable
         include LosslessUnmapped
 
+        private TERMINAL_WIRE_FIELDS   = {"terminalId", "data", "output", "capabilities"}
+        private TOOL_CHUNK_WIRE_FIELDS = {"toolCallId", "content"}
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String
@@ -275,17 +278,17 @@ module ACP
         @duplicate_fields : Set(String)?
 
         @[JSON::Field(ignore: true)]
-        @earlier_terminal_fields : Hash(String, Array(String))?
+        @earlier_fields : Hash(String, Array(String))?
 
         # Creates an update with its variant payload.
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
         protected def on_unknown_json_attribute(pull, key, key_location)
-          if key.in?("terminalId", "data", "output", "capabilities")
+          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key)
             if earlier = exact_unmapped_json(key)
               (@duplicate_fields ||= Set(String).new).add(key)
-              fields = @earlier_terminal_fields ||= {} of String => Array(String)
+              fields = @earlier_fields ||= {} of String => Array(String)
               fields.put_if_absent(key) { [] of String } << earlier
             end
           elsif key.in?("configOptions", "availableCommands") && (@json_unmapped.has_key?(key) || raw_field(key))
@@ -295,9 +298,13 @@ module ACP
         end
 
         protected def on_to_json(json)
-          if @session_update.in?("terminal_update", "terminal_output_chunk")
-            @earlier_terminal_fields.try &.each do |key, values|
-              next unless @json_unmapped.has_key?(key) || raw_field(key)
+          retained_fields = case @session_update
+                            when "terminal_update", "terminal_output_chunk" then TERMINAL_WIRE_FIELDS
+                            when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
+                            end
+          if retained_fields
+            @earlier_fields.try &.each do |key, values|
+              next unless retained_fields.includes?(key) && (@json_unmapped.has_key?(key) || raw_field(key))
               values.each { |value| json.field(key) { json.raw(value) } }
             end
           end

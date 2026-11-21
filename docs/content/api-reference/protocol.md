@@ -264,6 +264,14 @@ An invalid optional line leaves just the path, and `meta_raw` exposes the
 location's exact extension metadata.
 [ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls#following-the-agent)
 
+Process `ToolCallContentChunk` in receive order with `ToolCallUpdate`.
+Append each chunk's item to the content for its tool call. A later update's
+present `content` field replaces or clears that list. Chunk metadata is scoped
+to the chunk. Streamed and replacement content use the same item validation
+and preserve custom and future payloads. An unusable chunk remains available
+in the raw notification.
+[ACP v2 streamed tool content](https://agentclientprotocol.com/protocol/v2/tool-calls#reporting)
+
 `ToolCallContent#diff` exposes usable file changes in wire order and omits
 entries with conflicting destination paths. It returns `nil` when no usable
 changes remain. A malformed optional patch object leaves the structured
