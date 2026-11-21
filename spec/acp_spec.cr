@@ -312,6 +312,66 @@ describe "ACP v2 session detail updates" do
   end
 end
 
+describe "ACP v2 configuration and command updates" do
+  it "decodes grouped and flat select options, boolean values, and custom variants" do
+    wire = JSON.parse(<<-JSON)
+      {"sessionUpdate":"config_option_update","configOptions":[
+        {"type":"select","configId":"model","name":"Model","category":"model","currentValue":"a","options":[{"groupId":"provider","name":"Provider","options":[{"value":"a","name":"Model A"},false]}]},
+        {"type":"select","configId":"mode","name":"Mode","currentValue":"chat","options":[{"value":"chat","name":"Chat"}]},
+        {"type":"boolean","configId":"enabled","name":"Enabled","currentValue":false},
+        {"type":"_custom","configId":"custom","name":"Custom","currentValue":{"flag":true}},
+        {"type":"boolean","id":"v1-only","name":"Invalid"}
+      ]}
+      JSON
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::ConfigOptionUpdate)
+    grouped, flat, toggle, custom = update.typed_config_options
+    grouped.config_id.should eq("model")
+    grouped.category.should eq("model")
+    grouped.selected_value.should eq("a")
+    group = grouped.select_options.as(Array(ACP::Protocol::V2::ConfigOptionGroup)).first
+    group.group_id.should eq("provider")
+    group.values.map(&.value).should eq(["a"])
+    flat.select_options.as(Array(ACP::Protocol::ConfigOptionValue)).first.name.should eq("Chat")
+    toggle.boolean_value.should be_false
+    custom.type.should eq("_custom")
+    custom.json_unmapped["currentValue"]["flag"].should eq(true)
+    update.typed_config_options.size.should eq(4)
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "distinguishes slash commands and their input from future command variants" do
+    wire = JSON.parse(<<-JSON)
+      {"sessionUpdate":"available_commands_update","availableCommands":[
+        {"type":"command","name":"plan","description":"Plan work","input":{"type":"text","hint":"topic"}},
+        {"type":"command","name":"edit","description":"Edit work","input":{"type":"_structured","schema":{"flag":true}}},
+        {"type":"_future","name":"future","description":"Future command","payload":[1]},
+        {"name":"missing-type","description":"Invalid"}
+      ]}
+      JSON
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::AvailableCommandsUpdate)
+    plan, edit, future = update.typed_available_commands
+    plan.slash_command?.should be_true
+    plan.input.not_nil!.text_hint.should eq("topic")
+    edit.input.not_nil!.type.should eq("_structured")
+    edit.input.not_nil!.json_unmapped["schema"]["flag"].should eq(true)
+    future.slash_command?.should be_false
+    future.json_unmapped["payload"].should eq(JSON.parse("[1]"))
+    update.typed_available_commands.size.should eq(3)
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "uses the same typed projections in session setup and option change results" do
+    state = %({"configOptions":[{"type":"boolean","configId":"flag","name":"Flag","currentValue":true}],"availableCommands":[{"type":"command","name":"plan","description":"Plan work"}]})
+    new_session = ACP::Protocol::V2::SessionNewResult.from_json(state.sub("{", %({"sessionId":"session",)))
+    resumed = ACP::Protocol::V2::SessionResumeResult.from_json(state)
+    changed = ACP::Protocol::V2::SessionSetConfigOptionResult.from_json(state)
+    new_session.typed_config_options.first.config_id.should eq("flag")
+    new_session.typed_available_commands.first.name.should eq("plan")
+    resumed.typed_available_commands.first.input.should be_nil
+    changed.typed_config_options.first.boolean_value.should be_true
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({

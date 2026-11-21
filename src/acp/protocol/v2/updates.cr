@@ -1,4 +1,5 @@
 require "./initialization"
+require "./configuration"
 require "./session_updates"
 require "./tool_updates"
 
@@ -239,6 +240,10 @@ module ACP
             Protocol::PlanRemovedUpdate.from_json(to_json)
           when "notice"
             Protocol::NoticeUpdate.from_json(to_json)
+          when "available_commands_update"
+            AvailableCommandsUpdate.from_json(to_json)
+          when "config_option_update"
+            ConfigOptionUpdate.from_json(to_json)
           end
         rescue JSON::ParseException
           nil
