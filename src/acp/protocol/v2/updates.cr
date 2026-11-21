@@ -153,9 +153,8 @@ module ACP
           state:                  {StateSnapshot, "state"},
           cwd:                    {String, "cwd"},
           additional_directories: {Array(String), "additionalDirectories"},
-          meta:                   {Hash(String, JSON::Any), "_meta"},
         })
-        include MetadataPatch
+        include LosslessMetadataPatch
 
         # Creates an update for the specified child. Set only the patched fields.
         def initialize(@session_id : String)
@@ -326,17 +325,17 @@ module ACP
           when "tool_call_content_chunk"
             ToolCallContentChunk.from_json(WireFrame.encode(self))
           when "terminal_update"
-            TerminalUpdate.from_json(to_json)
+            TerminalUpdate.from_json(WireFrame.encode(self))
           when "terminal_output_chunk"
-            TerminalOutputChunk.from_json(to_json)
+            TerminalOutputChunk.from_json(WireFrame.encode(self))
           when "subagent_update"
             SubagentUpdate.from_json(WireFrame.encode(self))
           when "session_message"
             SessionMessageUpdate.from_json(WireFrame.encode(self))
           when "session_info_update"
-            SessionInfoUpdate.from_json(to_json)
+            SessionInfoUpdate.from_json(WireFrame.encode(self))
           when "usage_update"
-            UsageUpdate.from_json(to_json)
+            UsageUpdate.from_json(WireFrame.encode(self))
           when "compaction_update"
             CompactionUpdate.from_json(WireFrame.encode(self))
           when "compaction_summary_chunk"

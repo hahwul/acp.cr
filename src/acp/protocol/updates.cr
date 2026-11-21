@@ -765,6 +765,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/schema
     struct Cost
       include JSON::Serializable
+      include LosslessMetadata
 
       # The amount spent, in `currency` units (required).
       property amount : Float64
@@ -772,15 +773,12 @@ module ACP
       # The currency the amount is denominated in (required).
       property currency : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @amount : Float64,
         @currency : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
