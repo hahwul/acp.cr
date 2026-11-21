@@ -253,10 +253,20 @@ supplies, including explicit clears.
 Typed child-session announcements expose the mirrored `StateSnapshot`, and
 inter-session messages retain their transcript links and open content.
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
-fields from clears and apply metadata patches by key. Plans expose their ID
-even when the representation is unknown. Plan removal, notices, and
-compaction summary chunks reuse their wire-compatible `ACP::Protocol` types.
+fields from clears and apply metadata patches by key. Notices and compaction
+summary chunks reuse their wire-compatible `ACP::Protocol` types.
 [ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
+
+`V2::PlanUpdate#plan` exposes the plan ID and the full representation as
+`raw`. Its `typed` accessor returns a checklist or a Markdown plan, and
+checklists keep valid entries in order. Replace the whole plan for the
+given session and plan ID, including when the representation is unknown.
+`PlanRemovedUpdate` removes a known plan. The v2 client ignores removals
+for plan IDs it has not received in that session. Register your callback
+before creating or resuming the session. The client bounds the provisional
+IDs it tracks before creation completes. Use `on_update` to receive
+plans containing exact values outside `JSON::Any`.
+[ACP v2 Agent Plan](https://agentclientprotocol.com/protocol/v2/agent-plan)
 
 Configuration and command updates expose `typed_config_options` and
 `typed_available_commands`. Session setup responses provide the same

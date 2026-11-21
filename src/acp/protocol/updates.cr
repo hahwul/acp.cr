@@ -38,6 +38,7 @@
 require "json"
 require "./content_block"
 require "./prompt_suggestions"
+require "./session_options"
 require "./tool_call_content"
 require "./tool_call_content_helper"
 require "./chunk_content_helper"
@@ -460,6 +461,7 @@ module ACP
       # The list of tasks to be accomplished (required).
       # When updating, the agent MUST send a complete list; the client
       # replaces the entire plan with each update.
+      @[JSON::Field(converter: ::ACP::Protocol::PlanEntries)]
       property entries : Array(PlanEntry) = [] of PlanEntry
 
       # Extension metadata.
@@ -478,6 +480,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/agent-plan#plan-entries
     struct PlanEntry
       include JSON::Serializable
+      include LosslessMetadata
 
       # Human-readable description of what this task aims to accomplish (required).
       property content : String
@@ -485,28 +488,61 @@ module ACP
       # The relative importance of this task: "high", "medium", or "low" (required).
       property priority : String = "medium"
 
-      # Current execution status: "pending", "in_progress", or "completed" (required).
+      # Current execution status: "pending", "in_progress", "completed", "cancelled", or an extension.
       property status : String = "pending"
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates an entry with defaults for priority and status.
       def initialize(
         @content : String,
         @priority : String = "medium",
         @status : String = "pending",
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
     # Backward-compatible alias.
     alias PlanStep = PlanEntry
 
+    # :nodoc:
+    module PlanEntries
+      def self.from_json(pull : JSON::PullParser) : Array(PlanEntry)
+        read(pull, require_fields: false)
+      end
+
+      def self.read(pull : JSON::PullParser, *, require_fields : Bool) : Array(PlanEntry)
+        entries = [] of PlanEntry
+        pull.read_array do
+          wire = WireFrame.read_raw(pull)
+          if entry = decode_entry(wire, require_fields: require_fields)
+            entries << entry
+          end
+        end
+        entries
+      end
+
+      private def self.decode_entry(wire : String, *, require_fields : Bool) : PlanEntry?
+        return unless WireFrame.unique_members?(wire)
+
+        if require_fields
+          fields = RawJson.new(JSON::PullParser.new(wire)).members?
+          return unless fields && fields["priority"]?.try(&.as_s?) && fields["status"]?.try(&.as_s?)
+        end
+        PlanEntry.from_json(wire)
+      rescue JSON::ParseException
+        nil
+      end
+
+      def self.to_json(entries : Array(PlanEntry), json : JSON::Builder) : Nil
+        entries.to_json(json)
+      end
+    end
+
     # A complete identified plan carried by `plan_update`.
     abstract struct PlanUpdateContent
       include JSON::Serializable
+      include LosslessMetadata
 
       use_json_discriminator "type", {
         "items"    => PlanItems,
@@ -519,20 +555,26 @@ module ACP
       # Opaque plan ID, unique within its session.
       @[JSON::Field(key: "planId")]
       getter plan_id : String
-
-      # Extension metadata belonging to the plan.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
     end
 
     # An identified plan represented as a complete checklist.
     struct PlanItems < PlanUpdateContent
       # Current entries. Each update supplies the full list.
+      @[JSON::Field(converter: ::ACP::Protocol::PlanEntries)]
       property entries : Array(PlanEntry)
 
       # Creates a checklist plan.
-      def initialize(@plan_id : String, @entries : Array(PlanEntry), @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@plan_id : String, @entries : Array(PlanEntry), meta : Hash(String, JSON::Any)? = nil)
         @type = "items"
+        self.meta = meta
+      end
+
+      # Creates a checklist with exact extension metadata.
+      def initialize(@plan_id : String, @entries : Array(PlanEntry), *, meta_raw : RawJson?)
+        @type = "items"
+        if meta_raw && meta_raw.object?
+          @metadata_wire = PreservedJson.new(meta_raw, project_object_members: true)
+        end
       end
     end
 
@@ -542,42 +584,42 @@ module ACP
       property content : String
 
       # Optional absolute path to the file containing the plan.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalAbsolutePath)]
       property path : String?
 
       # Creates a Markdown plan.
-      def initialize(@plan_id : String, @content : String, @path : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@plan_id : String, @content : String, @path : String? = nil, meta : Hash(String, JSON::Any)? = nil)
         @type = "markdown"
+        self.meta = meta
       end
     end
 
     # Replaces the complete plan with this ID, including its representation.
     struct IdentifiedPlanUpdate < SessionUpdate
+      include LosslessMetadata
+
       # The replacement checklist or Markdown document.
       property plan : PlanUpdateContent
 
-      # Extension metadata belonging to the update.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a `plan_update` notification payload.
-      def initialize(@plan : PlanUpdateContent, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@plan : PlanUpdateContent, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "plan_update"
+        self.meta = meta
       end
     end
 
     # Removes a plan previously announced in the same session.
     struct PlanRemovedUpdate < SessionUpdate
+      include LosslessMetadata
+
       # The plan ID to remove.
       @[JSON::Field(key: "planId")]
       property plan_id : String
 
-      # Extension metadata belonging to the update.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a `plan_removed` notification payload.
-      def initialize(@plan_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@plan_id : String, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "plan_removed"
+        self.meta = meta
       end
     end
 

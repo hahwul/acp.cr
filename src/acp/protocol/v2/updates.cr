@@ -341,9 +341,9 @@ module ACP
           when "compaction_summary_chunk"
             Protocol::CompactionSummaryChunkUpdate.from_v2_json(WireFrame.encode(self))
           when "plan_update"
-            PlanUpdate.from_json(to_json)
+            PlanUpdate.from_json(WireFrame.encode(self))
           when "plan_removed"
-            Protocol::PlanRemovedUpdate.from_json(to_json)
+            Protocol::PlanRemovedUpdate.from_json(WireFrame.encode(self))
           when "notice"
             Protocol::NoticeUpdate.from_json(to_json)
           when "available_commands_update"

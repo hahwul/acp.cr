@@ -68,21 +68,7 @@ module ACP
         include JSON::Serializable
 
         # :nodoc:
-        module OptionalPath
-          def self.from_json(pull : JSON::PullParser) : String?
-            if pull.kind.string?
-              value = pull.read_string
-              return value if Protocol.absolute_path?(value)
-            else
-              pull.skip
-            end
-            nil
-          end
-
-          def self.to_json(value : String, json : JSON::Builder) : Nil
-            json.string(value)
-          end
-        end
+        alias OptionalPath = Protocol::OptionalAbsolutePath
 
         # Wire discriminator for skill entries.
         getter type : String = "skill"

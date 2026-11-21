@@ -148,6 +148,24 @@ module ACP
       @root_states[session_id]?.try(&.attachment_order)
     end
 
+    # Returns the order for an attached session or an in-flight reattachment.
+    def plan_update_order(session_id : String) : UInt64?
+      root = ancestors(session_id).last
+      pending = @setup_by_session[root]?
+      return pending.write_order if pending && pending.written? && !pending.retired?
+
+      late_resume(root).try(&.write_order) || attachment_order(root)
+    end
+
+    # A new or forked session can report updates before its ID is confirmed.
+    def accepts_early_plan_updates?(session_id : String) : Bool
+      !@closed_roots.includes?(ancestors(session_id).last) && creating_session?
+    end
+
+    def creating_session? : Bool
+      @setups.each_value.any? { |setup| setup.written? && setup.creates_session? }
+    end
+
     def setup_waiting_to_write?(session_id : String) : Bool
       if setup = setup_for(session_id)
         return !setup.written?
@@ -183,7 +201,7 @@ module ACP
       end
 
       attached = @root_states[session_id]?
-      early = !attached && !setup && @setups.each_value.any? { |candidate| candidate.written? && candidate.creates_session? }
+      early = !attached && !setup && creating_session?
       return unless setup || attached || early
 
       wire = Protocol::RawJson.new(JSON::PullParser.new(update))
@@ -381,6 +399,11 @@ module ACP
         preserve_after = order if late_resume(session_id)
       end
       drop_runtime(session_id, preserve_after: preserve_after)
+      runtime_session_ids(session_id)
+    end
+
+    # The session and its tracked descendants.
+    def runtime_session_ids(session_id : String) : Array(String)
       descendants(session_id).push(session_id)
     end
 
@@ -401,7 +424,7 @@ module ACP
     end
 
     def discard_old_entity_grants(session_id : String, order : UInt64) : Nil
-      affected = descendants(session_id).push(session_id)
+      affected = runtime_session_ids(session_id)
       @cancellable_entities.reject! { |entity, written| affected.includes?(entity[0]) && written < order }
     end
 

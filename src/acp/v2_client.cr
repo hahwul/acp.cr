@@ -240,6 +240,21 @@ module ACP
               return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
               if update.update.session_update == "cursor_update" && (cursor = update.update.typed.as?(Protocol::CursorUpdate))
                 observe_cursor_update(update.session_id, cursor)
+              elsif update.update.session_update.in?("plan_update", "plan_removed")
+                return unless @on_v2_update || @on_notification
+
+                if params_json
+                  plan_wire = Protocol::WireFrame.field(params_json, "update")
+                  return unless plan_wire && Protocol::WireFrame.unique_members?(plan_wire, recursive: false)
+                end
+                return unless @on_v2_update || raw_session_update_representable?(params_json)
+
+                case plan_operation = update.update.typed
+                when Wire::PlanUpdate, Protocol::PlanRemovedUpdate
+                  return unless track_plan_operation(update.session_id, plan_operation)
+                else
+                  return
+                end
               end
               if suggestion_update && (types = @suggestion_content_types)
                 payload = update.update

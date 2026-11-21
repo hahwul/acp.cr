@@ -164,7 +164,7 @@ module ACP
       # An identified execution plan, including custom and future representations.
       struct PlanContent
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Representation discriminator, such as items or markdown.
         @[JSON::Field(key: "type")]
@@ -178,17 +178,63 @@ module ACP
         def initialize(@type : String, @plan_id : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
+        # Reads the envelope before decoding entries independently.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = WireFrame.read_raw(pull)
+          unless WireFrame.unique_members?(wire, recursive: false)
+            raise JSON::ParseException.new("Ambiguous ACP plan fields", *location)
+          end
+          previous_def(JSON::PullParser.new(wire))
+        end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
+        # The complete plan representation, including unrecognized fields.
+        def raw : RawJson
+          RawJson.new(JSON::PullParser.new(WireFrame.encode(self)))
+        end
+
+        # Exact extension metadata scoped to this plan.
+        def meta_raw : RawJson?
+          if json = exact_unmapped_json("_meta")
+            RawJson.new(JSON::PullParser.new(json)) if json.starts_with?('{')
+          end
+        end
+
         # Returns the structured form of a known checklist or Markdown plan.
         def typed : Protocol::PlanUpdateContent?
-          Protocol::PlanUpdateContent.from_json(to_json) if @type.in?("items", "markdown")
+          case @type
+          when "items"
+            if entries = exact_unmapped_json("entries")
+              parsed = Protocol::PlanEntries.read(JSON::PullParser.new(entries), require_fields: true)
+              Protocol::PlanItems.new(@plan_id, parsed, meta_raw: meta_raw)
+            end
+          when "markdown"
+            Protocol::PlanMarkdown.from_json(WireFrame.encode(self))
+          end
         rescue JSON::ParseException
           nil
+        end
+
+        private def after_initialize : Nil
+          valid = case @type
+                  when "items"    then exact_unmapped_json("entries").try(&.starts_with?('['))
+                  when "markdown" then @json_unmapped["content"]?.try(&.as_s?)
+                  else                 true
+                  end
+          unless valid
+            raise JSON::ParseException.new("Missing or invalid content for ACP plan type #{@type.inspect}", 0, 0)
+          end
         end
       end
 
       # Replaces an identified plan with a complete new representation.
       struct PlanUpdate
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -197,12 +243,9 @@ module ACP
         # Complete replacement for this plan.
         property plan : PlanContent
 
-        # Extension metadata scoped to the update.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates an update with a complete plan.
-        def initialize(@plan : PlanContent, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@plan : PlanContent, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
       end
     end

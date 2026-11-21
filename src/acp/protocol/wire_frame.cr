@@ -125,21 +125,31 @@ module ACP
         nil
       end
 
-      # Whether all JSON objects use distinct member names.
+      # Whether objects have distinct member names. Set recursive to false to check only the outer value.
       # :nodoc:
-      def self.unique_members?(source : String) : Bool
-        unique_members?(JSON::PullParser.new(source))
+      def self.unique_members?(source : String, *, recursive : Bool = true) : Bool
+        unique_members?(JSON::PullParser.new(source), recursive: recursive)
       end
 
-      private def self.unique_members?(pull : JSON::PullParser) : Bool
+      private def self.unique_members?(pull : JSON::PullParser, *, recursive : Bool) : Bool
         case pull.kind
         when .begin_object?
           keys = Set(String).new
           pull.read_object do |key|
-            return false unless keys.add?(key) && unique_members?(pull)
+            return false unless keys.add?(key)
+
+            if recursive
+              return false unless unique_members?(pull, recursive: true)
+            else
+              pull.skip
+            end
           end
         when .begin_array?
-          pull.read_array { return false unless unique_members?(pull) }
+          if recursive
+            pull.read_array { return false unless unique_members?(pull, recursive: true) }
+          else
+            pull.skip
+          end
         else
           pull.skip
         end
