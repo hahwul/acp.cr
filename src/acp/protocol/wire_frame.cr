@@ -131,6 +131,21 @@ module ACP
         unique_members?(JSON::PullParser.new(source), recursive: recursive)
       end
 
+      # Which of the specified member names are repeated in the outer object.
+      # :nodoc:
+      def self.repeated_members(source : String, *fields : String) : Set(String)
+        repeated = Set(String).new
+        pull = JSON::PullParser.new(source)
+        if pull.kind.begin_object?
+          seen = Set(String).new
+          pull.read_object do |key|
+            repeated.add(key) if fields.includes?(key) && !seen.add?(key)
+            pull.skip
+          end
+        end
+        repeated
+      end
+
       private def self.unique_members?(pull : JSON::PullParser, *, recursive : Bool) : Bool
         case pull.kind
         when .begin_object?

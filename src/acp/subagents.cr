@@ -493,8 +493,8 @@ module ACP
       return unless current_updates?(session_id) && (entity_id = update[key]?.try(&.as_s?)) && (caps = update["capabilities"]?)
 
       capabilities = caps.as_h?
-      # A malformed tool-call capability patch defaults to omission.
-      return if key == "toolCallId" && !caps.raw.nil? && !capabilities
+      # Malformed capability patches default to omission.
+      return if !caps.raw.nil? && !capabilities
 
       entity = {session_id, key, entity_id}
       if capabilities.try(&.["cancel"]?).try(&.as_h?)

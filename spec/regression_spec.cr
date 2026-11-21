@@ -5310,3 +5310,161 @@ describe "ACP v2 tool-call patch decoding" do
     end
   end
 end
+describe "ACP v2 terminal patch decoding" do
+  it "keeps exit information when sibling fields and the optional exit code are malformed" do
+    wire = <<-JSON
+      {"sessionUpdate":"terminal_update","terminalId":"term","command":[],
+       "cwd":"relative","output":{"data":"YQ"},"size":{"cols":0,"rows":24},"capabilities":false,
+       "exitStatus":{"exitCode":9223372036854775808,"signal":"SIGTERM",
+                     "_meta":{"example.test/sequence":18446744073709551615}}}
+      JSON
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::TerminalUpdate)
+    update.command_present?.should be_false
+    update.cwd_present?.should be_false
+    update.output_present?.should be_false
+    update.size_present?.should be_false
+    update.capabilities_present?.should be_false
+    update.exit_status_present?.should be_true
+    status = update.exit_status.not_nil!
+    status.exit_code.should be_nil
+    status.signal.should eq("SIGTERM")
+    status.meta_raw.not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+    encoded = ACP::Protocol::RawJson.from_json(update.to_json)
+    encoded.field("command").should be_nil
+    encoded.field("cwd").should be_nil
+    encoded.field("output").should be_nil
+    encoded.field("size").should be_nil
+    encoded.field("capabilities").should be_nil
+  end
+
+  it "distinguishes terminal replacements, explicit clears, and malformed optional fields" do
+    base = %("sessionUpdate":"terminal_update","terminalId":"term")
+    clear = %({#{base},"command":null,"cwd":null,"output":null,"exitStatus":null,"size":null,"capabilities":null})
+    update = ACP::Protocol::V2::TerminalUpdate.from_json(clear)
+    update.command_present?.should be_true
+    update.cwd_present?.should be_true
+    update.output_present?.should be_true
+    update.exit_status_present?.should be_true
+    update.size_present?.should be_true
+    update.capabilities_present?.should be_true
+    JSON.parse(update.to_json).should eq(JSON.parse(clear))
+
+    valid = ACP::Protocol::V2::TerminalUpdate.from_json <<-'JSON'
+      {"terminalId":"term","cwd":"C:\\work","output":{"data":""},
+       "exitStatus":{"exitCode":-9223372036854775808,"signal":false},
+       "size":{"cols":65535,"rows":1}}
+      JSON
+    valid.cwd.should eq("C:\\work")
+    valid.output_present?.should be_true
+    valid.output.not_nil!.bytes.should be_empty
+    valid.exit_status.not_nil!.exit_code.should eq(Int64::MIN)
+    valid.exit_status.not_nil!.signal.should be_nil
+    valid.size.not_nil!.cols.should eq(UInt16::MAX)
+    valid.size.not_nil!.rows.should eq(1_u16)
+
+    bad = ACP::Protocol::V2::TerminalUpdate.from_json(%({#{base},"exitStatus":[],"size":{"cols":1,"rows":65536}}))
+    bad.exit_status_present?.should be_false
+    bad.size_present?.should be_false
+
+    unknown = ACP::Protocol::V2::TerminalUpdate.from_json(%({#{base},"exitStatus":{"exitCode":[],"signal":{}}}))
+    unknown.exit_status_present?.should be_true
+    unknown.exit_status.not_nil!.exit_code.should be_nil
+    unknown.exit_status.not_nil!.signal.should be_nil
+    JSON.parse(unknown.to_json)["exitStatus"].should eq(JSON.parse("{}"))
+
+    ambiguous = %({#{base},"output":{"data":"YQ=="},"output":{"data":"Yg=="},"command":"Kept"})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(ambiguous).typed.as(ACP::Protocol::V2::TerminalUpdate)
+    update.output_present?.should be_false
+    update.command.should eq("Kept")
+  end
+
+  it "accepts standard Base64 output and rejects invalid snapshots and chunks" do
+    ["YQ", "YQ===", "Y Q=", "_w==", "YQ==\n", "A===", "a$b=", "é=="].each do |data|
+      snapshot = %({"data":#{data.to_json}})
+      chunk = %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":#{data.to_json}})
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::TerminalOutput.from_json(snapshot) }
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::TerminalOutputChunk.from_json(chunk) }
+      ACP::Protocol::V2::SessionUpdate.from_json(chunk).typed.should be_nil
+    end
+
+    ACP::Protocol::V2::TerminalOutput.from_json(%({"data":"AP9B"})).bytes.should eq(Bytes[0, 255, 65])
+    ACP::Protocol::V2::TerminalOutput.from_json(%({"data":"+/8="})).bytes.should eq(Bytes[0xFB, 0xFF])
+    first = ACP::Protocol::V2::TerminalOutputChunk.from_json(%({"terminalId":"term","data":"4g=="}))
+    second = ACP::Protocol::V2::TerminalOutputChunk.from_json(%({"terminalId":"term","data":"gqw="}))
+    first.bytes.should eq(Bytes[0xE2])
+    second.bytes.should eq(Bytes[0x82, 0xAC])
+
+    repeated = %({"data":"YQ==","data":"Yg=="})
+    expect_raises(JSON::ParseException, /Ambiguous/) { ACP::Protocol::V2::TerminalOutput.from_json(repeated) }
+    chunk = %({"sessionUpdate":"terminal_output_chunk","terminalId":"first","terminalId":"second","data":"YQ=="})
+    expect_raises(JSON::ParseException, /Ambiguous/) { ACP::Protocol::V2::TerminalOutputChunk.from_json(chunk) }
+    ACP::Protocol::V2::SessionUpdate.from_json(chunk).typed.should be_nil
+  end
+
+  it "delivers usable terminal changes and preserves explicit cancellation clears over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(ACP::Protocol::V2::SessionUpdateParams).new(5)
+      client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(update)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      snapshot = %({"terminalId":"term","sessionUpdate":"terminal_update","command":"fixture","capabilities":{"cancel":{}},"output":{"data":"YQ=="}})
+      patch = %({"terminalId":"term","sessionUpdate":"terminal_update","capabilities":false,"output":{"data":"YQ"},"size":{"cols":80,"rows":24}})
+      bad_chunk = %({"terminalId":"term","sessionUpdate":"terminal_output_chunk","data":"YQ"})
+      ambiguous_chunk = %({"terminalId":"term","sessionUpdate":"terminal_output_chunk","data":"YQ","data":"Yg=="})
+      good_chunk = %({"terminalId":"term","sessionUpdate":"terminal_output_chunk","data":"Yg==","_meta":{"example.test/sequence":18446744073709551615}})
+      [snapshot, patch, bad_chunk, ambiguous_chunk, good_chunk].each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      first = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::TerminalUpdate)
+      first.output.not_nil!.bytes.should eq("a".to_slice)
+      middle = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::TerminalUpdate)
+      middle.capabilities_present?.should be_false
+      middle.output_present?.should be_false
+      middle.size.not_nil!.cols.should eq(80_u16)
+      rejected = next_exact_session_update(updates)
+      rejected.update.typed.should be_nil
+      rejected.raw.field("update").not_nil!.field("data").not_nil!.as_s?.should eq("YQ")
+      duplicate = next_exact_session_update(updates)
+      duplicate.update.typed.should be_nil
+      ACP::Protocol::WireFrame.repeated_members(duplicate.raw.field("update").not_nil!.json, "data").should contain("data")
+      accepted = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::TerminalOutputChunk)
+      accepted.bytes.should eq("b".to_slice)
+      accepted.meta_raw.not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+
+      sent = Channel(JSON::Any).new(1)
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        sent.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{}})
+      end
+      client.terminal_cancel("s", "term")
+      sent.receive["method"].should eq("terminal/cancel")
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"terminal_update","terminalId":"term","capabilities":null,"capabilities":false}}})
+      ambiguous_clear = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::TerminalUpdate)
+      ambiguous_clear.capabilities_present?.should be_true
+      ambiguous_clear.capabilities.should be_nil
+      expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.terminal_cancel("s", "term") }
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"terminal_update","terminalId":"wrong","terminalId":"other","capabilities":{"cancel":{}}}}})
+      next_exact_session_update(updates).update.typed.should be_nil
+      expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.terminal_cancel("s", "other") }
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{snapshot}}})
+      next_exact_session_update(updates)
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"terminal_update","terminalId":"term","capabilities":null}}})
+      cleared = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::TerminalUpdate)
+      cleared.capabilities_present?.should be_true
+      cleared.capabilities.should be_nil
+      expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.terminal_cancel("s", "term") }
+    ensure
+      client.try(&.close)
+    end
+  end
+end

@@ -138,26 +138,12 @@ module ACP
         def self.new(pull : JSON::PullParser) : self
           location = pull.location
           wire = RawJson.new(pull)
-          repeated = repeated_fields(wire)
+          repeated = WireFrame.repeated_members(wire.json, "changes", "patch")
           if repeated.includes?("changes")
             raise JSON::ParseException.new("Ambiguous ACP diff changes", *location)
           end
           wire = wire.without_field("patch") if repeated.includes?("patch")
           previous_def(JSON::PullParser.new(wire.json))
-        end
-
-        # :nodoc:
-        def self.repeated_fields(wire : RawJson) : Set(String)
-          seen = Set(String).new
-          repeated = Set(String).new
-          if wire.object?
-            pull = JSON::PullParser.new(wire.json)
-            pull.read_object do |key|
-              repeated.add(key) if key.in?("type", "changes", "patch") && !seen.add?(key)
-              pull.skip
-            end
-          end
-          repeated
         end
 
         # Returns the patch in ACP's standard git_patch format, when supplied.
@@ -224,7 +210,7 @@ module ACP
           content = previous_def(JSON::PullParser.new(wire.json))
           return content unless content.content_type == "diff"
 
-          repeated = DiffContent.repeated_fields(wire)
+          repeated = WireFrame.repeated_members(wire.json, "type", "changes", "patch")
           return content if repeated.empty?
 
           wire = wire.without_field("changes") if repeated.includes?("type") || repeated.includes?("changes")
@@ -411,17 +397,48 @@ module ACP
         end
       end
 
+      # :nodoc:
+      module TerminalOutputData
+        def self.read_envelope(pull : JSON::PullParser, *required : String) : JSON::PullParser
+          location = pull.location
+          wire = WireFrame.read_raw(pull)
+          unless WireFrame.repeated_members(wire, *required).empty?
+            raise JSON::ParseException.new("Ambiguous ACP terminal output fields", *location)
+          end
+          JSON::PullParser.new(wire)
+        end
+
+        def self.from_json(pull : JSON::PullParser) : String
+          location = pull.location
+          data = pull.read_string
+          unless Protocol.standard_base64?(data)
+            raise JSON::ParseException.new("Terminal output must use standard Base64", *location)
+          end
+          data
+        end
+
+        def self.to_json(data : String, json : JSON::Builder) : Nil
+          json.string(data)
+        end
+      end
+
       # Base64 terminal output snapshot.
       struct TerminalOutput
         include JSON::Serializable
         include LosslessMetadata
 
         # Base64-encoded terminal bytes.
+        @[JSON::Field(converter: ::ACP::Protocol::V2::TerminalOutputData)]
         property data : String
 
         # Creates an output snapshot from base64 text.
         def initialize(@data : String, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
+        end
+
+        # Reads a snapshot with one unambiguous data field.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(TerminalOutputData.read_envelope(pull, "data"))
         end
 
         # Decodes the terminal output bytes.
@@ -436,10 +453,11 @@ module ACP
         include LosslessMetadata
 
         # Signed exit code, including platform-specific values.
-        @[JSON::Field(key: "exitCode")]
+        @[JSON::Field(key: "exitCode", converter: ::ACP::Protocol::OptionalContentValue(Int64))]
         property exit_code : Int64?
 
         # Signal name when the process was terminated by a signal.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
         property signal : String?
 
         # Creates an exit status snapshot.
@@ -463,6 +481,12 @@ module ACP
         def initialize(@cols : UInt16, @rows : UInt16, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
         end
+
+        private def after_initialize : Nil
+          if @cols.zero? || @rows.zero?
+            raise JSON::ParseException.new("ACP terminal dimensions must be positive", 0, 0)
+          end
+        end
       end
 
       # Creates or patches an Agent-owned display terminal.
@@ -477,19 +501,36 @@ module ACP
         @[JSON::Field(key: "terminalId")]
         getter terminal_id : String
 
-        # Optional fields distinguish omission from an explicit clear.
-        PatchFields.define({
-          command:      {String, "command"},
-          cwd:          {String, "cwd"},
-          output:       {TerminalOutput, "output"},
-          exit_status:  {TerminalExitStatus, "exitStatus"},
-          size:         {TerminalSize, "size"},
-          capabilities: {EntityCapabilities, "capabilities"},
+        # Malformed optional fields default to omission.
+        PatchFields.tolerant({
+          command:      {String, "command", OptionalCapabilityString},
+          cwd:          {String, "cwd", OptionalAbsolutePath},
+          output:       {TerminalOutput, "output", OptionalContentValue(TerminalOutput)},
+          exit_status:  {TerminalExitStatus, "exitStatus", OptionalContentValue(TerminalExitStatus)},
+          size:         {TerminalSize, "size", OptionalContentValue(TerminalSize)},
+          capabilities: {EntityCapabilities, "capabilities", OptionalCapabilityObject(EntityCapabilities)},
         })
         include LosslessMetadataPatch
 
         # Creates a terminal patch. Set a field to nil to explicitly clear it.
         def initialize(@terminal_id : String)
+        end
+
+        # Reads the patch, clearing ambiguous capabilities for an identified terminal.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = RawJson.new(pull)
+          repeated = WireFrame.repeated_members(wire.json, "terminalId", "output", "capabilities")
+          if repeated.includes?("terminalId")
+            raise JSON::ParseException.new("Ambiguous ACP terminal ID", *location)
+          end
+
+          wire = wire.without_field("output") if repeated.includes?("output")
+          ambiguous_capabilities = repeated.includes?("capabilities")
+          wire = wire.without_field("capabilities") if ambiguous_capabilities
+          update = previous_def(JSON::PullParser.new(wire.json))
+          update.capabilities = nil if ambiguous_capabilities
+          update
         end
       end
 
@@ -507,11 +548,17 @@ module ACP
         property terminal_id : String
 
         # Base64-encoded output bytes.
+        @[JSON::Field(converter: ::ACP::Protocol::V2::TerminalOutputData)]
         property data : String
 
         # Creates a terminal output chunk from base64 text.
         def initialize(@terminal_id : String, @data : String, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
+        end
+
+        # Reads a chunk with an unambiguous terminal ID and data.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(TerminalOutputData.read_envelope(pull, "terminalId", "data"))
         end
 
         # Decodes the newly appended output bytes.
