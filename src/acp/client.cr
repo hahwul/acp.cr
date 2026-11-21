@@ -953,7 +953,7 @@ module ACP
     # processing the prompt. While waiting, `session/update` notifications
     # will be dispatched to the `on_update` callback.
     #
-    # Returns the prompt result with the stop reason.
+    # Returns the stop reason and any token usage reported by the agent.
     #
     # Raises `NoActiveSessionError` if no session is active.
     def session_prompt(
@@ -966,8 +966,7 @@ module ACP
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
       # Use a longer timeout for prompts since they can take a while.
-      raw_result = send_request(Protocol::AgentMethod::SESSION_PROMPT, params, timeout: @prompt_timeout)
-      decode_result(Protocol::SessionPromptResult, raw_result, Protocol::AgentMethod::SESSION_PROMPT)
+      send_typed_request(Protocol::AgentMethod::SESSION_PROMPT, params, Protocol::SessionPromptResult, timeout: @prompt_timeout)
     end
 
     # Convenience: sends a simple text prompt.
@@ -1159,9 +1158,10 @@ module ACP
     end
 
     # Decodes a typed response using original JSON when JSON::Any cannot hold it.
-    protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
+    protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class,
+                                     *, timeout : Float64? = @request_timeout) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
+      response = send_and_await_response(method, message_builder, timeout, check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
       decode_typed_response(method, response, type)
     end
 

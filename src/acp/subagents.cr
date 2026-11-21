@@ -235,10 +235,10 @@ module ACP
       when "replay_complete"
         setup_for(session_id).try(&.replay_markers).try(&.add(session_id))
       when "subagent_update"
-        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || update.to_json))
+        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update)))
       when "state_update"
         if (child = @children[session_id]?) && current_updates?(session_id)
-          state = Protocol::SubagentState.from_json(update_json || update.to_json)
+          state = Protocol::SubagentState.from_json(update_json || Protocol::WireFrame.encode(update))
           state.json_unmapped.delete("sessionUpdate")
           child.state = state
         end

@@ -170,6 +170,17 @@ explicit `null` clears it. A `SubagentState` retains extension fields in
 `json_unmapped`, including any payload for a future state or stop reason.
 See [ACP Subagents](https://agentclientprotocol.com/protocol/v1/subagents).
 
+## Token Usage
+
+`SessionPromptResult#usage` exposes the optional draft v1 token report.
+The Agent sends its accumulated counts with the completed prompt result.
+`Usage` provides `total_tokens`, `input_tokens`, and `output_tokens` as
+`UInt64`, plus optional reasoning and cache counts.
+
+In v2, use `StateUpdate#usage` or `StateSnapshot#usage` for the token counts
+the Agent reported for completed foreground work. A repeated or replayed
+snapshot may carry the same usage and must not be counted again.
+
 ## ACP v2 Preview Wire Types
 
 `ACP::Protocol::V2` contains preview wire types for initialization,

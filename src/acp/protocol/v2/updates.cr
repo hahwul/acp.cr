@@ -1,5 +1,6 @@
 require "./initialization"
 require "../wire_frame"
+require "../usage"
 require "../cursor_update"
 require "./configuration"
 require "./session_updates"
@@ -8,6 +9,9 @@ require "./tool_updates"
 module ACP
   module Protocol
     module V2
+      # Draft token usage for the foreground work that just completed.
+      alias Usage = Protocol::Usage
+
       # Announces or patches a position in a session's transcript.
       alias CursorUpdate = Protocol::CursorUpdate
 
@@ -66,6 +70,15 @@ module ACP
         # Agent-provided explanation for an idle snapshot, including future reasons.
         def stop_reason : String?
           @json_unmapped["stopReason"]?.try(&.as_s?) if idle?
+        end
+
+        # Token usage on an idle snapshot, when reported. A repeated or replayed
+        # snapshot may carry the same usage.
+        def usage : Usage?
+          return unless idle?
+
+          json = raw_field("usage") || @json_unmapped["usage"]?.try { |value| WireFrame.encode(value) }
+          Usage::Optional.from_json(json) if json
         end
 
         # JSON-RPC error details for a failed foreground operation.
@@ -257,7 +270,7 @@ module ACP
         def typed
           case @session_update
           when "state_update"
-            StateUpdate.from_json(to_json)
+            StateUpdate.from_json(WireFrame.encode(self))
           when "user_message", "agent_message", "agent_thought"
             MessageUpdate.from_json(to_json)
           when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
@@ -275,7 +288,7 @@ module ACP
           when "terminal_output_chunk"
             TerminalOutputChunk.from_json(to_json)
           when "subagent_update"
-            SubagentUpdate.from_json(to_json)
+            SubagentUpdate.from_json(WireFrame.encode(self))
           when "session_message"
             SessionMessageUpdate.from_json(to_json)
           when "session_info_update"

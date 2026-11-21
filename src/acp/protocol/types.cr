@@ -17,6 +17,7 @@ require "json"
 require "./capabilities"
 require "./content_block"
 require "./updates"
+require "./usage"
 
 module ACP
   module Protocol
@@ -1132,11 +1133,16 @@ module ACP
       @[JSON::Field(key: "stopReason")]
       property stop_reason : String
 
+      # Draft token usage reported by the agent at the end of the turn.
+      @[JSON::Field(converter: ::ACP::Protocol::Usage::Optional)]
+      property usage : Usage?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
 
-      def initialize(@stop_reason : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Builds the turn result with optional token usage.
+      def initialize(@stop_reason : String, @meta : Hash(String, JSON::Any)? = nil, *, @usage : Usage? = nil)
       end
     end
 
