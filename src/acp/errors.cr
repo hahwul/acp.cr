@@ -82,6 +82,9 @@ module ACP
     # A given resource, such as a file, was not found.
     RESOURCE_NOT_FOUND = -32002
 
+    # The agent could not select a compatible ACP protocol version.
+    UNSUPPORTED_PROTOCOL_VERSION = -32022
+
     # The integer error code.
     getter code : Int32
 
@@ -139,6 +142,11 @@ module ACP
     # Returns true if this is an ACP resource-not-found error.
     def resource_not_found? : Bool
       @code == RESOURCE_NOT_FOUND
+    end
+
+    # Returns true if negotiation failed to select a compatible ACP version.
+    def unsupported_protocol_version? : Bool
+      @code == UNSUPPORTED_PROTOCOL_VERSION
     end
 
     # Builds a human-readable representation including the code.

@@ -1,5 +1,71 @@
 require "./spec_helper"
 
+describe "ACP v2 Preview initialization" do
+  it "builds initialize and auth/login requests using the v2 wire names" do
+    client_info = ACP::Protocol::V2::Implementation.new("editor", "1", title: "Editor")
+    capabilities = ACP::Protocol::V2::ClientCapabilities.new(
+      auth: ACP::Protocol::V2::ClientAuthCapabilities.new(terminal: ACP::Protocol::V2::Capability.new)
+    )
+    params = ACP::Protocol::V2::InitializeParams.new(client_info, capabilities: capabilities)
+    request = ACP::Protocol.build_request(1_i64, ACP::Protocol::V2::AgentMethod::INITIALIZE, params)
+    request["params"].should eq(JSON.parse(%({"protocolVersion":2,"info":{"name":"editor","version":"1","title":"Editor"},"capabilities":{"auth":{"terminal":{}}}})))
+    expect_raises(JSON::SerializableError) do
+      ACP::Protocol::V2::InitializeParams.from_json(%({"protocolVersion":2,"capabilities":{}}))
+    end
+
+    login = ACP::Protocol::V2::AuthLoginParams.new("local-login")
+    request = ACP::Protocol.build_request(2_i64, ACP::Protocol::V2::AgentMethod::AUTH_LOGIN, login)
+    request["method"].should eq("auth/login")
+    request["params"].should eq(JSON.parse(%({"methodId":"local-login"})))
+  end
+
+  it "decodes nested capabilities and preserves unknown authentication variants" do
+    wire = JSON.parse(<<-JSON)
+      {
+        "protocolVersion": 2,
+        "info": {"name":"agent","version":"2","_meta":{"example.test/info":1}},
+        "capabilities": {
+          "session": {
+            "prompt": {"image":{},"embeddedContext":{}},
+            "mcp": {"stdio":{},"http":{}},
+            "systemPrompt": {"mode":{"override":{}}},
+            "delete": {}
+          }
+        },
+        "authMethods": [
+          {"type":"agent","methodId":"desktop","name":"Desktop sign-in"},
+          {"type":"terminal","methodId":"local","name":"Terminal sign-in","args":["--login"],"env":{"MODE":"login"}},
+          {"type":"_future","methodId":"later","name":"Future sign-in","description":{"details":true},"payload":[1,2]}
+        ]
+      }
+      JSON
+    result = ACP::Protocol::V2::InitializeResult.from_json(wire.to_json)
+    result.protocol_version.should eq(2_u16)
+    result.info.meta.not_nil!["example.test/info"].should eq(1)
+    session = result.capabilities.session.not_nil!
+    session.prompt.not_nil!.image.should be_a(ACP::Protocol::V2::Capability)
+    session.prompt.not_nil!.audio.should be_nil
+    session.mcp.not_nil!.stdio.should be_a(ACP::Protocol::V2::Capability)
+    session.system_prompt.not_nil!.override?.should be_true
+    result.auth_methods[0].agent?.should be_true
+    terminal = result.auth_methods[1].terminal_settings.not_nil!
+    terminal.args.should eq(["--login"])
+    terminal.env.should eq({"MODE" => "login"})
+    result.auth_methods[2].terminal_settings.should be_nil
+    JSON.parse(result.to_json).should eq(wire)
+  end
+
+  it "exposes structured unsupported-version errors without changing v1 defaults" do
+    error = ACP::JsonRpcError.from_json_any(JSON.parse(%({"code":-32022,"message":"Unsupported protocol version","data":{"requested":1,"supported":[2]}})))
+    error.unsupported_protocol_version?.should be_true
+    data = ACP::Protocol::V2::UnsupportedProtocolVersionData.from_json(error.data.not_nil!.to_json)
+    data.requested.should eq(1_u16)
+    data.supported.should eq([2_u16])
+    ACP::PROTOCOL_VERSION.should eq(1_u16)
+    ACP.supports_protocol_version?(2_u16).should be_false
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({

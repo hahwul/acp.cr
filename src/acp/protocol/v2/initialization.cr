@@ -1,0 +1,357 @@
+require "json"
+require "../capabilities"
+require "../types"
+
+module ACP
+  module Protocol
+    # Wire types for the ACP v2 Preview schema.
+    module V2
+      # Protocol version carried in ACP v2 initialize requests.
+      VERSION = 2_u16
+
+      # Name, version, display title and metadata for either peer.
+      alias Implementation = Protocol::ClientInfo
+
+      # Presence advertises support for a feature with no named fields.
+      struct Capability
+        include JSON::Serializable
+        include JSON::Serializable::Unmapped
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates a support marker.
+        def initialize(@meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
+      # Authentication features advertised by a v2 client.
+      struct ClientAuthCapabilities
+        include JSON::Serializable
+
+        # Presence advertises interactive terminal authentication.
+        property terminal : Capability?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates the authentication capability group.
+        def initialize(@terminal : Capability? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
+      # Optional capabilities sent by the v2 client during initialize.
+      struct ClientCapabilities
+        include JSON::Serializable
+
+        # Authentication capabilities.
+        property auth : ClientAuthCapabilities?
+
+        # Supported elicitation modes.
+        property elicitation : Protocol::ElicitationCapabilities?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates client capabilities.
+        def initialize(
+          @auth : ClientAuthCapabilities? = nil,
+          @elicitation : Protocol::ElicitationCapabilities? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # Additional content types accepted in prompts.
+      struct PromptCapabilities
+        include JSON::Serializable
+
+        # Presence advertises image content.
+        property image : Capability?
+
+        # Presence advertises audio content.
+        property audio : Capability?
+
+        # Presence advertises embedded resource content.
+        @[JSON::Field(key: "embeddedContext")]
+        property embedded_context : Capability?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates prompt capabilities.
+        def initialize(
+          @image : Capability? = nil,
+          @audio : Capability? = nil,
+          @embedded_context : Capability? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # MCP server transports the v2 agent accepts.
+      struct McpCapabilities
+        include JSON::Serializable
+
+        # Presence advertises stdio MCP servers.
+        property stdio : Capability?
+
+        # Presence advertises HTTP MCP servers.
+        property http : Capability?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates the transport capability group.
+        def initialize(
+          @stdio : Capability? = nil,
+          @http : Capability? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # Optional features available for v2 sessions.
+      struct SessionCapabilities
+        include JSON::Serializable
+
+        # Additional prompt content that the Agent accepts.
+        property prompt : PromptCapabilities?
+
+        # MCP transports supported by the Agent.
+        property mcp : McpCapabilities?
+
+        # Presence advertises session deletion.
+        property delete : Protocol::SessionDeleteCapabilities?
+
+        # Presence advertises support for additional workspace directories.
+        @[JSON::Field(key: "additionalDirectories")]
+        property additional_directories : Protocol::SessionAdditionalDirectoriesCapabilities?
+
+        # Client-supplied system prompt support.
+        @[JSON::Field(key: "systemPrompt")]
+        property system_prompt : Protocol::SessionSystemPromptCapabilities?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates the session capability group.
+        def initialize(
+          @prompt : PromptCapabilities? = nil,
+          @mcp : McpCapabilities? = nil,
+          @delete : Protocol::SessionDeleteCapabilities? = nil,
+          @additional_directories : Protocol::SessionAdditionalDirectoriesCapabilities? = nil,
+          @system_prompt : Protocol::SessionSystemPromptCapabilities? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # Optional capabilities returned by the Agent during v2 initialize.
+      struct AgentCapabilities
+        include JSON::Serializable
+
+        # Capabilities scoped to sessions.
+        property session : SessionCapabilities?
+
+        # Optional authentication extensions.
+        property auth : Capability?
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates the agent capability group.
+        def initialize(
+          @session : SessionCapabilities? = nil,
+          @auth : Capability? = nil,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # The additional launch configuration of a terminal authentication method.
+      struct TerminalAuthSettings
+        include JSON::Serializable
+
+        # Arguments appended to the configured Agent invocation.
+        property args : Array(String) = [] of String
+
+        # Variables overlaid on the configured Agent environment.
+        property env : Hash(String, String) = {} of String => String
+
+        # Creates terminal launch settings.
+        def initialize(@args : Array(String) = [] of String, @env : Hash(String, String) = {} of String => String)
+        end
+      end
+
+      # An advertised v2 authentication method. Variant-specific and extension
+      # fields are retained in `json_unmapped` for forwarding or inspection.
+      struct AuthMethod
+        include JSON::Serializable
+        include JSON::Serializable::Unmapped
+
+        # Wire discriminator. Known values are `agent` and `terminal`.
+        @[JSON::Field(key: "type")]
+        getter method_type : String
+
+        # Method identifier used by the selected authentication flow.
+        @[JSON::Field(key: "methodId")]
+        getter method_id : String
+
+        # Human-readable name of the method.
+        getter name : String
+
+        # Creates an authentication method with its variant-specific fields.
+        def initialize(
+          @method_type : String,
+          @method_id : String,
+          @name : String,
+          @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any,
+        )
+        end
+
+        # Description intended for the user.
+        def description : String?
+          @json_unmapped["description"]?.try(&.as_s?)
+        end
+
+        # Extension metadata.
+        def meta : Hash(String, JSON::Any)?
+          @json_unmapped["_meta"]?.try(&.as_h?)
+        end
+
+        # Whether the Agent performs this flow via auth/login.
+        def agent? : Bool
+          @method_type == "agent"
+        end
+
+        # Whether the flow uses a separate interactive Agent invocation.
+        def terminal? : Bool
+          @method_type == "terminal"
+        end
+
+        # Parsed launch settings for a terminal method.
+        def terminal_settings : TerminalAuthSettings?
+          return unless terminal?
+
+          TerminalAuthSettings.from_json(@json_unmapped.to_json)
+        rescue JSON::ParseException
+          nil
+        end
+      end
+
+      # Parameters of an ACP v2 initialize request.
+      struct InitializeParams
+        include JSON::Serializable
+
+        # Highest supported protocol version offered in the handshake.
+        @[JSON::Field(key: "protocolVersion")]
+        property protocol_version : UInt16
+
+        # Required client implementation information.
+        property info : Implementation
+
+        # Client features.
+        property capabilities : ClientCapabilities = ClientCapabilities.new
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates an initialization offer in the ACP v2 format.
+        def initialize(
+          @info : Implementation,
+          @protocol_version : UInt16 = VERSION,
+          @capabilities : ClientCapabilities = ClientCapabilities.new,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # Successful initialize result encoded in the ACP v2 format.
+      struct InitializeResult
+        include JSON::Serializable
+
+        # Chosen protocol version.
+        @[JSON::Field(key: "protocolVersion")]
+        property protocol_version : UInt16
+
+        # Required agent implementation information.
+        property info : Implementation
+
+        # Agent features.
+        property capabilities : AgentCapabilities = AgentCapabilities.new
+
+        # Advertised authentication methods.
+        @[JSON::Field(key: "authMethods")]
+        property auth_methods : Array(AuthMethod) = [] of AuthMethod
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates a successful ACP v2 initialize result.
+        def initialize(
+          @info : Implementation,
+          @protocol_version : UInt16 = VERSION,
+          @capabilities : AgentCapabilities = AgentCapabilities.new,
+          @auth_methods : Array(AuthMethod) = [] of AuthMethod,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # Structured data for an Unsupported protocol version error (-32022).
+      struct UnsupportedProtocolVersionData
+        include JSON::Serializable
+
+        # Protocol version requested by the client.
+        property requested : UInt16
+
+        # Protocol versions supported by the Agent.
+        property supported : Array(UInt16)
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates version negotiation error data.
+        def initialize(@requested : UInt16, @supported : Array(UInt16), @meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
+      # Parameters of an Agent-managed auth/login request.
+      struct AuthLoginParams
+        include JSON::Serializable
+
+        # Advertised method identifier.
+        @[JSON::Field(key: "methodId")]
+        property method_id : String
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta")]
+        property meta : Hash(String, JSON::Any)?
+
+        # Creates a login request for the specified method.
+        def initialize(@method_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
+      # Empty successful auth/login result with optional metadata.
+      alias AuthLoginResult = Protocol::AuthenticateResult
+
+      # Empty auth/logout parameters with optional metadata.
+      alias AuthLogoutParams = Protocol::LogoutParams
+
+      # Empty successful auth/logout result with optional metadata.
+      alias AuthLogoutResult = Protocol::LogoutResult
+    end
+  end
+end

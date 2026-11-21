@@ -80,6 +80,11 @@ rescue ex : ACP::InvalidStateError
 
 A JSON-RPC 2.0 error was returned by the agent.
 
+Use `unsupported_protocol_version?` for the ACP v2 negotiation error
+`-32022`. Its data can be decoded as
+`ACP::Protocol::V2::UnsupportedProtocolVersionData` to inspect the requested
+and supported versions.
+
 ```crystal
 rescue ex : ACP::JsonRpcError
   puts "Error code: #{ex.code}"
