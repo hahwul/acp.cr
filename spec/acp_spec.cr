@@ -6227,13 +6227,17 @@ describe "ACP draft authentication status" do
 
   it "keeps account details available to the client while redacting frame logs" do
     result = %({"jsonrpc":"2.0","id":1,"result":{"state":"authenticated","accounts":[{"label":"Display account"}]}})
+    malformed_result = %({"jsonrpc":"2.0","id":2,"result":{"accounts":[{"label":"Display account"}]}})
     notification = %({"jsonrpc":"2.0","method":"auth/status_update","params":{"state":"unauthenticated","accounts":[{"label":"Display account"}]}})
     Log.capture("acp.transport", level: :debug) do |logs|
-      transport = ACP::StdioTransport.new(IO::Memory.new(result + "\n" + notification + "\n"), IO::Memory.new)
+      transport = ACP::StdioTransport.new(IO::Memory.new([result, malformed_result, notification].join("\n") + "\n"), IO::Memory.new)
+      transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
       transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
       transport.receive.not_nil!["params"]["accounts"][0]["label"].should eq("Display account")
-      logs.check(:debug, /"accounts":"\[REDACTED\]"/)
-      logs.entry.message.should_not contain("Display account")
+      2.times do
+        logs.check(:debug, /"accounts":"\[REDACTED\]"/)
+        logs.entry.message.should_not contain("Display account")
+      end
       logs.check(:debug, /"params":"\[REDACTED\]"/)
       logs.entry.message.should_not contain("Display account")
     ensure

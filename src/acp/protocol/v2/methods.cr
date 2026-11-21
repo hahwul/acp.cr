@@ -1,3 +1,5 @@
+require "../client_methods"
+
 module ACP
   module Protocol
     module V2

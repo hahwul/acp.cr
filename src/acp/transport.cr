@@ -260,7 +260,7 @@ module ACP
 
       if result = parsed["result"]?.try(&.as_h?)
         has_methods = result.has_key?("authMethods")
-        has_accounts = result.has_key?("state") && result.has_key?("accounts")
+        has_accounts = result.has_key?("accounts")
         result["authMethods"] = JSON::Any.new("[REDACTED]") if has_methods
         result["accounts"] = JSON::Any.new("[REDACTED]") if has_accounts
         return parsed.to_json if has_methods || has_accounts
