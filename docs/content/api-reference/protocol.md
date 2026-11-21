@@ -186,6 +186,12 @@ start of retained history. The v2 `SessionPromptParams` accepts an optional
 Agent reports completion through a later session update.
 See [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle).
 
+`V2::SessionUpdateParams` retains the original update fields. Its
+`update.typed` accessor decodes foreground state, message upserts and chunks,
+and replay completion. Use `StateUpdate#idle?` and `#stop_reason` to inspect
+foreground completion. An absent background list represents unreported work.
+`MessageUpdate#apply_metadata` applies the v2 top-level metadata patch.
+
 ## Capabilities
 
 ### ClientCapabilities

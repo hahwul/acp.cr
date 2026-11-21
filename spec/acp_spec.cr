@@ -134,6 +134,59 @@ describe "ACP v2 Preview session types" do
   end
 end
 
+describe "ACP v2 Preview prompt lifecycle updates" do
+  it "decodes idle failures and background work separately" do
+    wire = JSON.parse(%({"sessionId":"s","update":{"sessionUpdate":"state_update","state":"idle","stopReason":"error","error":{"code":-32603,"message":"Failed"},"background":[{"type":"terminal","terminalId":"t"},{"type":"subagent","sessionId":"child"},{"type":"_future","payload":[1]}]}}))
+    notification = ACP::Protocol::V2::SessionUpdateParams.from_json(wire.to_json)
+    state = notification.update.typed.as(ACP::Protocol::V2::StateUpdate)
+    state.idle?.should be_true
+    state.stop_reason.should eq("error")
+    state.error.not_nil!.code.should eq(-32603)
+    state.background.not_nil!.map(&.entity_id).should eq(["t", "child", nil])
+    state.background.not_nil!.last.json_unmapped["payload"].should eq(JSON.parse("[1]"))
+    JSON.parse(notification.to_json).should eq(wire)
+
+    ACP::Protocol::V2::StateUpdate.from_json(%({"state":"running"})).background.should be_nil
+    ACP::Protocol::V2::StateUpdate.from_json(%({"state":"running","background":[]})).background.should eq([] of ACP::Protocol::V2::BackgroundWork)
+  end
+
+  it "preserves omitted and cleared message fields and applies metadata by key" do
+    wire = JSON.parse(%({"sessionUpdate":"agent_message","messageId":"m","content":null,"_meta":{"drop":null,"replace":{"new":true}}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::MessageUpdate)
+    update.content_present?.should be_true
+    update.content.should be_nil
+    update.meta_present?.should be_true
+    previous = JSON.parse(%({"drop":1,"keep":2,"replace":{"old":true}})).as_h
+    update.apply_metadata(previous).should eq(JSON.parse(%({"keep":2,"replace":{"new":true}})).as_h)
+    previous.has_key?("drop").should be_true
+    JSON.parse(update.to_json).should eq(wire)
+
+    omitted = ACP::Protocol::V2::MessageUpdate.new("user_message", "m")
+    omitted.content_present?.should be_false
+    omitted.apply_metadata(previous).should eq(previous)
+    omitted.meta = nil
+    omitted.apply_metadata(previous).should be_nil
+    JSON.parse(omitted.to_json)["_meta"].raw.should be_nil
+  end
+
+  it "decodes correlated chunks and explicit replay completion" do
+    wire = %({"sessionUpdate":"user_message_chunk","messageId":"m","content":{"type":"text","text":"part"}})
+    chunk = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+    typed = chunk.to_content_chunk.not_nil!
+    typed.message_id.should eq("m")
+    typed.text.should eq("part")
+    replay = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"replay_complete"})).typed
+    replay.should be_a(ACP::Protocol::V2::ReplayCompleteUpdate)
+  end
+
+  it "retains future update variants and their fields" do
+    wire = JSON.parse(%({"sessionUpdate":"_future","data":{"field":"retained"}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json)
+    update.typed.should be_nil
+    JSON.parse(update.to_json).should eq(wire)
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({
