@@ -248,6 +248,14 @@ chunks. Terminal snapshots and chunks expose decoded bytes through `bytes`.
 The `*_present?` methods on upserts identify fields the update supplies,
 including explicit clears.
 
+Tool-call updates and permission tool-call subjects treat malformed optional
+fields as omitted. Content and locations arrays replace the previous list
+with their usable entries in wire order. Explicit `null` and empty arrays
+clear the list. Tool-call locations require absolute Agent-side paths.
+An invalid optional line leaves just the path, and `meta_raw` exposes the
+location's exact extension metadata.
+[ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls#following-the-agent)
+
 `ToolCallContent#diff` exposes usable file changes in wire order and omits
 entries with conflicting destination paths. It returns `nil` when no usable
 changes remain. A malformed optional patch object leaves the structured

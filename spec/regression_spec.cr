@@ -5135,3 +5135,178 @@ describe "ACP v2 structured tool diffs" do
     end
   end
 end
+describe "ACP v2 tool-call patch decoding" do
+  it "retains valid content and locations in a mixed replacement" do
+    raw = <<-'JSON'
+      {"sessionUpdate":"tool_call_update","toolCallId":"tool","title":"Kept",
+       "name":false,"status":"paused","kind":"future_kind",
+       "content":[false,{},{"type":"terminal"},{"type":"session","sessionId":"child"},
+                  {"type":"content","content":{"type":"text","text":false}},
+                  {"type":"diff","changes":[false]},
+                  {"type":"diff","changes":[{"operation":"add","path":"/work/added"}],
+                   "patch":{"format":"git_patch","text":"first"},"patch":{"format":"git_patch","text":"second"}},
+                  {"type":"terminal","terminalId":"t1","terminalId":"t2"},
+                  {"type":"_future","detail":{"value":18446744073709551615}},
+                  {"type":"content","content":{"type":"text","text":"Done"}}],
+       "locations":[0,{},{"path":"relative"},{"path":"/work/zero","line":0},
+                    {"path":"/work/negative","line":-1},
+                    {"path":"/work/out-of-range","line":4294967296},
+                    {"path":"/work/wrong-type","line":"1"},
+                    {"path":"/work/decimal","line":1.5},
+                    {"path":"/work/ambiguous-line","line":1,"line":2},
+                    {"path":"/first","path":"/second"},
+                    {"path":"C:\\work\\full","line":4294967295}]}
+      JSON
+    update = ACP::Protocol::V2::SessionUpdate.from_json(raw).typed.as(ACP::Protocol::V2::ToolCallUpdate)
+    update.title.should eq("Kept")
+    update.status.should eq("paused")
+    update.kind.should eq("future_kind")
+    update.name_present?.should be_false
+    update.content_present?.should be_true
+    content = update.content.not_nil!
+    content.map(&.content_type).should eq(["session", "diff", "_future", "content"])
+    content.first.session_id.should eq("child")
+    diff = content[1].diff.not_nil!
+    diff.changes.first.path.should eq("/work/added")
+    diff.patch.should be_nil
+    content[2].raw.field("detail").not_nil!.field("value").not_nil!.json.should eq(UInt64::MAX.to_s)
+    content.last.content_block.as(ACP::Protocol::TextContentBlock).text.should eq("Done")
+    update.locations_present?.should be_true
+    locations = update.locations.not_nil!
+    locations.map(&.path).should eq(["/work/zero", "/work/negative", "/work/out-of-range", "/work/wrong-type", "/work/decimal", "/work/ambiguous-line", "C:\\work\\full"])
+    locations.map(&.line).should eq([nil, nil, nil, nil, nil, nil, UInt32::MAX])
+  end
+
+  it "distinguishes malformed fields, explicit clears, and empty replacements on round trips" do
+    base = %("sessionUpdate":"tool_call_update","toolCallId":"tool")
+    bad = %({#{base},"name":1,"title":[],"kind":{},"status":true,"capabilities":"bad","content":{},"locations":false})
+    update = ACP::Protocol::V2::ToolCallUpdate.from_json(bad)
+    update.name_present?.should be_false
+    update.title_present?.should be_false
+    update.kind_present?.should be_false
+    update.status_present?.should be_false
+    update.capabilities_present?.should be_false
+    update.content_present?.should be_false
+    update.locations_present?.should be_false
+    JSON.parse(update.to_json).should eq(JSON.parse("{#{base}}"))
+
+    wire = %({#{base},"name":null,"title":null,"status":null,"kind":null,"content":null,"locations":null,"capabilities":null})
+    clear = ACP::Protocol::V2::ToolCallUpdate.from_json(wire)
+    clear.title_present?.should be_true
+    clear.content_present?.should be_true
+    clear.locations_present?.should be_true
+    clear.capabilities_present?.should be_true
+    JSON.parse(clear.to_json).should eq(JSON.parse(wire))
+
+    empty = ACP::Protocol::V2::ToolCallUpdate.from_json(%({#{base},"content":[false],"locations":[]}))
+    empty.content_present?.should be_true
+    empty.locations_present?.should be_true
+    empty.content.not_nil!.should be_empty
+    empty.locations.not_nil!.should be_empty
+    JSON.parse(empty.to_json).should eq(JSON.parse(%({#{base},"content":[],"locations":[]})))
+
+    update.title = "Replaced"
+    update.content = empty.content
+    update.locations = nil
+    JSON.parse(update.to_json).should eq(JSON.parse(%({#{base},"title":"Replaced","content":[],"locations":null})))
+  end
+
+  it "decodes permission and notification patches in receive order over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      events = Channel(String).new(3)
+      updates = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      requests = Channel(ACP::Protocol::V2::RequestPermissionParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(note)
+        events.send("update")
+        nil
+      end
+      client.on_request_permission = ->(request : ACP::Protocol::V2::RequestPermissionParams) do
+        requests.send(request)
+        events.send("permission")
+        ACP::Protocol::V2::RequestPermissionResult.cancelled
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      content = %([false,{"type":"_future","data":0.1234567890123456789}])
+      path = %({"path":"/work/file","line":false,"_meta":{"example.test/revision":18446744073709551615}})
+      patch = %({"toolCallId":"tool","status":"paused","title":false,"locations":[null,#{path}],"content":#{content}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","title":"Before"}}})
+      feed.puts %({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"s","title":"Review tool call","subject":{"type":"tool_call","toolCall":#{patch}},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}})
+
+      next_permission_event(events).should eq("update")
+      next_permission_event(events).should eq("update")
+      next_permission_event(events).should eq("permission")
+      first = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      first.title.should eq("Before")
+      notification = next_exact_session_update(updates)
+      notification.raw.field("update").not_nil!.field("content").not_nil!.json.should eq(content)
+      request = next_permission_event(requests)
+      subject = request.typed_subject.not_nil!
+      subject.tool_call_raw.not_nil!.json.should eq(patch)
+
+      [notification.update.typed.as(ACP::Protocol::V2::ToolCallUpdate), subject.tool_call.not_nil!].each do |typed|
+        typed.status.should eq("paused")
+        typed.title_present?.should be_false
+        typed.content.not_nil!.map(&.content_type).should eq(["_future"])
+        typed.content.not_nil!.first.raw.field("data").not_nil!.json.should eq("0.1234567890123456789")
+        location = typed.locations.not_nil!.first
+        location.path.should eq("/work/file")
+        location.line.should be_nil
+        location.meta_raw.not_nil!.field("example.test/revision").not_nil!.json.should eq(UInt64::MAX.to_s)
+        location.meta = {"example.test/tag" => JSON::Any.new("checked")}
+        location.meta.not_nil!["example.test/tag"].as_s.should eq("checked")
+      end
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].as_s.should eq("permission")
+      reply["result"]["outcome"]["outcome"].as_s.should eq("cancelled")
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps tool cancellation in sync with the capability patch" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","capabilities":{"cancel":{}}}}})
+      granted = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      granted.capabilities.not_nil!.cancel.should_not be_nil
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","capabilities":false}}})
+      malformed = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      malformed.capabilities_present?.should be_false
+
+      feed.puts %({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"s","title":"Review tool call","subject":{"type":"tool_call","toolCall":{"toolCallId":"tool","capabilities":[]}},"options":[{"optionId":"deny","name":"Deny","kind":"reject_once"}]}})
+      permission = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      permission.capabilities_present?.should be_false
+      JSON.parse(outgoing.gets.not_nil!)["result"]["outcome"]["outcome"].should eq("cancelled")
+
+      sent = Channel(JSON::Any).new(1)
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        sent.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{}})
+      end
+      client.tool_call_cancel("s", "tool")
+      sent.receive["method"].should eq("tool_call/cancel")
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","capabilities":null}}})
+      cleared = next_exact_session_update(updates).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
+      cleared.capabilities_present?.should be_true
+      cleared.capabilities.should be_nil
+      expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.tool_call_cancel("s", "tool") }
+    ensure
+      client.try(&.close)
+    end
+  end
+end
