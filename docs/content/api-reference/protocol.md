@@ -234,7 +234,13 @@ See [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt
 `V2::SessionUpdateParams` retains the original update fields. Its
 `update.typed` accessor decodes foreground state, message upserts and chunks,
 and replay completion. Use `StateUpdate#idle?` and `#stop_reason` to inspect
-foreground completion. An absent background list represents unreported work.
+foreground completion. An absent or invalid background list represents
+unreported work, and an empty list reports that no work is running. Unknown
+background kinds still count as work. States and background entries expose
+their exact fields through `raw` and `meta_raw`. State snapshots also expose
+`background_raw`, `usage_raw`, and `error_raw` for their reported payloads.
+[ACP v2 background work](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#background-work)
+
 For v2 upserts, `meta_present?` distinguishes a supplied patch from
 omission, and `meta_raw` exposes the exact metadata object. Use
 `apply_metadata_raw(previous)` to apply the patch to an existing

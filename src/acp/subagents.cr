@@ -205,7 +205,7 @@ module ACP
       return unless setup || attached || early
 
       wire = Protocol::RawJson.new(JSON::PullParser.new(update))
-      return unless wire.field("state").try(&.as_s?)
+      return unless Protocol::StateFields.reported_state?(wire)
 
       state = wire.without_field("sessionUpdate")
       setup.try(&.observe_state(state, retained: written_setup.nil?))
@@ -450,11 +450,15 @@ module ACP
           setup.replay_markers.try(&.add(session_id))
         end
       when "subagent_update"
-        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update)),
-          live: !replaying)
+        wire = Protocol::RawJson.from_json(update_json || Protocol::WireFrame.encode(update))
+        patch = Protocol::SubagentUpdate.from_json(Protocol::StateFields.normalize_patch(wire).json)
+        return announce(session_id, patch, live: !replaying)
       when "state_update"
         if (child = @children[session_id]?) && !replaying && current_updates?(session_id)
-          state = Protocol::SubagentState.from_json(update_json || Protocol::WireFrame.encode(update))
+          wire = Protocol::RawJson.from_json(update_json || Protocol::WireFrame.encode(update))
+          return true unless Protocol::StateFields.reported_state?(wire)
+
+          state = Protocol::SubagentState.from_json(wire.json)
           state.json_unmapped.delete("sessionUpdate")
           child.state = state
         end

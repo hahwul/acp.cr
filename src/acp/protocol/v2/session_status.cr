@@ -28,7 +28,14 @@ module ACP
         property state : StateSnapshot?
 
         # Creates a status result with an optional foreground snapshot.
-        def initialize(@raw_status : String, @state : StateSnapshot? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@raw_status : String, @state : StateSnapshot? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
+        end
+
+        # Reads a status result, treating unusable state as unreported.
+        def self.new(pull : JSON::PullParser) : self
+          wire = StateFields.normalize_patch(RawJson.new(pull))
+          previous_def(JSON::PullParser.new(wire.json))
         end
       end
     end

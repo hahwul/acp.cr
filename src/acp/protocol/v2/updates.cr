@@ -2,6 +2,7 @@ require "./initialization"
 require "../raw_json"
 require "../usage"
 require "../cursor_update"
+require "../subagent_updates"
 require "./configuration"
 require "./session_updates"
 require "./tool_updates"
@@ -27,7 +28,7 @@ module ACP
       # Identifies work that can continue independently of the foreground.
       struct BackgroundWork
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
 
         # Entity discriminator, e.g. terminal, tool_call, or subagent.
         @[JSON::Field(key: "type")]
@@ -35,6 +36,11 @@ module ACP
 
         # Creates a background item with its variant-specific fields.
         def initialize(@entity_type : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+        end
+
+        # Reads a work item with unambiguous identifying fields.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "type", "terminalId", "toolCallId", "sessionId"))
         end
 
         # ID of the reported entity for a recognized kind of background work.
@@ -53,7 +59,7 @@ module ACP
       # are retained for forward compatibility.
       abstract struct SessionState
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
 
         # Foreground state, e.g. running, requires_action, idle, or unknown.
         getter state : String
@@ -75,36 +81,45 @@ module ACP
         # Token usage on an idle snapshot, when reported. A repeated or replayed
         # snapshot may carry the same usage.
         def usage : Usage?
-          return unless idle?
+          usage_raw.try { |wire| Usage::Optional.from_json(wire.json) }
+        end
 
-          json = field_json("usage")
-          Usage::Optional.from_json(json) if json
+        # Exact reported usage payload on an idle snapshot.
+        def usage_raw : RawJson?
+          object_field("usage") if idle?
         end
 
         # JSON-RPC error details for a failed foreground operation.
         def error : Protocol::JsonRpcErrorObject?
-          return unless stop_reason == "error" && (json = field_json("error"))
+          return unless wire = error_raw
+          repeated = WireFrame.repeated_members(wire.json, "code", "message", "data")
+          return if repeated.includes?("code") || repeated.includes?("message")
 
-          Protocol::JsonRpcErrorObject.from_json(json)
-        rescue JSON::Error
-          # A valid error can carry data that is too wide for the typed view.
-          return unless json
+          code = wire.field("code").try(&.as_i64?)
+          message = wire.field("message").try(&.as_s?)
+          return unless code && message && (Int32::MIN..Int32::MAX).includes?(code)
 
-          object = RawJson.new(JSON::PullParser.new(json))
-          code = object.field("code").try(&.as_i64?)
-          message = object.field("message").try(&.as_s?)
-          if code && message && (Int32::MIN..Int32::MAX).includes?(code)
-            Protocol::JsonRpcErrorObject.new(code.to_i32, message)
+          if !repeated.includes?("data") && (data = wire.field("data")) && !data.null?
+            projection = data.to_json_any?
           end
+          Protocol::JsonRpcErrorObject.new(code.to_i32, message, projection)
+        end
+
+        # Exact error payload for an idle error, including wide data values.
+        def error_raw : RawJson?
+          object_field("error") if stop_reason == "error"
         end
 
         # Complete reported background list, or nil when unreported.
         def background : Array(BackgroundWork)?
-          return unless (json = field_json("background")) && (entries = RawJson.new(JSON::PullParser.new(json)).elements?)
+          return unless entries = background_raw.try(&.elements?)
 
+          seen = Set(Tuple(String, String)).new
           entries.map do |raw|
             item = BackgroundWork.from_json(raw.json)
-            return if item.entity_type.in?("terminal", "tool_call", "subagent") && item.entity_id.nil?
+            if item.entity_type.in?("terminal", "tool_call", "subagent")
+              return unless (id = item.entity_id) && seen.add?({item.entity_type, id})
+            end
 
             item
           end
@@ -112,18 +127,32 @@ module ACP
           nil
         end
 
-        # Extension metadata for this snapshot.
-        def meta : Hash(String, JSON::Any)?
-          @json_unmapped["_meta"]?.try(&.as_h?)
+        # Exact reported background array, including entries with no typed projection.
+        def background_raw : RawJson?
+          if (raw = raw_value("background")) && raw.array?
+            raw
+          end
         end
 
-        private def field_json(name : String) : String?
-          raw_field(name) || @json_unmapped[name]?.try { |value| WireFrame.encode(value) }
+        private def object_field(name : String) : RawJson?
+          if (raw = raw_value(name)) && raw.object?
+            raw
+          end
+        end
+
+        private def raw_value(name : String) : RawJson?
+          if json = exact_unmapped_json(name)
+            RawJson.new(JSON::PullParser.new(json))
+          end
         end
       end
 
       # A state snapshot embedded in a session announcement or response.
       struct StateSnapshot < SessionState
+        # Reads one unambiguous foreground snapshot.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(StateFields.parser(pull))
+        end
       end
 
       # Standalone notification carrying a foreground and background snapshot.
@@ -131,6 +160,11 @@ module ACP
         # Discriminator for this session update.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "state_update"
+
+        # Reads a state update with unambiguous foreground state.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(StateFields.parser(pull))
+        end
       end
 
       # Announces or patches a child session on its parent session's timeline.
@@ -158,6 +192,12 @@ module ACP
 
         # Creates an update for the specified child. Set only the patched fields.
         def initialize(@session_id : String)
+        end
+
+        # Reads a child patch, ignoring malformed or ambiguous optional state.
+        def self.new(pull : JSON::PullParser) : self
+          wire = StateFields.normalize_patch(RawJson.new(pull))
+          previous_def(JSON::PullParser.new(wire.json))
         end
       end
 
@@ -285,7 +325,7 @@ module ACP
         end
 
         protected def on_unknown_json_attribute(pull, key, key_location)
-          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key)
+          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key) || StateFields::MEMBERS.includes?(key)
             if earlier = exact_unmapped_json(key)
               (@duplicate_fields ||= Set(String).new).add(key)
               fields = @earlier_fields ||= {} of String => Array(String)
@@ -301,6 +341,8 @@ module ACP
           retained_fields = case @session_update
                             when "terminal_update", "terminal_output_chunk" then TERMINAL_WIRE_FIELDS
                             when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
+                            when "state_update"                             then StateFields::MEMBERS
+                            when "subagent_update"                          then {"state"}
                             end
           if retained_fields
             @earlier_fields.try &.each do |key, values|

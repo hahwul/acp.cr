@@ -1,10 +1,11 @@
-require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
     # Draft token counts reported with a v1 prompt result or v2 idle state.
     struct Usage
       include JSON::Serializable
+      include LosslessMetadata
 
       # :nodoc:
       module OptionalCount
@@ -61,14 +62,11 @@ module ACP
       @[JSON::Field(key: "cachedWriteTokens", converter: ::ACP::Protocol::Usage::OptionalCount)]
       property cached_write_tokens : UInt64?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       # Builds a usage report with optional reasoning and cache counts.
       def initialize(@total_tokens : UInt64, @input_tokens : UInt64, @output_tokens : UInt64, *,
                      @thought_tokens : UInt64? = nil, @cached_read_tokens : UInt64? = nil,
-                     @cached_write_tokens : UInt64? = nil, @meta : Hash(String, JSON::Any)? = nil)
+                     @cached_write_tokens : UInt64? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
   end

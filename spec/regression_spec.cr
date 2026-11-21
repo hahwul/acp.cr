@@ -5691,3 +5691,210 @@ describe "ACP v2 display media and resources" do
     end
   end
 end
+describe "ACP v2 exact session state" do
+  it "preserves exact numbers in typed snapshots and background items" do
+    usage = %({"totalTokens":3,"inputTokens":2,"outputTokens":1,"_meta":{"example.test/value":18446744073709551615}})
+    error = %({"code":-32603,"message":"Failed","data":{"ratio":0.1234567890123456789}})
+    background = %([{"type":"tool_call","toolCallId":"tool"},{"type":"_future","rate":0.9876543210987654321}])
+    wire = %({"state":"idle","stopReason":"error","error":#{error},"background":#{background},"usage":#{usage},"extension":0.1111111111111111111})
+    snapshot = ACP::Protocol::V2::StateSnapshot.from_json(wire)
+    snapshot.to_json.should contain("0.1111111111111111111")
+    snapshot.background.not_nil!.last.to_json.should contain("0.9876543210987654321")
+    snapshot.usage.not_nil!.to_json.should contain(UInt64::MAX.to_s)
+    snapshot.error.not_nil!.message.should eq("Failed")
+  end
+
+  it "exposes exact state, background, usage, and error fields in typed snapshots" do
+    meta = %({"example.test/value":18446744073709551615,"example.test/precision":0.1234567890123456789})
+    usage = %({"totalTokens":3,"inputTokens":2,"outputTokens":1,"_meta":#{meta}})
+    error = %({"code":-32603,"message":"Failed","data":{"wide":18446744073709551615}})
+    work = %({"type":"future","revision":0.9876543210987654321,"_meta":#{meta}})
+    state = %({"state":"idle","stopReason":"error","error":#{error},"background":[#{work}],"usage":#{usage},"_meta":#{meta}})
+    status = ACP::Protocol::V2::SessionStatusResult.from_json(%({"status":"active","state":#{state}}))
+    snapshot = status.state.not_nil!
+    snapshot.meta_raw.not_nil!.json.should eq(meta)
+    snapshot.raw.field("error").not_nil!.json.should eq(error)
+    snapshot.error_raw.not_nil!.json.should eq(error)
+    snapshot.error.not_nil!.code.should eq(-32603)
+    snapshot.error.not_nil!.data.should be_nil
+    snapshot.usage_raw.not_nil!.json.should eq(usage)
+    snapshot.usage.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+    snapshot.background_raw.not_nil!.elements?.not_nil!.first.json.should eq(work)
+    background = snapshot.background.not_nil!.first
+    background.entity_id.should be_nil
+    background.raw.field("revision").not_nil!.json.should eq("0.9876543210987654321")
+    background.meta_raw.not_nil!.json.should eq(meta)
+
+    error = %({"code":-32603,"code":-32602,"message":"Ambiguous"})
+    malformed = ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"idle","stopReason":"error","error":#{error}}))
+    malformed.error.should be_nil
+    malformed.error_raw.not_nil!.json.should eq(error)
+  end
+
+  it "keeps absent or ambiguous background reports distinct from an empty list" do
+    [
+      %({"state":"running"}),
+      %({"state":"running","background":null}),
+      %({"state":"running","background":"invalid"}),
+      %({"state":"running","background":[{"type":"tool_call"}]}),
+      %({"state":"running","background":[{"type":"tool_call","toolCallId":"one","toolCallId":"two"}]}),
+      %({"state":"running","background":[{"type":"tool_call","toolCallId":"one"},{"type":"tool_call","toolCallId":"one"}]}),
+      %({"state":"running","background":null,"background":[]}),
+    ].each do |wire|
+      ACP::Protocol::V2::StateSnapshot.from_json(wire).background.should be_nil
+    end
+    ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"running","background":[]})).background.not_nil!.should be_empty
+    future = ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"future","background":[{"type":"other_future"},{"type":"other_future"}]}))
+    future.idle?.should be_false
+    future.background.not_nil!.map(&.entity_type).should eq(["other_future", "other_future"])
+  end
+
+  it "rejects ambiguous foreground states on direct and notification decoding" do
+    wire = %({"sessionUpdate":"state_update","state":"running","state":"idle"})
+    expect_raises(JSON::ParseException) { ACP::Protocol::V2::StateUpdate.from_json(wire) }
+    expect_raises(JSON::ParseException) { ACP::Protocol::V2::StateSnapshot.from_json(wire) }
+    ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
+  end
+
+  it "keeps the exact root cache and typed notifications in sync over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      state = %({"sessionUpdate":"state_update","state":"running","background":[{"type":"_future","progress":0.1234567890123456789}]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{state}}})
+      first = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::StateUpdate)
+      cached = client.session_state("s").not_nil!
+      first.background_raw.should eq(cached.background_raw)
+      cached.background.not_nil!.first.raw.field("progress").not_nil!.json.should eq("0.1234567890123456789")
+
+      state = %({"sessionUpdate":"state_update","state":"running","state":"idle","background":[]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{state}}})
+      ambiguous = next_exact_session_update(observed)
+      ambiguous.update.typed.should be_nil
+      raw = ambiguous.raw.field("update").not_nil!
+      ACP::Protocol::WireFrame.repeated_members(raw.json, "state").should contain("state")
+      client.session_state("s").not_nil!.state.should eq("running")
+
+      state = %({"sessionUpdate":"state_update","state":"idle","background":null,"background":[]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{state}}})
+      idle = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::StateUpdate)
+      idle.idle?.should be_true
+      idle.background.should be_nil
+      client.session_state("s").not_nil!.background.should be_nil
+      ACP::Protocol::WireFrame.repeated_members(client.session_state_raw("s").not_nil!.json, "background").should contain("background")
+
+      state = %({"sessionUpdate":"state_update","state":"idle","background":[]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{state}}})
+      quiet = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::StateUpdate)
+      quiet.background.not_nil!.should be_empty
+      client.session_state("s").not_nil!.background.not_nil!.should be_empty
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "retains exact child state from parent announcements and child updates over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+
+      meta = %({"example.test/rate":0.1234567890123456789})
+      state = %({"state":"running","_meta":#{meta}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"subagent_update","sessionId":"child","state":#{state}}}})
+      announced = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+      announced.state.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+      client.subagent("child").not_nil!.state.not_nil!.meta_raw.not_nil!.json.should eq(meta)
+
+      state = %({"sessionUpdate":"state_update","state":"running","state":"idle"})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child","update":#{state}}})
+      next_exact_session_update(observed).update.typed.should be_nil
+      client.subagent("child").not_nil!.state.not_nil!.state.should eq("running")
+
+      background = %([{"type":"future","revision":0.1111111111111111111}])
+      state = %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn","background":#{background}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child","update":#{state}}})
+      finished = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::StateUpdate)
+      cached = client.subagent("child").not_nil!.state.not_nil!
+      cached.stop_reason.should eq("end_turn")
+      cached.raw.field("background").should eq(finished.background_raw)
+      cached.raw.field("background").not_nil!.json.should eq(background)
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child","update":{"sessionUpdate":"state_update","state":"running","background":null,"background":[]}}})
+      state = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::StateUpdate)
+      state.background.should be_nil
+      client.subagent("child").not_nil!.state.not_nil!.raw.field("background").should be_nil
+
+      [
+        %("state":null,"state":{"state":"idle"}),
+        %("state":{"state":false}),
+        %("state":{"state":"idle","state":"idle"}),
+      ].each do |field|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"subagent_update","sessionId":"child","title":"Retained",#{field}}}})
+        patch = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+        patch.title.should eq("Retained")
+        patch.state_present?.should be_false
+        child = client.subagent("child").not_nil!
+        child.title.should eq("Retained")
+        child.state.not_nil!.state.should eq("running")
+      end
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"subagent_update","sessionId":"child","state":null}}})
+      clear = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+      clear.state_present?.should be_true
+      client.subagent("child").not_nil!.state.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps precise decimals and rejects ambiguous state in v2 status responses over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      describe_state = %({"state":"idle","stopReason":"error","error":{"code":-32603,"message":"Failed","data":{"ratio":0.1234567890123456789}},"background":[{"type":"future","progress":0.9876543210987654321}]})
+      responses = [
+        %({"status":"open","state":#{describe_state}}),
+        %({"status":"open","state":{"state":"idle","state":"running"}}),
+        %({"status":"open","state":null,"state":{"state":"running"}}),
+        %({"status":"open","_meta":{"example.test/version":18446744073709551615}}),
+      ]
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"status":{}}}}})
+        responses.each do |result|
+          request = JSON.parse(outgoing.gets.not_nil!)
+          request["method"].should eq("session/status")
+          feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":#{result}})
+        end
+      end
+      client.initialize_connection
+
+      state = client.session_status("unattached").state.not_nil!
+      state.error_raw.not_nil!.field("data").not_nil!.field("ratio").not_nil!.json.should eq("0.1234567890123456789")
+      state.background.not_nil!.first.raw.field("progress").not_nil!.json.should eq("0.9876543210987654321")
+      2.times do
+        status = client.session_status("unattached")
+        status.open?.should be_true
+        status.state.should be_nil
+      end
+      status = client.session_status("unattached")
+      status.meta_raw.not_nil!.field("example.test/version").not_nil!.json.should eq(UInt64::MAX.to_s)
+      client.session_state("unattached").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end

@@ -577,8 +577,9 @@ module ACP
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
+      state_result = result && result.has_key?("status") && result.has_key?("state")
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
-      if exact_params || versioned_result || choices_result || result_metadata
+      if exact_params || versioned_result || choices_result || state_result || result_metadata
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value
