@@ -30,6 +30,7 @@
 
 require "json"
 require "log"
+require "set"
 require "./protocol/types"
 require "./protocol/client_methods"
 require "./transport"
@@ -229,6 +230,10 @@ module ACP
     # request must not register (nothing would ever answer or drain it).
     # Guarded by `@pending_mutex`.
     @disconnected : Bool = false
+
+    # IDs announced through plan_update, grouped by session. Guarded by
+    # @pending_mutex so forgetting a session or disconnecting can clear them.
+    @plan_ids = {} of String => Set(String)
 
     # An agent request whose handler hasn't answered yet. Compared by
     # identity, so a duplicate ID can't claim another request's answer.
@@ -612,6 +617,7 @@ module ACP
     #
     # Returns true if cached state was actually dropped.
     def forget_session(session_id : String) : Bool
+      @pending_mutex.synchronize { @plan_ids.delete(session_id) }
       return false unless @session_id == session_id
 
       @session_id = nil
@@ -1022,6 +1028,7 @@ module ACP
         @disconnected = true
         @pending.each_value(&.close)
         @pending.clear
+        @plan_ids.clear
       end
     end
 
@@ -1525,6 +1532,7 @@ module ACP
       # Some legacy agents may send "type" instead, so we normalize
       # "type" → "sessionUpdate" for backward compatibility.
       raw_params = raw_h.dup
+      plan_operation = false
       if update = raw_params["update"]?
         update_h = update.as_h?
         unless update_h
@@ -1537,10 +1545,12 @@ module ACP
           update_h["sessionUpdate"] = update_h["type"]
           raw_params["update"] = JSON::Any.new(update_h)
         end
+        kind = update_h["sessionUpdate"]?.try(&.as_s?)
+        plan_operation = kind == "plan_update" || kind == "plan_removed"
       end
-      normalized_params = JSON::Any.new(raw_params)
 
-      unless handler = @on_update
+      handler = @on_update
+      unless handler || (plan_operation && @client_capabilities.plan)
         # No typed handler registered. `session/update` is still a
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
@@ -1555,7 +1565,7 @@ module ACP
       # parse the update, re-delivering the same notification to
       # `on_notification` a second time.
       update_params = begin
-        Protocol::SessionUpdateParams.from_json(normalized_params.to_json)
+        Protocol::SessionUpdateParams.from_json(raw_params.to_json)
       rescue ex : JSON::ParseException
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
@@ -1563,10 +1573,34 @@ module ACP
         return
       end
 
+      if plan_operation && @client_capabilities.plan
+        return unless track_plan_operation(update_params)
+      end
+      return deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless handler
+
       begin
         handler.call(update_params)
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
+      end
+    end
+
+    # Tracks announced IDs even for raw handlers so an unknown removal has no effect.
+    private def track_plan_operation(params : Protocol::SessionUpdateParams) : Bool
+      @pending_mutex.synchronize do
+        return false if @disconnected
+
+        case update = params.update
+        when Protocol::IdentifiedPlanUpdate
+          ids = @plan_ids[params.session_id] ||= Set(String).new
+          ids.add(update.plan.plan_id)
+        when Protocol::PlanRemovedUpdate
+          return false unless ids = @plan_ids[params.session_id]?
+          return false unless ids.delete(update.plan_id)
+
+          @plan_ids.delete(params.session_id) if ids.empty?
+        end
+        true
       end
     end
 

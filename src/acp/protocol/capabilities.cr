@@ -172,6 +172,20 @@ module ACP
       end
     end
 
+    # Presence advertises support for identified plan updates and removals.
+    # See: https://agentclientprotocol.com/protocol/v1/agent-plan#plan-operations
+    struct PlanCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the capability, optionally with extension metadata.
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # The full set of capabilities the client advertises to the agent
     # during the `initialize` handshake.
     #
@@ -198,6 +212,9 @@ module ACP
       # unsupported.
       property elicitation : ElicitationCapabilities?
 
+      # Support for identified checklist and Markdown plans.
+      property plan : PlanCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -208,6 +225,7 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
         @session : ClientSessionCapabilities? = nil,
         @elicitation : ElicitationCapabilities? = nil,
+        @plan : PlanCapabilities? = nil,
       )
       end
     end

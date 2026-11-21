@@ -113,6 +113,8 @@ module ACP
         "tool_call"                 => ToolCallUpdate,
         "tool_call_update"          => ToolCallStatusUpdate,
         "plan"                      => PlanUpdate,
+        "plan_update"               => IdentifiedPlanUpdate,
+        "plan_removed"              => PlanRemovedUpdate,
         "available_commands_update" => AvailableCommandsUpdate,
         "current_mode_update"       => CurrentModeUpdate,
         "config_option_update"      => ConfigOptionUpdate,
@@ -428,6 +430,83 @@ module ACP
 
     # Backward-compatible alias.
     alias PlanStep = PlanEntry
+
+    # A complete identified plan carried by `plan_update`.
+    abstract struct PlanUpdateContent
+      include JSON::Serializable
+
+      use_json_discriminator "type", {
+        "items"    => PlanItems,
+        "markdown" => PlanMarkdown,
+      }
+
+      # Representation of the plan on the wire.
+      getter type : String
+
+      # Opaque plan ID, unique within its session.
+      @[JSON::Field(key: "planId")]
+      getter plan_id : String
+
+      # Extension metadata belonging to the plan.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+    end
+
+    # An identified plan represented as a complete checklist.
+    struct PlanItems < PlanUpdateContent
+      # Current entries. Each update supplies the full list.
+      property entries : Array(PlanEntry)
+
+      # Creates a checklist plan.
+      def initialize(@plan_id : String, @entries : Array(PlanEntry), @meta : Hash(String, JSON::Any)? = nil)
+        @type = "items"
+      end
+    end
+
+    # An identified plan represented as a Markdown document.
+    struct PlanMarkdown < PlanUpdateContent
+      # The entire Markdown document.
+      property content : String
+
+      # Optional absolute path to the file containing the plan.
+      property path : String?
+
+      # Creates a Markdown plan.
+      def initialize(@plan_id : String, @content : String, @path : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        @type = "markdown"
+      end
+    end
+
+    # Replaces the complete plan with this ID, including its representation.
+    struct IdentifiedPlanUpdate < SessionUpdate
+      # The replacement checklist or Markdown document.
+      property plan : PlanUpdateContent
+
+      # Extension metadata belonging to the update.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates a `plan_update` notification payload.
+      def initialize(@plan : PlanUpdateContent, @meta : Hash(String, JSON::Any)? = nil)
+        @session_update = "plan_update"
+      end
+    end
+
+    # Removes a plan previously announced in the same session.
+    struct PlanRemovedUpdate < SessionUpdate
+      # The plan ID to remove.
+      @[JSON::Field(key: "planId")]
+      property plan_id : String
+
+      # Extension metadata belonging to the update.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates a `plan_removed` notification payload.
+      def initialize(@plan_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        @session_update = "plan_removed"
+      end
+    end
 
     # ─── Available Commands Update ─────────────────────────────────────
 

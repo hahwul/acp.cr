@@ -28,6 +28,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Support opt-in ACP v1 plan operations via `PlanCapabilities`, `IdentifiedPlanUpdate`, and `PlanRemovedUpdate`. Plans can carry a complete checklist or a Markdown document and use IDs scoped to their session.
 - Support the stable ACP v1 features of schema 1.31. Each new client capability is opt-in and off by default:
   - `session/delete`: `Client#session_delete` (treats `-32002` as success), `SessionDeleteParams`/`SessionDeleteResult`, and `SessionCapabilities#delete?`
   - `logout`: `Client#logout`, `LogoutParams`/`LogoutResult`, and `AgentCapabilities#auth` with `AgentAuthCapabilities#logout?`

@@ -135,7 +135,9 @@ Session updates are received via the `on_update` callback. They form a discrimin
 | `AgentThoughtChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
 | `ToolCallUpdate` | `tool_call_id : String`, `title : String`, `kind : String?`, `status : String?` |
 | `ToolCallStatusUpdate` | `tool_call_id : String`, `status : String?`, `title : String?` |
-| `PlanUpdate` | `entries : Array(PlanEntry)` |
+| `PlanUpdate` | `entries : Array(PlanEntry)` for the session's baseline checklist |
+| `IdentifiedPlanUpdate` | `plan : PlanUpdateContent` (needs `plan`) |
+| `PlanRemovedUpdate` | `plan_id : String` (needs `plan`) |
 | `UserMessageChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
 | `AvailableCommandsUpdate` | `available_commands : Array(AvailableCommand)` |
 | `CurrentModeUpdate` | `current_mode_id : String` |
@@ -146,6 +148,14 @@ Session updates are received via the `on_update` callback. They form a discrimin
 
 `CompactionUpdate`'s `summary`, `error` and `_meta` are patches. If a field is omitted, the stored value stays as it is. If it is `null`, the value is cleared. Both cases read as nil, so use `summary_present?` / `error_present?` / `meta_present?` to tell them apart.
 
+Set `plan: ACP::Protocol::PlanCapabilities.new` in the client capabilities to
+receive identified plans. In your callback, replace the entire plan for
+`{params.session_id, update.plan.plan_id}` on each `IdentifiedPlanUpdate`.
+`PlanItems` contains `entries`. `PlanMarkdown` contains the complete
+`content` and an optional absolute `path`. On `PlanRemovedUpdate`, drop
+the matching plan for that session. The client ignores removals of IDs it has
+not received. See [ACP Agent Plan](https://agentclientprotocol.com/protocol/v1/agent-plan).
+
 ## Capabilities
 
 ### ClientCapabilities
@@ -155,7 +165,8 @@ ACP::Protocol::ClientCapabilities.new(
   fs : FsCapabilities? = nil,
   terminal : Bool = false,
   session : ClientSessionCapabilities? = nil,
-  elicitation : ElicitationCapabilities? = nil
+  elicitation : ElicitationCapabilities? = nil,
+  plan : PlanCapabilities? = nil
 )
 ```
 
@@ -165,6 +176,7 @@ ACP::Protocol::ClientCapabilities.new(
 | `terminal?` | `Bool` | Terminal support |
 | `session` | `ClientSessionCapabilities?` | `compaction`, `notices` and `config_options.boolean`; each one is opt-in |
 | `elicitation` | `ElicitationCapabilities?` | Supported `elicitation/create` modes (`form`, `url`) |
+| `plan` | `PlanCapabilities?` | Support for identified plan updates and removals |
 
 Nothing is advertised by default. Only set a capability once the client handles it.
 
