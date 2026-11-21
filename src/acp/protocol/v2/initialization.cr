@@ -162,6 +162,10 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::SessionOptionsCapabilities)]
         property options : Protocol::SessionOptionsCapabilities?
 
+        # Presence advertises support for forking an existing session.
+        @[JSON::Field(converter: ::ACP::Protocol::SessionForkCapabilities)]
+        property fork : Protocol::SessionForkCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -178,6 +182,7 @@ module ACP
           @title : Protocol::SessionTitleCapabilities? = nil,
           @archive : Protocol::SessionArchiveCapabilities? = nil,
           @options : Protocol::SessionOptionsCapabilities? = nil,
+          @fork : Protocol::SessionForkCapabilities? = nil,
         )
         end
       end

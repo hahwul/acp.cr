@@ -59,6 +59,11 @@ module ACP
     end
 
     # :nodoc:
+    def without_fork : SessionCursor
+      SessionCursor.new(@session_id, @cursor_id, @anchor, @capabilities.try(&.without_fork), metadata: @metadata)
+    end
+
+    # :nodoc:
     def snapshot : SessionCursor
       SessionCursor.new(
         @session_id,
@@ -72,7 +77,8 @@ module ACP
 
   # Tracks patches and stages replacements during a full replay.
   private class CursorRegistry
-    private alias Cursors = Hash(String, SessionCursor)
+    private record CursorEntry, cursor : SessionCursor, fork_revision : UInt64?
+    private alias Cursors = Hash(String, CursorEntry)
 
     private class Replay
       getter? full : Bool
@@ -86,25 +92,44 @@ module ACP
     @sessions = {} of String => Cursors
     @replay_requests = {} of String => Replay
     @replaying = {} of String => Replay
+    @next_fork_revision = 0_u64
 
     def initialize(@v2 : Bool)
     end
 
     def cursor(session_id : String, cursor_id : String) : SessionCursor?
-      @sessions[session_id]?.try(&.[cursor_id]?).try(&.snapshot)
+      @sessions[session_id]?.try(&.[cursor_id]?).try(&.cursor.snapshot)
     end
 
     def cursors(session_id : String) : Array(SessionCursor)
-      @sessions[session_id]?.try(&.values.map(&.snapshot)) || [] of SessionCursor
+      @sessions[session_id]?.try(&.values.map(&.cursor.snapshot)) || [] of SessionCursor
+    end
+
+    def fork_revision(session_id : String, cursor_id : String) : UInt64?
+      return if @replaying[session_id]?.try(&.staged.has_key?(session_id))
+
+      @sessions[session_id]?.try(&.[cursor_id]?).try(&.fork_revision)
+    end
+
+    def reject_fork(session_id : String, cursor_id : String, revision : UInt64) : Nil
+      revoke_fork(@sessions[session_id]?, cursor_id, revision)
+      revoke_fork(@replaying[session_id]?.try(&.staged[session_id]?), cursor_id, revision)
+    end
+
+    private def revoke_fork(records : Cursors?, cursor_id : String, revision : UInt64) : Nil
+      return unless records && (entry = records[cursor_id]?) && entry.fork_revision == revision
+
+      records[cursor_id] = CursorEntry.new(entry.cursor.without_fork, nil)
     end
 
     def observe(session_id : String, update : Protocol::CursorUpdate) : Nil
       replay = @replaying[session_id]?
       staged = replay.try(&.staged[session_id]?)
       records = staged || (@sessions[session_id] ||= Cursors.new)
-      previous = records[update.cursor_id]?
+      entry = records[update.cursor_id]?
+      previous = entry.try(&.cursor)
       patch = Protocol::CursorUpdate.from_json(Protocol::WireFrame.encode(update))
-      old = @sessions[session_id]?.try(&.[patch.cursor_id]?) if staged
+      old = @sessions[session_id]?.try(&.[patch.cursor_id]?).try(&.cursor) if staged
       anchor = previous.try(&.anchor)
       if staged && replay.try(&.full?) && anchor && anchor == old.try(&.anchor)
         # A live update can arrive before replay starts. Let replay remap
@@ -112,6 +137,11 @@ module ACP
         anchor = patch.anchor || anchor
       end
       capabilities = patch.capabilities_present? ? patch.capabilities : previous.try(&.capabilities)
+      revision = if patch.capabilities_present?
+                   @next_fork_revision += 1 if capabilities.try(&.fork)
+                 else
+                   entry.try(&.fork_revision)
+                 end
       metadata = previous.try(&.metadata)
       if @v2 && staged && previous.nil?
         metadata = old.try(&.metadata)
@@ -119,7 +149,8 @@ module ACP
       if patch.meta_present?
         metadata = @v2 ? patch.metadata.try(&.apply_to(metadata)) : patch.metadata
       end
-      records[patch.cursor_id] = SessionCursor.new(session_id, patch.cursor_id, anchor || patch.anchor, capabilities, metadata: metadata)
+      cursor = SessionCursor.new(session_id, patch.cursor_id, anchor || patch.anchor, capabilities, metadata: metadata)
+      records[patch.cursor_id] = CursorEntry.new(cursor, revision)
     end
 
     def start_replay(request_id : String, session_id : String, *, full : Bool) : Nil

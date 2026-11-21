@@ -32,6 +32,7 @@ require "json"
 require "log"
 require "set"
 require "./protocol/types"
+require "./protocol/session_fork"
 require "./protocol/client_methods"
 require "./transport"
 require "./errors"
@@ -225,15 +226,21 @@ module ACP
     # When we send a request, we create a channel and store it here.
     # The dispatcher fiber sends the response into the channel when
     # it arrives, unblocking the caller.
-    private alias PendingResponse = JSON::Any | Protocol::WireFrame
+    private alias PendingResponse = JSON::Any | Protocol::WireFrame | ProtocolError
+    private alias ForkCursorGrant = {String, String, UInt64}
 
     private record PendingRequest,
       response : Channel(PendingResponse),
       closing_session : String?,
       close_on_missing : Bool,
+      fork_source : String?,
+      fork_cursor : ForkCursorGrant?,
       on_result : (String -> Nil)?
 
     @pending = {} of String => PendingRequest
+
+    # V1 session IDs learned through successful setup, guarded by @pending_mutex.
+    @known_session_ids = Set(String).new
 
     # Mutex for thread-safe access to @pending (though Crystal fibers
     # are cooperative, this protects against unexpected scheduling).
@@ -637,6 +644,53 @@ module ACP
     # Previews options for a new session in the given workspace.
     def session_options(cwd : String) : Protocol::SessionOptionsResult
       session_options(Protocol::SessionOptionsParams.new(cwd))
+    end
+
+    # Forks a session and makes the returned session active on this client.
+    def session_fork(params : Protocol::SessionForkParams) : Protocol::SessionForkResult
+      method = Protocol::AgentMethod::SESSION_FORK
+      ensure_state(ClientState::Initialized, method)
+      agent = @agent_capabilities
+      caps = agent.try(&.session_capabilities)
+      unless caps && caps.fork
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.fork")
+      end
+      unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
+        raise ArgumentError.new("ACP session directories must be absolute")
+      end
+      if params.additional_directories && !caps.additional_directories
+        raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
+      end
+      if choices = params.config_options
+        validate_initial_config_options(choices)
+      end
+      if servers = params.mcp_servers
+        mcp = agent.try(&.mcp_capabilities)
+        servers.each do |server|
+          case server.as_h?.try(&.["type"]?).try(&.as_s?)
+          when "http"
+            raise InvalidStateError.new("The Agent did not advertise MCP HTTP") unless mcp.try(&.http?)
+          when "sse"
+            raise InvalidStateError.new("The Agent did not advertise MCP SSE") unless mcp.try(&.sse?)
+          end
+        end
+      end
+      if prompt = params.system_prompt
+        support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
+        unless support.supports_mode?(prompt.mode)
+          raise InvalidStateError.new("The Agent did not advertise systemPrompt mode #{prompt.mode.inspect}")
+        end
+        if prompt.content.empty? || !prompt.content.all?(Protocol::TextContentBlock)
+          raise ArgumentError.new("ACP system prompts require one or more text content blocks")
+        end
+      end
+
+      attach_session(method, params, Protocol::SessionForkResult)
+    end
+
+    # Forks a source session into the given working directory.
+    def session_fork(session_id : String, cwd : String, *, cursor_id : String? = nil) : Protocol::SessionForkResult
+      session_fork(Protocol::SessionForkParams.new(session_id, cwd, cursor_id: cursor_id))
     end
 
     # Queries a session without attaching to it. Requires draft status support.
@@ -1048,7 +1102,7 @@ module ACP
     # Decodes a typed response using original JSON when JSON::Any cannot hold it.
     protected def send_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder)
+      response = send_and_await_response(method, message_builder, check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
       decode_typed_response(method, response, type)
     end
 
@@ -1156,11 +1210,13 @@ module ACP
 
     # Commits attachment before dispatching later frames such as archive.
     private def attach_session(method : String, params : JSON::Serializable, type : T.class, session_id : String? = nil) : T forall T
-      send_cached_request(method, params, type) do |result|
-        unless closed?
-          @session_id = result.is_a?(Protocol::SessionNewResult) ? result.session_id : session_id
-          @session_modes = result.modes
-          @session_config_options = result.config_options
+      send_cached_request(method, params, type) do |attached|
+        attached_id = attached.is_a?(Protocol::SessionNewResult) ? attached.session_id : session_id
+        if attached_id && !closed?
+          @known_session_ids.add(attached_id)
+          @session_id = attached_id
+          @session_modes = attached.modes
+          @session_config_options = attached.config_options
           @state = ClientState::SessionActive
         end
       end
@@ -1181,7 +1237,8 @@ module ACP
         nil
       end
 
-      response = send_and_await_response(method, message_builder, on_result: observe)
+      response = send_and_await_response(method, message_builder, on_result: observe,
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK)
       cached_result = decoded
       return cached_result if cached_result
 
@@ -1207,6 +1264,7 @@ module ACP
       timeout : Float64? = @request_timeout,
       *,
       on_result : (String -> Nil)? = nil,
+      check_fork_cursor : Bool = false,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1227,9 +1285,14 @@ module ACP
       if close_on_missing || method == Protocol::AgentMethod::SESSION_ARCHIVE
         closing_session = params.try(&.["sessionId"]?).try(&.as_s?)
       end
+      if method == Protocol::AgentMethod::SESSION_FORK
+        fork_source = params.try(&.["sessionId"]?).try(&.as_s?)
+      end
 
+      fork_cursor = nil
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
+        fork_cursor = fork_cursor_grant(params) if check_fork_cursor
         start_cursor_replay(id_str, method, params)
         begin
           @subagent_registry.try(&.request_sent(id_str, method, params))
@@ -1237,11 +1300,17 @@ module ACP
           @cursor_registry.try(&.finish_replay(id_str))
           raise ex
         end
-        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, on_result)
+        @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, fork_source, fork_cursor, on_result)
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
       begin
-        @transport.send(message)
+        if fork_cursor
+          @transport.send_checked(message) do
+            refresh_fork_grant(id_str, params)
+          end
+        else
+          @transport.send(message)
+        end
       rescue ex
         @pending_mutex.synchronize do
           @pending.delete(id_str)
@@ -1266,7 +1335,30 @@ module ACP
       end
     end
 
+    # Rechecks the cursor once the transport is ready to write the request.
+    private def refresh_fork_grant(request_id : String, params : Hash(String, JSON::Any)?) : Nil
+      @pending_mutex.synchronize do
+        pending = @pending[request_id]? || raise ConnectionClosedError.new("Fork request is no longer pending")
+        @pending[request_id] = pending.copy_with(fork_cursor: fork_cursor_grant(params))
+      end
+    end
+
+    # Runs under the pending-request mutex, immediately before registration.
+    private def fork_cursor_grant(params : Hash(String, JSON::Any)?) : ForkCursorGrant?
+      return unless params && (value = params["cursorId"]?) && !value.raw.nil?
+
+      cursor_id = value.as_s? || raise ArgumentError.new("ACP fork cursor IDs must be strings")
+      session_id = params["sessionId"]?.try(&.as_s?) || raise ArgumentError.new("ACP fork requires a source session ID")
+      revision = @cursor_registry.try(&.fork_revision(session_id, cursor_id))
+      unless revision
+        raise InvalidStateError.new("Cursor #{cursor_id.inspect} does not currently permit forking session #{session_id.inspect}")
+      end
+      {session_id, cursor_id, revision}
+    end
+
     private def response_result(raw_response : PendingResponse, method : String) : JSON::Any
+      raise raw_response if raw_response.is_a?(ProtocolError)
+
       if raw_response.is_a?(Protocol::WireFrame)
         raise ProtocolError.new("Response to '#{method}' contains a number outside the range of JSON::Any")
       end
@@ -1339,6 +1431,7 @@ module ACP
         @disconnected = true
         @pending.each_value { |request| request.response.close }
         @pending.clear
+        @known_session_ids.clear
         @plan_ids.clear
         @subagent_registry.try(&.clear)
         @cursor_registry.try(&.clear)
@@ -1551,16 +1644,25 @@ module ACP
       # repeated response must not reach it — sending a second or third copy
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
+      response = wire_frame || msg
       channel = @pending_mutex.synchronize do
         @cursor_registry.try(&.finish_replay(id_str, msg, wire_frame))
         if request = @pending.delete(id_str)
+          if (grant = request.fork_cursor) && msg["error"]?.try(&.as_h?).try(&.["code"]?).try(&.as_i64?) == JsonRpcError::INVALID_PARAMS
+            @cursor_registry.try(&.reject_fork(*grant))
+          end
           if @initialize_request == id_str
             @initialize_request = nil
             observe_initialize_response(msg) unless wire_frame
           end
-          closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
-          if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
-            observer.call(result)
+          if error = fork_response_error(request.fork_source, msg)
+            response = error
+            @subagent_registry.try(&.request_finished(id_str))
+          else
+            closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
+            if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
+              observer.call(result)
+            end
           end
           if (session_id = request.closing_session) && closes_session?(request, msg, wire_frame)
             closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
@@ -1577,10 +1679,21 @@ module ACP
         begin
           answer_cancelled_session_inputs(cancelled_inputs) if cancelled_inputs
         ensure
-          channel.send(wire_frame || msg)
+          channel.send(response)
         end
       else
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
+      end
+    end
+
+    # Checks fork IDs before the workspace registry or active cache can change.
+    private def fork_response_error(source : String?, msg : JSON::Any) : ProtocolError?
+      return unless source && !msg["error"]? && (id = msg["result"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?))
+
+      if id == source
+        ProtocolError.new("The Agent returned the source session ID for session/fork")
+      elsif @known_session_ids.includes?(id) || @subagent_registry.try(&.known_session?(id))
+        ProtocolError.new("The Agent returned an existing session ID for session/fork")
       end
     end
 

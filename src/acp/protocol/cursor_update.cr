@@ -50,6 +50,17 @@ module ACP
       def initialize(@fork : CursorForkCapabilities? = nil, meta : Hash(String, JSON::Any)? = nil)
         @json_unmapped["_meta"] = JSON::Any.new(meta) if meta
       end
+
+      # :nodoc:
+      def without_fork : CursorCapabilities
+        copy = self
+        copy.clear_fork
+        copy
+      end
+
+      protected def clear_fork : Nil
+        @fork = nil
+      end
     end
 
     # :nodoc:

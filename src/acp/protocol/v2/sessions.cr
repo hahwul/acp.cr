@@ -1,5 +1,6 @@
 require "./initialization"
 require "./configuration"
+require "../session_fork"
 
 module ACP
   module Protocol
@@ -212,6 +213,12 @@ module ACP
         )
         end
       end
+
+      # Parameters for creating a v2 session from an existing session.
+      alias SessionForkParams = Protocol::ForkParams(McpServer, InitialSessionConfigOption)
+
+      # The newly created v2 fork, configuration, and commands.
+      alias SessionForkResult = SessionNewResult
 
       # Workspace or saved session whose options the Agent should preview.
       alias SessionOptionsParams = Protocol::SessionOptionsParams

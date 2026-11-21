@@ -1516,7 +1516,7 @@ describe "ACP MCP configuration logging" do
     writer = IO::Memory.new
     Log.capture("acp.transport", level: :debug) do |logs|
       transport = ACP::StdioTransport.new(reader, writer)
-      ["session/new", "session/load", "session/resume"].each do |method|
+      ["session/new", "session/load", "session/resume", "session/fork"].each do |method|
         frame = JSON.parse(%({"jsonrpc":"2.0","id":1,"method":#{method.to_json},"params":{"cwd":"/work","mcpServers":[{"type":"stdio","env":[{"name":"API_KEY","value":"example-secret"}]},{"type":"http","headers":[{"name":"Authorization","value":"example-token"}]}]}}))
         transport.send(frame.as_h)
         logs.check(:debug, /"mcpServers":"\[REDACTED\]"/)

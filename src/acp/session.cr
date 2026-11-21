@@ -261,6 +261,23 @@ module ACP
       @client.session_options(Protocol::SessionOptionsParams.new(cwd, session_id: @id, additional_directories: additional_directories, meta: meta))
     end
 
+    # Creates an active fork with a new ID and leaves this session available.
+    def fork(
+      cwd : String,
+      *,
+      cursor_id : String? = nil,
+      additional_directories : Array(String)? = nil,
+      mcp_servers : Array(JSON::Any)? = nil,
+      system_prompt : Protocol::SystemPrompt? = nil,
+      config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
+      meta : Hash(String, JSON::Any)? = nil,
+    ) : Session
+      params = Protocol::SessionForkParams.new(@id, cwd, cursor_id: cursor_id, additional_directories: additional_directories,
+        mcp_servers: mcp_servers, system_prompt: system_prompt, config_options: config_options, meta: meta)
+      result = @client.session_fork(params)
+      Session.new(@client, result.session_id, result.modes, result.config_options)
+    end
+
     # Looks up an Agent-announced cursor in this session.
     def cursor(cursor_id : String) : SessionCursor?
       @client.session_cursor(@id, cursor_id)

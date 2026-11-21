@@ -238,6 +238,21 @@ the Client's `session.configOptions.boolean` capability. Read the resulting
 configuration and, in v2, the available commands from the setup response.
 [ACP Session Options Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-options.mdx)
 
+### `#session_fork` (draft)
+
+Call `client.session_fork(source_id, cwd)` when the Agent advertises
+`sessionCapabilities.fork` in v1 or `session.fork` in v2. The returned
+`session_id` identifies the new active session. V1 also exposes
+`Session#fork(cwd)`, which returns a wrapper for the fork.
+
+Use `SessionForkParams` in the protocol version's namespace to supply extra
+workspace roots, MCP servers, a system prompt, or ordered initial settings.
+Pass `cursor_id:` to fork at a cursor reported as forkable on the source
+session on this connection. A `-32602` reply retires the fork grant used by
+that request. A later announcement can grant fork access again.
+The source session keeps its history and its other cursors.
+[ACP Session Fork Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-fork.mdx)
+
 ### `#session_set_title` (draft)
 
 Call `client.session_set_title(session_id, title)` on v1 or v2 when the Agent

@@ -7208,6 +7208,278 @@ describe "ACP draft session options" do
   end
 end
 
+private class QueuedForkTransport < V2TestTransport
+  getter queued = Channel(Nil).new(1)
+  getter ready_to_write = Channel(Nil).new
+
+  def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+    @queued.send(nil)
+    @ready_to_write.receive
+    super(message, &preflight)
+  end
+end
+
+describe "ACP draft session fork" do
+  it "uses the same optional cursor wire shape on v1 and v2" do
+    {
+      ACP::Protocol::SessionForkParams,
+      ACP::Protocol::V2::SessionForkParams,
+    }.each do |type|
+      params = type.from_json(%({"sessionId":"parent","cwd":"/work","cursorId":null}))
+      params.cursor_id.should be_nil
+      JSON.parse(params.to_json).should eq(JSON.parse(%({"sessionId":"parent","cwd":"/work"})))
+      expect_raises(JSON::ParseException) do
+        type.from_json(%({"sessionId":"parent","cwd":"/work","cursorId":123}))
+      end
+    end
+  end
+
+  it "sets the v1 fork active in wire order and forwards initial choices from Session" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{},"options":{},"additionalDirectories":{},"systemPrompt":{"mode":{"_concise":{}}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"source"})
+    transport.replies["session/fork"] = %("result":{"sessionId":"forked","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"large","options":[]}]})
+    transport.replies["session/prompt"] = %("result":{"stopReason":"end_turn"})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    source = ACP::Session.create(client, "/work")
+    take_v2_frame(transport.outgoing)
+    prompt = ACP::Protocol::SystemPrompt.new("_concise", [ACP::Protocol::TextContentBlock.new("Keep it short.").as(ACP::Protocol::ContentBlock)])
+    choices = [ACP::Protocol::InitialSessionConfigOption.new("model", "large"), ACP::Protocol::InitialSessionConfigOption.new("mode", "review")]
+    forked = source.fork("/tree", additional_directories: ["/shared"], config_options: choices, system_prompt: prompt)
+
+    forked.id.should eq("forked")
+    forked.config_options.not_nil!.first.current_value.should eq("large")
+    source.closed?.should be_false
+    source.id.should eq("source")
+    client.session_id.should eq("forked")
+    wire = take_v2_frame(transport.outgoing)
+    wire["method"].should eq("session/fork")
+    wire["params"].should eq(JSON.parse(%({"sessionId":"source","cwd":"/tree","additionalDirectories":["/shared"],"systemPrompt":{"mode":"_concise","content":[{"type":"text","text":"Keep it short."}]},"configOptions":[{"configId":"model","value":"large"},{"configId":"mode","value":"review"}]})))
+    client.session_prompt_text("Hello")
+    take_v2_frame(transport.outgoing)["params"]["sessionId"].should eq("forked")
+  ensure
+    client.try(&.close)
+  end
+
+  it "forks a v2 cursor with a distinct workspace and cursors" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{},"options":{},"additionalDirectories":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"source"})
+    transport.replies["session/fork"] = %("result":{"sessionId":"forked","availableCommands":[{"type":"command","name":"review","description":"Review the fork"}]})
+    transport.replies["session/prompt"] = %("result":{"messageId":"prompt"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    client.session_new("/source")
+    take_v2_frame(transport.outgoing)
+    seen = Channel(String).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send(note.update.session_update)
+      nil
+    end
+    transport.update("source", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"agent_message","messageId":"m","position":"after"},"capabilities":{"fork":{}}}))
+    transport.update("source", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+    take_v2_frame(seen).should eq("cursor_update")
+    take_v2_frame(seen).should eq("subagent_update")
+    expect_raises(ACP::InvalidStateError, /Cursor/) { client.session_fork("different", "/fork", cursor_id: "c") }
+    expect_raises(ACP::InvalidStateError, /child/) { client.session_fork("child", "/fork") }
+
+    choices = [ACP::Protocol::V2::InitialSessionConfigOption.new("fast", false)]
+    params = ACP::Protocol::V2::SessionForkParams.new("source", "/fork", cursor_id: "c", additional_directories: ["/extra"], config_options: choices)
+    result = client.session_fork(params)
+    result.session_id.should eq("forked")
+    result.typed_available_commands.first.name.should eq("review")
+    wire = take_v2_frame(transport.outgoing)
+    wire["method"].should eq("session/fork")
+    wire["params"].should eq(JSON.parse(%({"sessionId":"source","cwd":"/fork","cursorId":"c","additionalDirectories":["/extra"],"configOptions":[{"configId":"fast","type":"boolean","value":false}]})))
+    client.session_workspace("source").not_nil!.cwd.should eq("/source")
+    client.session_workspace("forked").not_nil!.cwd.should eq("/fork")
+    client.session_cursor("source", "c").not_nil!.fork?.should be_true
+    client.session_cursors("forked").should be_empty
+    client.subagent("child").not_nil!.cancel?.should be_true
+    client.session_prompt_text(result.session_id, "Hello").message_id.should eq("prompt")
+    take_v2_frame(transport.outgoing)["params"]["sessionId"].should eq("forked")
+  ensure
+    client.try(&.close)
+  end
+
+  it "revokes only the cursor grant rejected by the Agent" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{}}}})
+    transport.replies["session/fork"] = %("error":{"code":-32602,"message":"Cursor has expired","data":{"cursorId":"c"}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    seen = Channel(Nil).new(2)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send(nil)
+      nil
+    end
+    grant_update = %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":{},"_future":{"enabled":true}}})
+    transport.update("source", grant_update)
+    take_v2_frame(seen)
+    # A fresh grant can arrive before the rejection of an earlier request.
+    transport.before_reply = ->(method : String) do
+      transport.update("source", grant_update) if method == "session/fork"
+      nil
+    end
+    error = expect_raises(ACP::JsonRpcError) { client.session_fork("source", "/work", cursor_id: "c") }
+    error.invalid_params?.should be_true
+    error.data.not_nil!["cursorId"].should eq("c")
+    take_v2_frame(transport.outgoing)
+    take_v2_frame(seen)
+    client.session_cursor("source", "c").not_nil!.fork?.should be_true
+
+    transport.before_reply = nil
+    expect_raises(ACP::JsonRpcError) { client.session_fork("source", "/work", cursor_id: "c") }
+    take_v2_frame(transport.outgoing)
+    cursor = client.session_cursor("source", "c").not_nil!
+    cursor.fork?.should be_false
+    cursor.capabilities.not_nil!.json_unmapped["_future"]["enabled"].should eq(true)
+    expect_raises(ACP::InvalidStateError, /Cursor/) { client.session_fork("source", "/work", cursor_id: "c") }
+    transport.sent_messages.size.should eq(3)
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps v1 cursor forks opt-in and rejects unsupported setup features" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{}}}})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /Cursor/) { client.session_fork("source", "/work", cursor_id: "unknown") }
+    expect_raises(ArgumentError, /absolute/) { client.session_fork("source", "relative") }
+    expect_raises(ACP::InvalidStateError, /additionalDirectories/) do
+      client.session_fork(ACP::Protocol::SessionForkParams.new("source", "/work", additional_directories: ["/extra"]))
+    end
+    expect_raises(ACP::InvalidStateError, /options/) do
+      config = [ACP::Protocol::InitialSessionConfigOption.new("model", "large")]
+      client.session_fork(ACP::Protocol::SessionForkParams.new("source", "/work", config_options: config))
+    end
+    expect_raises(ACP::InvalidStateError, /MCP HTTP/) do
+      servers = [JSON.parse(%({"type":"http","name":"helper","url":"https://example.test/mcp","headers":[]}))]
+      client.session_fork(ACP::Protocol::SessionForkParams.new("source", "/work", mcp_servers: servers))
+    end
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "rejects v2 fork attempts when the Agent omits the fork marker" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /session.fork/) { client.session_fork("source", "/work") }
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "rejects a fork response that returns the source ID without changing its workspace" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"source"})
+    transport.replies["session/fork"] = %("result":{"sessionId":"source"})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/source")
+    expect_raises(ACP::ProtocolError, /source session ID/) { client.session_fork("source", "/fork") }
+    client.session_workspace("source").not_nil!.cwd.should eq("/source")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps existing v1 sessions active and v2 child payloads scoped after reused IDs" do
+    v1_transport = V2TestTransport.new
+    v1_transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{}}}})
+    v1_transport.replies["session/new"] = %("result":{"sessionId":"existing"})
+    v1_transport.replies["session/fork"] = %("result":{"sessionId":"existing"})
+    v1 = ACP::Client.new(v1_transport)
+    v1.initialize_connection
+    v1.session_new("/old")
+    v1_transport.replies["session/new"] = %("result":{"sessionId":"source"})
+    v1.session_new("/source")
+    expect_raises(ACP::ProtocolError, /existing session ID/) { v1.session_fork("source", "/fork") }
+    v1.session_id.should eq("source")
+
+    v2_transport = V2TestTransport.new
+    v2_transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{}}}})
+    v2_transport.replies["session/new"] = %("result":{"sessionId":"source"})
+    v2_transport.replies["session/fork"] = %("result":{"sessionId":"child"})
+    v2 = ACP::V2::Client.new(v2_transport)
+    v2.initialize_connection
+    v2.session_new("/source")
+    v2_transport.update("source", %({"sessionUpdate":"subagent_update","sessionId":"child","cwd":"/child"}))
+    expect_raises(ACP::ProtocolError, /existing session ID/) { v2.session_fork("source", "/fork") }
+    v2.session_workspace("child").not_nil!.cwd.should eq("/child")
+    v2.subagent("child").not_nil!.parent_session_id.should eq("source")
+  ensure
+    v1.try(&.close)
+    v2.try(&.close)
+  end
+
+  it "rechecks the cursor grant when a queued fork reaches the writer" do
+    transport = QueuedForkTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{}}}})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    seen = Channel(Nil).new(1)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      seen.send(nil)
+      nil
+    end
+    transport.update("source", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":{}}}))
+    take_v2_frame(seen)
+    rejected = Channel(Exception?).new(1)
+    spawn do
+      client.session_fork("source", "/work", cursor_id: "c")
+      rejected.send(nil)
+    rescue ex
+      rejected.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    transport.update("source", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":null}))
+    take_v2_frame(seen)
+    transport.ready_to_write.send(nil)
+    take_v2_frame(rejected).should be_a(ACP::InvalidStateError)
+    transport.sent_messages.size.should eq(1)
+  ensure
+    transport.try(&.ready_to_write.close)
+    client.try(&.close)
+  end
+
+  it "leaves untracked cursor forwarding available to a v1 caller using raw requests" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{}}}})
+    transport.replies["session/fork"] = %("result":{"sessionId":"forked"})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    params = JSON.parse(%({"sessionId":"source","cwd":"/work","cursorId":"persisted"}))
+    client.send_request_raw("session/fork", params)["sessionId"].should eq("forked")
+    take_v2_frame(transport.outgoing)["params"].should eq(params)
+  ensure
+    client.try(&.close)
+  end
+
+  it "records Windows workspace roots for a v1 fork on any host" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{},"additionalDirectories":{}}}})
+    transport.replies["session/fork"] = %("result":{"sessionId":"forked"})
+    caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.initialize_connection
+    client.session_fork(ACP::Protocol::SessionForkParams.new("source", "C:/fork", additional_directories: ["C:/extra"]))
+    workspace = client.session_workspace("forked").not_nil!
+    workspace.cwd.should eq("C:/fork")
+    workspace.additional_directories.should eq(["C:/extra"])
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

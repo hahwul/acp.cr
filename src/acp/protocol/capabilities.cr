@@ -483,6 +483,7 @@ module ACP
     # System prompt modes the agent supports beyond the baseline `append`.
     struct SessionSystemPromptModeCapabilities
       include JSON::Serializable
+      include LosslessUnmapped
 
       # When present, the agent accepts `mode: "override"`.
       property override : SessionSystemPromptOverrideCapabilities?
@@ -521,6 +522,24 @@ module ACP
       # Returns true if the agent accepts `mode: "override"`.
       def override? : Bool
         !@mode.try(&.override).nil?
+      end
+
+      # Whether the Agent accepts this system prompt mode.
+      def supports_mode?(name : String) : Bool
+        case name
+        when "append"   then true
+        when "override" then override?
+        else
+          return false if name == "_meta"
+          modes = @mode
+          return false unless modes
+
+          if raw = modes.raw_field(name)
+            JSON::PullParser.new(raw).kind.begin_object?
+          else
+            !modes.json_unmapped[name]?.try(&.as_h?).nil?
+          end
+        end
       end
     end
 
