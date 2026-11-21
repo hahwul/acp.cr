@@ -6166,6 +6166,86 @@ private def take_v2_frame(channel : Channel(T)) : T forall T
   end
 end
 
+describe "ACP draft authentication status" do
+  {"v1", "v2"}.each do |version|
+    it "receives early status changes and queries status on #{version}" do
+      transport = V2TestTransport.new
+      transport.replies["initialize"] = if version == "v1"
+                                          %("result":{"protocolVersion":1,"agentCapabilities":{"auth":{"status":{}}}})
+                                        else
+                                          %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"auth":{"status":{}}}})
+                                        end
+      transport.replies["auth/status"] = %("result":{"state":"authenticated","accounts":[{"label":"Workspace account","active":true,"organization":"Team"},{"description":"Missing label"}],"_meta":{"example.test/source":"fixture"}})
+      transport.after_reply = ->(method : String) do
+        if method == "initialize"
+          transport.inject_raw(%({"jsonrpc":"2.0","method":"auth/status_update","params":{"state":"_later","accounts":[]}}))
+        end
+      end
+      client = version == "v1" ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+      updates = Channel(ACP::Protocol::AuthStatusUpdateParams).new(1)
+      client.on_auth_status_update = ->(status : ACP::Protocol::AuthStatusUpdateParams) do
+        updates.send(status)
+        nil
+      end
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)
+      update = take_v2_frame(updates)
+      update.state.should eq("unknown")
+      update.raw_state.should eq("_later")
+      update.accounts.should be_empty
+
+      result = client.auth_status
+      result.state.should eq("authenticated")
+      result.accounts.size.should eq(1)
+      account = result.accounts.first
+      account.label.should eq("Workspace account")
+      account.active.should be_true
+      account.organization.should eq("Team")
+      result.meta.not_nil!["example.test/source"].should eq("fixture")
+      request = take_v2_frame(transport.outgoing)
+      request["method"].should eq("auth/status")
+      request["params"].should eq(JSON.parse("{}"))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "treats invalid or absent status markers as unsupported" do
+    wire = %({"protocolVersion":1,"agentCapabilities":{"auth":{"status":true}}})
+    ACP::Protocol::InitializeResult.from_json(wire).agent_capabilities.auth.not_nil!.status.should be_nil
+    supported = ACP::Protocol::AgentAuthCapabilities.new(status: ACP::Protocol::AuthStatusCapabilities.new)
+    JSON.parse(supported.to_json)["status"].should eq(JSON.parse("{}"))
+
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /auth.status/) { client.auth_status }
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps account details available to the client while redacting frame logs" do
+    result = %({"jsonrpc":"2.0","id":1,"result":{"state":"authenticated","accounts":[{"label":"Display account"}]}})
+    malformed_result = %({"jsonrpc":"2.0","id":2,"result":{"accounts":[{"label":"Display account"}]}})
+    notification = %({"jsonrpc":"2.0","method":"auth/status_update","params":{"state":"unauthenticated","accounts":[{"label":"Display account"}]}})
+    Log.capture("acp.transport", level: :debug) do |logs|
+      transport = ACP::StdioTransport.new(IO::Memory.new([result, malformed_result, notification].join("\n") + "\n"), IO::Memory.new)
+      transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
+      transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
+      transport.receive.not_nil!["params"]["accounts"][0]["label"].should eq("Display account")
+      2.times do
+        logs.check(:debug, /"accounts":"\[REDACTED\]"/)
+        logs.entry.message.should_not contain("Display account")
+      end
+      logs.check(:debug, /"params":"\[REDACTED\]"/)
+      logs.entry.message.should_not contain("Display account")
+    ensure
+      transport.try(&.close)
+    end
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

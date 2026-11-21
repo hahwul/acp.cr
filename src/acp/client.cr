@@ -164,6 +164,9 @@ module ACP
     # Callback invoked when the transport connection is lost.
     property on_disconnect : (-> Nil)?
 
+    # Callback for draft authentication status changes from the Agent.
+    property on_auth_status_update : (Protocol::AuthStatusUpdateParams -> Nil)?
+
     # ─── Typed Client Method Handlers ───────────────────────────────
     # These handlers are invoked when the agent calls the corresponding
     # client method. Register them to provide file system and terminal
@@ -232,10 +235,11 @@ module ACP
     # Guarded by `@pending_mutex`.
     @disconnected : Bool = false
 
-    # Matches the v2 initialize response at the dispatcher boundary, before
-    # the Agent can send a request after successful negotiation.
-    @v2_initialize_request : String?
+    # Matches initialize at the dispatcher boundary so the next frame uses
+    # the newly negotiated protocol and authentication status capability.
+    @initialize_request : String?
     @v2_initialization_result : Protocol::V2::InitializeResult?
+    @auth_status_supported = false
 
     # IDs announced through plan_update, grouped by session. Guarded by
     # @pending_mutex so forgetting a session or disconnecting can clear them.
@@ -446,6 +450,7 @@ module ACP
       replacement.on_agent_request = @on_agent_request
       replacement.on_notification = @on_notification
       replacement.on_disconnect = @on_disconnect
+      replacement.on_auth_status_update = @on_auth_status_update
       replacement.on_read_text_file = @on_read_text_file
       replacement.on_write_text_file = @on_write_text_file
       replacement.on_create_terminal = @on_create_terminal
@@ -495,6 +500,17 @@ module ACP
       ClientLog.info { "Logged out" }
 
       result
+    end
+
+    # Queries the Agent's draft authentication status when it advertises support.
+    def auth_status(params : Protocol::AuthStatusParams = Protocol::AuthStatusParams.new) : Protocol::AuthStatusResult
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::AUTH_STATUS)
+      unless @agent_capabilities.try(&.auth).try(&.status)
+        raise InvalidStateError.new("The Agent did not advertise auth.status")
+      end
+
+      method = Protocol::AgentMethod::AUTH_STATUS
+      decode_result(Protocol::AuthStatusResult, send_request(method, params), method)
     end
 
     # Creates a new session with the agent.
@@ -1074,7 +1090,7 @@ module ACP
         raise ConnectionClosedError.new if @disconnected
         @subagent_registry.try(&.request_sent(id_str, method, message["params"]?.try(&.as_h?)))
         @pending[id_str] = response_channel
-        @v2_initialize_request = id_str if v2_wire? && method == Protocol::AgentMethod::INITIALIZE
+        @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
       begin
         @transport.send(message)
@@ -1371,9 +1387,9 @@ module ACP
       cancelled_inputs = nil
       channel = @pending_mutex.synchronize do
         if response_channel = @pending.delete(id_str)
-          if @v2_initialize_request == id_str
-            @v2_initialize_request = nil
-            @v2_initialization_result = parse_v2_initialize(msg)
+          if @initialize_request == id_str
+            @initialize_request = nil
+            observe_initialize_response(msg)
           end
           closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg))
           if closed_sessions && !v2_wire?
@@ -1393,14 +1409,23 @@ module ACP
       end
     end
 
-    private def parse_v2_initialize(message : JSON::Any) : Protocol::V2::InitializeResult?
+    # Runs under the pending-request mutex before releasing the initialize waiter.
+    private def observe_initialize_response(message : JSON::Any) : Nil
       return if message["error"]?
       return unless result = message["result"]?
 
-      typed = Protocol::V2::InitializeResult.from_json(result.to_json)
-      typed if typed.protocol_version == Protocol::V2::VERSION
+      if v2_wire?
+        typed = Protocol::V2::InitializeResult.from_json(result.to_json)
+        if typed.protocol_version == Protocol::V2::VERSION
+          @v2_initialization_result = typed
+          @auth_status_supported = typed.capabilities.auth_status?
+        end
+      else
+        typed = Protocol::InitializeResult.from_json(result.to_json)
+        @auth_status_supported = ACP.supports_protocol_version?(typed.protocol_version) &&
+                                 !typed.agent_capabilities.auth.try(&.status).nil?
+      end
     rescue JSON::ParseException
-      nil
     end
 
     # Handles a method call from the agent (e.g., session/request_permission).
@@ -1752,6 +1777,8 @@ module ACP
         handle_cancel_request(params)
       when Protocol::ClientMethod::ELICITATION_COMPLETE
         handle_elicitation_complete(params)
+      when Protocol::ClientMethod::AUTH_STATUS_UPDATE
+        handle_auth_status_update(params)
       else
         # Delegate to the generic notification handler.
         # Extension notifications (prefixed with `_`) are also routed here.
@@ -1901,6 +1928,19 @@ module ACP
       rescue ex
         ClientLog.error { "Error in elicitation/complete handler: #{ex.message}" }
       end
+    end
+
+    # Delivers advertised authentication status updates in receive order.
+    private def handle_auth_status_update(params : JSON::Any?) : Nil
+      if (handler = @on_auth_status_update) && @pending_mutex.synchronize { @auth_status_supported }
+        if update = params.try { |p| Protocol::AuthStatusUpdateParams.from_json(p.to_json) rescue nil }
+          handler.call(update)
+          return
+        end
+      end
+      deliver_raw_notification(Protocol::ClientMethod::AUTH_STATUS_UPDATE, params)
+    rescue ex
+      ClientLog.error { "Error in auth/status_update handler: #{ex.class}" }
     end
 
     # Passes a notification to the generic `on_notification` callback, if one
