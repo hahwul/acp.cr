@@ -124,6 +124,25 @@ describe "ACP authentication methods" do
   end
 end
 
+describe "ACP implementation metadata" do
+  it "sends client implementation metadata and retains agent metadata from initialize" do
+    transport = AutoReplyTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentInfo":{"name":"agent","title":"Test Agent","version":"1","_meta":{"example.test/agent":true}}})
+    info = ACP::Protocol::ClientInfo.new("editor", "2", title: "Test Editor", meta: {"example.test/client" => JSON::Any.new(true)})
+    client = ACP::Client.new(transport, client_info: info)
+    client.request_timeout = 2.0
+    result = client.initialize_connection
+
+    sent(transport, "initialize")["params"]["clientInfo"].should eq(JSON.parse(info.to_json))
+    agent = result.agent_info.not_nil!
+    agent.display_name.should eq("Test Agent")
+    agent.meta.not_nil!["example.test/agent"].should eq(true)
+    client.agent_info.should eq(agent)
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP plan operations" do
   it "advertises the capability and delivers plan replacements and removals in session order" do
     caps = ACP::Protocol::ClientCapabilities.new(plan: ACP::Protocol::PlanCapabilities.new)

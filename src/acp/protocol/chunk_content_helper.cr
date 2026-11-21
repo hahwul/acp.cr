@@ -32,7 +32,7 @@ module ACP
       # Returns a ContentChunk wrapping the parsed content block, if possible.
       def to_content_chunk : ContentChunk?
         if block = content_block
-          ContentChunk.new(block, @meta)
+          ContentChunk.new(block, @meta, @message_id)
         end
       end
     end

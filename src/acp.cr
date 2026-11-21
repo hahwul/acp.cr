@@ -75,6 +75,7 @@ module ACP
   # - `capabilities` — client capabilities to advertise.
   # - `env` — optional environment variables for the agent process.
   # - `chdir` — optional working directory for the agent process.
+  # - `client_info` — full implementation metadata to send during initialization.
   #
   # Spawns the agent, wraps it in a `Client`, performs the `initialize`
   # handshake, and returns the ready-to-use (initialized) client — so callers
@@ -94,6 +95,8 @@ module ACP
     capabilities : Protocol::ClientCapabilities = Protocol::ClientCapabilities.new,
     env : Process::Env = nil,
     chdir : String? = nil,
+    *,
+    client_info : Protocol::ClientInfo? = nil,
   ) : Client
     transport = ProcessTransport.new(
       command,
@@ -106,7 +109,8 @@ module ACP
       transport,
       client_name: client_name,
       client_version: client_version,
-      client_capabilities: capabilities
+      client_capabilities: capabilities,
+      client_info: client_info,
     )
 
     begin

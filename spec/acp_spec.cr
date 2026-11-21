@@ -27,6 +27,22 @@ describe "ACP authentication descriptors" do
   end
 end
 
+describe "ACP MCP transport metadata" do
+  it "round-trips server, environment and header metadata for every transport" do
+    wire = [
+      %({"name":"local","command":"mcp","args":[],"env":[{"name":"MODE","value":"test","_meta":{"example.test/env":1}}],"_meta":{"example.test/server":true}}),
+      %({"type":"http","name":"http","url":"https://example.test/mcp","headers":[{"name":"Accept","value":"application/json","_meta":{"example.test/header":1}}],"_meta":{"example.test/server":true}}),
+      %({"type":"sse","name":"sse","url":"https://example.test/sse","headers":[{"name":"Accept","value":"text/event-stream","_meta":{"example.test/header":2}}],"_meta":{"example.test/server":true}}),
+    ].map { |json| JSON.parse(json) }
+    servers = wire.map { |value| ACP::Protocol::McpServerParser.from_json_any(value) }
+    servers.each do |server|
+      server.meta.not_nil!["example.test/server"].should eq(true)
+    end
+    params = ACP::Protocol::SessionNewParams.new("/work", servers)
+    JSON.parse(params.to_json)["mcpServers"].as_a.should eq(wire)
+  end
+end
+
 describe "ACP identified plan types" do
   it "round-trips checklist plans with independent plan and update metadata" do
     wire = JSON.parse(<<-JSON)
@@ -4811,9 +4827,11 @@ describe ACP::Protocol::ContentChunk do
   end
 
   it "deserializes from JSON" do
-    json_str = %({"content": {"type": "text", "text": "hello world"}})
+    json_str = %({"content": {"type": "text", "text": "hello world"}, "messageId": "msg-1"})
     chunk = ACP::Protocol::ContentChunk.from_json(json_str)
     chunk.text.should eq("hello world")
+    chunk.message_id.should eq("msg-1")
+    JSON.parse(chunk.to_json).should eq(JSON.parse(json_str))
   end
 
   it "supports meta field" do
