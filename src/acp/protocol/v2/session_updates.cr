@@ -6,42 +6,56 @@ module ACP
   module Protocol
     module V2
       # :nodoc:
-      module MessageContentPatch
-        @[JSON::Field(key: "content", presence: true, emit_null: true, ignore_serialize: !@content_wire_present, converter: ::ACP::Protocol::ContentBlockArray)]
-        @content_wire : PreservedJson?
-
-        @[JSON::Field(ignore: true)]
-        @content_wire_present : Bool = false
-
-        # Replacement content with representable fields in each block.
-        def content : Array(JSON::Any)?
-          @content_wire.try(&.value).try(&.as_a?)
+      module OptionalContentArray
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          PreservedJson.new(pull, project_array_objects: true)
         end
 
-        # Replaces content. Assign nil to clear the message explicitly.
-        def content=(value : Array(JSON::Any)?) : Array(JSON::Any)?
-          @content_wire_present = true
-          @content_wire = value.try { |blocks| PreservedJson.new(JSON::Any.new(blocks)) }
-          value
+        def self.to_json(content : PreservedJson, builder : JSON::Builder) : Nil
+          content.to_json(builder)
         end
+      end
 
-        # Whether the patch supplies content or explicitly clears it.
-        def content_present? : Bool
-          @content_wire_present
-        end
+      # :nodoc:
+      module ContentArrayPatch
+        macro define(name)
+          @[JSON::Field(key: {{name.id.stringify}}, presence: true, emit_null: true, ignore_serialize: !{{name.id}}_present?, converter: ::ACP::Protocol::V2::OptionalContentArray)]
+          @{{name.id}}_wire : PreservedJson?
 
-        # Exact replacement content, including unknown blocks and numeric values.
-        def content_raw : RawJson?
-          @content_wire.try(&.raw)
-        end
+          @[JSON::Field(ignore: true)]
+          @{{name.id}}_wire_present : Bool = false
 
-        # Standard content blocks in the replacement, in their original order.
-        def content_blocks : Array(Protocol::ContentBlock)?
-          content_raw.try(&.elements?).try &.compact_map do |block|
-            Protocol::ContentBlock.from_json(block.json)
-          rescue JSON::Error
-            nil
+          # Replacement content with representable fields in each block.
+          def {{name.id}} : Array(JSON::Any)?
+            @{{name.id}}_wire.try(&.value).try(&.as_a?)
           end
+
+          # Replaces content. Assign nil to clear it explicitly.
+          def {{name.id}}=(value : Array(JSON::Any)?) : Array(JSON::Any)?
+            @{{name.id}}_wire_present = true
+            @{{name.id}}_wire = value.try { |blocks| PreservedJson.new(JSON::Any.new(blocks)) }
+            value
+          end
+
+          # Whether the patch supplies an array or explicitly clears it.
+          def {{name.id}}_present? : Bool
+            @{{name.id}}_wire_present && (!@{{name.id}}_wire || !{{name.id}}.nil?)
+          end
+
+          # Exact replacement content with the original numeric values.
+          def {{name.id}}_raw : RawJson?
+            @{{name.id}}_wire.try(&.raw) if {{name.id}}_present?
+          end
+        end
+      end
+
+      # :nodoc:
+      module MessageContentPatch
+        ContentArrayPatch.define(content)
+
+        # Usable standard and unrecognized v2 display blocks in wire order.
+        def content_blocks : Array(Protocol::ContentBlock)?
+          content_raw.try { |raw| Protocol::ContentBlock.decode_v2_array(raw) }
         end
       end
 
@@ -133,12 +147,16 @@ module ACP
 
         # Clearing status resets it to in_progress. The summary is open content.
         PatchFields.define({
-          status:  {String, "status"},
-          summary: {Array(JSON::Any), "summary"},
-          error:   {String, "error"},
-          meta:    {Hash(String, JSON::Any), "_meta"},
+          status: {String, "status"},
+          error:  {String, "error"},
         })
-        include MetadataPatch
+        ContentArrayPatch.define(summary)
+        include LosslessMetadataPatch
+
+        # Usable display blocks from the replacement compaction summary.
+        def typed_summary : Array(Protocol::ContentBlock)?
+          summary_raw.try { |raw| Protocol::ContentBlock.decode_v2_array(raw) }
+        end
 
         # Creates an update for the specified compaction entry.
         def initialize(@compaction_id : String)

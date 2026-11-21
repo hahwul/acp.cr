@@ -53,19 +53,34 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/prompt-turn
     struct ContentChunk
       include JSON::Serializable
+      include LosslessMetadata
 
-      # A single item of content (text, image, audio, resource, resource_link).
+      # A single item of display content.
       property content : ContentBlock
 
       # Optional ID linking this chunk to other chunks of the same message.
       @[JSON::Field(key: "messageId")]
       property message_id : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Creates a chunk with optional extension metadata.
+      def initialize(@content : ContentBlock, meta : Hash(String, JSON::Any)? = nil, @message_id : String? = nil)
+        self.meta = meta
+      end
 
-      def initialize(@content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil, @message_id : String? = nil)
+      # Creates a chunk from exact extension metadata.
+      def initialize(@content : ContentBlock, *, meta_raw : RawJson?, @message_id : String? = nil)
+        if meta_raw && meta_raw.object?
+          @metadata_wire = PreservedJson.new(meta_raw, project_object_members: true)
+        end
+      end
+
+      # Reads a serialized v2 chunk wrapper with open display content.
+      def self.from_v2_json(json : String) : self
+        wire = RawJson.from_json(json)
+        unless block = wire.field("content")
+          raise JSON::SerializableError.new("Missing required content", to_s, "content", 1, 1, nil)
+        end
+        new(ContentBlock.from_v2_json(block), meta_raw: wire.field("_meta"), message_id: wire.field("messageId").try(&.as_s?))
       end
 
       # Convenience: returns the text if the content is a TextContentBlock.
@@ -934,28 +949,52 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction
     struct CompactionSummaryChunkUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include LosslessContentField
+      include ChunkContentHelper
 
       # The compaction this chunk belongs to (required).
       @[JSON::Field(key: "compactionId")]
       property compaction_id : String
 
-      # The content block to append (required). Kept as raw JSON like
-      # message chunks; see `content_block`.
-      property content : JSON::Any
+      @[JSON::Field(ignore: true)]
+      @open_content = false
 
-      # Extension metadata, scoped to this chunk.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(
-        @compaction_id : String,
-        @content : JSON::Any,
-        @meta : Hash(String, JSON::Any)? = nil,
-      )
+      # Creates a summary chunk.
+      def initialize(@compaction_id : String, content : JSON::Any, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "compaction_summary_chunk"
+        @content_wire = PreservedJson.new(content)
+        self.meta = meta
       end
 
-      include ChunkContentHelper
+      # Reads a v2 summary chunk with an open content discriminator.
+      def self.from_v2_json(json : String) : self
+        chunk = from_json(json)
+        chunk.enable_open_content
+        chunk
+      end
+
+      protected def enable_open_content : Nil
+        @open_content = true
+      end
+
+      # Converts the appended block using the compaction's wire version.
+      def content_block : ContentBlock?
+        if @open_content
+          ContentBlock.from_v2_json(content_raw)
+        else
+          ContentBlock.from_json(content_raw.json)
+        end
+      rescue JSON::Error
+        nil
+      end
+
+      # Wraps the appended block with metadata scoped to this chunk.
+      def to_content_chunk : ContentChunk?
+        if block = content_block
+          ContentChunk.new(block, meta_raw: meta_raw)
+        end
+      end
     end
 
     # ═══════════════════════════════════════════════════════════════════

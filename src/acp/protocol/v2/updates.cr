@@ -189,26 +189,11 @@ module ACP
         end
       end
 
-      # :nodoc:
-      module MessageChunkContent
-        def self.from_json(pull : JSON::PullParser) : PreservedJson
-          location = pull.location
-          content = PreservedJson.new(pull, project_object_members: true)
-          unless content.value
-            raise JSON::ParseException.new("Message chunk content must be representable or a JSON object", *location)
-          end
-          content
-        end
-
-        def self.to_json(content : PreservedJson, builder : JSON::Builder) : Nil
-          content.to_json(builder)
-        end
-      end
-
       # Appends a content block to a transcript message.
       struct MessageChunkUpdate
         include JSON::Serializable
         include LosslessMetadata
+        include LosslessContentField
 
         # Discriminator for this message's role.
         @[JSON::Field(key: "sessionUpdate")]
@@ -218,35 +203,16 @@ module ACP
         @[JSON::Field(key: "messageId")]
         getter message_id : String
 
-        @[JSON::Field(key: "content", converter: ::ACP::Protocol::V2::MessageChunkContent)]
-        @content_wire : PreservedJson
-
         # Creates a message chunk.
         def initialize(@session_update : String, @message_id : String, content : JSON::Any, meta : Hash(String, JSON::Any)? = nil)
           @content_wire = PreservedJson.new(content)
           self.meta = meta
         end
 
-        # Content fields that can be represented in JSON::Any.
-        def content : JSON::Any
-          @content_wire.value.not_nil!
-        end
-
-        # Replaces the content of this chunk.
-        def content=(value : JSON::Any) : JSON::Any
-          @content_wire = PreservedJson.new(value)
-          value
-        end
-
-        # Exact content JSON, including extension values.
-        def content_raw : RawJson
-          @content_wire.raw
-        end
-
-        # Converts a known content block to a typed chunk with its message ID.
+        # Converts display content to a typed chunk with its message ID.
         def to_content_chunk : Protocol::ContentChunk?
-          block = Protocol::ContentBlock.from_json(content_raw.json)
-          Protocol::ContentChunk.new(block, meta, @message_id)
+          block = Protocol::ContentBlock.from_v2_json(content_raw)
+          Protocol::ContentChunk.new(block, meta_raw: meta_raw, message_id: @message_id)
         rescue JSON::Error
           nil
         end
@@ -372,9 +338,9 @@ module ACP
           when "usage_update"
             UsageUpdate.from_json(to_json)
           when "compaction_update"
-            CompactionUpdate.from_json(to_json)
+            CompactionUpdate.from_json(WireFrame.encode(self))
           when "compaction_summary_chunk"
-            Protocol::CompactionSummaryChunkUpdate.from_json(to_json)
+            Protocol::CompactionSummaryChunkUpdate.from_v2_json(WireFrame.encode(self))
           when "plan_update"
             PlanUpdate.from_json(to_json)
           when "plan_removed"
