@@ -53,6 +53,7 @@ describe "ACP stable v1 capabilities" do
     json = JSON.parse(ACP::Protocol::ClientCapabilities.new.to_json)
     json.as_h.has_key?("session").should be_false
     json.as_h.has_key?("elicitation").should be_false
+    json.as_h.has_key?("plan").should be_false
   end
 
   it "serializes session and elicitation client capabilities under their schema keys" do
@@ -94,6 +95,76 @@ describe "ACP stable v1 capabilities" do
     bare.session_capabilities.as(ACP::Protocol::SessionCapabilities).delete?.should be_false
     bare.session_capabilities.as(ACP::Protocol::SessionCapabilities).system_prompt.as(ACP::Protocol::SessionSystemPromptCapabilities).override?.should be_false
     bare.auth.as(ACP::Protocol::AgentAuthCapabilities).logout?.should be_false
+  end
+end
+
+describe "ACP plan operations" do
+  it "advertises the capability and delivers plan replacements and removals in session order" do
+    caps = ACP::Protocol::ClientCapabilities.new(plan: ACP::Protocol::PlanCapabilities.new)
+    transport, client = v1_client(client_caps: caps)
+    sent(transport, "initialize")["params"]["clientCapabilities"]["plan"].should eq(JSON.parse("{}"))
+
+    frames = [] of ACP::Protocol::SessionUpdateParams
+    complete = Channel(Nil).new(1)
+    client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) { frames << params; nil }
+    client.on_notification = ->(method : String, _params : JSON::Any?) { complete.send(nil) if method == "_done"; nil }
+
+    checklist = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}})
+    markdown = %({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"p","content":"# Revised","path":null}})
+    remove = %({"sessionUpdate":"plan_removed","planId":"p"})
+    implicit = %({"sessionUpdate":"plan","entries":[]})
+    {"a" => checklist, "b" => remove}.each do |session_id, update|
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{session_id.to_json},"update":#{update}}}))
+    end
+    [implicit, markdown, remove, remove].each do |update|
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"a","update":#{update}}}))
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_done"}))
+    select
+    when complete.receive
+    when timeout(2.seconds)
+      raise "plan operation notifications did not finish"
+    end
+
+    frames.map(&.session_id).should eq(["a", "a", "a", "a"])
+    frames[0].update.as(ACP::Protocol::IdentifiedPlanUpdate).plan.should be_a(ACP::Protocol::PlanItems)
+    frames[1].update.should be_a(ACP::Protocol::PlanUpdate)
+    replacement = frames[2].update.as(ACP::Protocol::IdentifiedPlanUpdate).plan.as(ACP::Protocol::PlanMarkdown)
+    replacement.plan_id.should eq("p")
+    replacement.content.should eq("# Revised")
+    replacement.path.should be_nil
+    frames[3].update.as(ACP::Protocol::PlanRemovedUpdate).plan_id.should eq("p")
+  ensure
+    client.try(&.close)
+  end
+
+  it "ignores unknown removals for a client using raw notifications" do
+    caps = ACP::Protocol::ClientCapabilities.new(plan: ACP::Protocol::PlanCapabilities.new)
+    transport, client = v1_client(client_caps: caps)
+    frames = Channel(String).new(4)
+    client.on_notification = ->(method : String, params : JSON::Any?) do
+      frames.send(params.not_nil!["update"]["sessionUpdate"].as_s) if method == "session/update"
+      frames.send(method) if method == "_done"
+      nil
+    end
+
+    remove = %({"sessionUpdate":"plan_removed","planId":"p"})
+    add = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]}})
+    [remove, add, remove].each do |update|
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}}))
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"_done"}))
+
+    ["plan_update", "plan_removed", "_done"].each do |expected|
+      select
+      when frame = frames.receive
+        frame.should eq(expected)
+      when timeout(2.seconds)
+        raise "missing notification #{expected}"
+      end
+    end
+  ensure
+    client.try(&.close)
   end
 end
 

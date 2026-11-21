@@ -1,5 +1,39 @@
 require "./spec_helper"
 
+describe "ACP identified plan types" do
+  it "round-trips checklist plans with independent plan and update metadata" do
+    wire = JSON.parse(<<-JSON)
+      {
+        "sessionUpdate": "plan_update",
+        "plan": {
+          "type": "items",
+          "planId": "checklist",
+          "entries": [{"content": "Check formatting", "priority": "high", "status": "completed"}],
+          "_meta": {"example.test/plan": true}
+        },
+        "_meta": {"example.test/update": 1}
+      }
+      JSON
+    update = ACP::Protocol::SessionUpdate.from_json(wire.to_json).as(ACP::Protocol::IdentifiedPlanUpdate)
+    plan = update.plan.as(ACP::Protocol::PlanItems)
+    plan.plan_id.should eq("checklist")
+    plan.entries.map(&.content).should eq(["Check formatting"])
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "serializes Markdown replacements and removal using the schema discriminators" do
+    replacement = ACP::Protocol::IdentifiedPlanUpdate.new(
+      ACP::Protocol::PlanMarkdown.new("shared-id", "# Revised", path: "/work/PLAN.md")
+    )
+    wire = JSON.parse(replacement.to_json)
+    wire.should eq(JSON.parse(%({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"shared-id","content":"# Revised","path":"/work/PLAN.md"}})))
+    update = ACP::Protocol::SessionUpdate.from_json(wire.to_json).as(ACP::Protocol::IdentifiedPlanUpdate)
+    update.plan.as(ACP::Protocol::PlanMarkdown).path.should eq("/work/PLAN.md")
+    removal = ACP::Protocol::PlanRemovedUpdate.new("shared-id")
+    JSON.parse(removal.to_json).should eq(JSON.parse(%({"sessionUpdate":"plan_removed","planId":"shared-id"})))
+  end
+end
+
 # ─── Helper: In-Memory Transport ──────────────────────────────────────
 #
 # A test transport that uses IO::Memory pairs so we can simulate
