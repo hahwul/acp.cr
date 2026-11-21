@@ -172,12 +172,19 @@ See [ACP Subagents](https://agentclientprotocol.com/protocol/v1/subagents).
 
 ## ACP v2 Preview Wire Types
 
-`ACP::Protocol::V2` contains the preview wire types for initialization,
-capabilities, and authentication. It includes method names and structured
+`ACP::Protocol::V2` contains preview wire types for initialization,
+capabilities, authentication, session setup, configuration changes, and
+prompt acknowledgements. It includes method names and structured
 unsupported-version error data. Unknown authentication variants preserve
 their payload for inspection or forwarding. The high-level `ACP::Client`
 currently negotiates ACP v1.
 See [ACP v2 Initialization](https://agentclientprotocol.com/protocol/v2/initialization).
+
+Use `ReplayFrom.start` in v2 `SessionResumeParams` to request replay from the
+start of retained history. The v2 `SessionPromptParams` accepts an optional
+`idempotency_key`, and its response carries the inserted `message_id`. The
+Agent reports completion through a later session update.
+See [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle).
 
 ## Capabilities
 
