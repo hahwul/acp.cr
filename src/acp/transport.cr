@@ -17,6 +17,7 @@ require "./protocol/wire_frame"
 require "log"
 require "path"
 require "./errors"
+require "./version"
 require "./protocol/types"
 require "./protocol/client_methods"
 
@@ -568,8 +569,10 @@ module ACP
       session_update = method == Protocol::AgentMethod::SESSION_UPDATE && envelope.try(&.["id"]?).try(&.raw).nil?
       exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE, Protocol::ClientMethod::SESSION_REQUEST_PERMISSION)
       result = envelope.try(&.["result"]?).try(&.as_h?)
+      protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
+      versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
-      if exact_params || choices_result
+      if exact_params || versioned_result || choices_result
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value

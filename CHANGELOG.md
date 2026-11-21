@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Breaking Changes
+- ACP v2 custom prompt content requires `on_prompt_content_type` to confirm the Agent’s advertised support.
 - Typed session mode and configuration setters validate IDs and values against the session's current advertisements. Initialize with `session.configOptions.boolean` to set v1 boolean options.
 - ACP v1 client helpers now reject unadvertised session operations, optional prompt and setup features, and invalid workspace paths before sending requests. Use absolute Agent-side paths and check the negotiated capabilities.
 - `StdioTransport#incoming` now carries `Transport::IncomingFrame?`. Use `receive` for `JSON::Any?` or `receive_frame` to retain input beyond the range of `JSON::Any`.
@@ -15,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Validate ACP v2 prompt capabilities and embedded resources before sending and decode prompt acknowledgements with wide extension metadata.
 - Preserve unknown fields and exact JSON numbers across ACP v2 session updates and their notification parameters over stdio.
 - Give Agents time to exit after stdin closes and drain stdout during shutdown before falling back to process signals.
 - Preserve exact ACP v2 permission subjects and tool-call payloads, including wide numbers, while delivering tool patches before permission callbacks.

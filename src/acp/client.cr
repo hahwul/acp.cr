@@ -2040,7 +2040,7 @@ module ACP
           else
             retired_setup = @subagent_registry.try(&.retired_setup?(id_str))
             @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
-            request.on_response.try(&.call(response))
+            request.on_response.try(&.call(initializing && wire_frame ? wire_frame : response))
             if !retired_setup && (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
             end

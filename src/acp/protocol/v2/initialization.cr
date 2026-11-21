@@ -1,6 +1,7 @@
 require "json"
 require "../capabilities"
 require "../types"
+require "../raw_json"
 require "./skills"
 
 module ACP
@@ -141,18 +142,23 @@ module ACP
         end
       end
 
+      # Interprets an Agent's exact initialize capabilities for a custom prompt type.
+      alias PromptContentTypeResolver = (String, RawJson -> Bool)
+
       # Additional content types accepted in prompts.
       struct PromptCapabilities
         include JSON::Serializable
 
         # Presence advertises image content.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property image : Capability?
 
         # Presence advertises audio content.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property audio : Capability?
 
         # Presence advertises embedded resource content.
-        @[JSON::Field(key: "embeddedContext")]
+        @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property embedded_context : Capability?
 
         # Presence allows a skill reference at the start of a prompt.
@@ -160,7 +166,7 @@ module ACP
         property skill : PromptSkillCapabilities?
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates prompt capabilities.
@@ -179,9 +185,11 @@ module ACP
         include JSON::Serializable
 
         # Presence advertises stdio MCP servers.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property stdio : Capability?
 
         # Presence advertises HTTP MCP servers.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property http : Capability?
 
         # Presence advertises support for servers hosted over ACP.
@@ -189,7 +197,7 @@ module ACP
         property acp : Capability?
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates the transport capability group.
@@ -207,20 +215,23 @@ module ACP
         include JSON::Serializable
 
         # Additional prompt content that the Agent accepts.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::PromptCapabilities))]
         property prompt : PromptCapabilities?
 
         # MCP transports supported by the Agent.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::McpCapabilities))]
         property mcp : McpCapabilities?
 
         # Presence advertises session deletion.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionDeleteCapabilities))]
         property delete : Protocol::SessionDeleteCapabilities?
 
         # Presence advertises support for additional workspace directories.
-        @[JSON::Field(key: "additionalDirectories")]
+        @[JSON::Field(key: "additionalDirectories", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionAdditionalDirectoriesCapabilities))]
         property additional_directories : Protocol::SessionAdditionalDirectoriesCapabilities?
 
         # Client-supplied system prompt support.
-        @[JSON::Field(key: "systemPrompt")]
+        @[JSON::Field(key: "systemPrompt", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptCapabilities))]
         property system_prompt : Protocol::SessionSystemPromptCapabilities?
 
         # When present, the Agent supports the draft session/status query.
@@ -244,7 +255,7 @@ module ACP
         property fork : Protocol::SessionForkCapabilities?
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates the session capability group.
@@ -269,9 +280,11 @@ module ACP
         include JSON::Serializable
 
         # Capabilities scoped to sessions.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::SessionCapabilities))]
         property session : SessionCapabilities?
 
         # Optional authentication extensions.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property auth : Capability?
 
         # Presence advertises draft provider configuration methods.
@@ -279,7 +292,7 @@ module ACP
         property providers : ProvidersCapabilities?
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates the agent capability group.
@@ -321,7 +334,7 @@ module ACP
       # fields are retained in `json_unmapped` for forwarding or inspection.
       struct AuthMethod
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
 
         # Wire discriminator. Known values are `agent` and `terminal`.
         @[JSON::Field(key: "type")]
@@ -373,6 +386,31 @@ module ACP
         end
       end
 
+      # :nodoc:
+      module OptionalAuthMethods
+        def self.from_json(pull : JSON::PullParser) : Array(AuthMethod)
+          methods = [] of AuthMethod
+          unless pull.kind.begin_array?
+            pull.skip
+            return methods
+          end
+
+          pull.read_array do
+            raw = WireFrame.read_raw(pull)
+            begin
+              methods << AuthMethod.from_json(raw)
+            rescue JSON::ParseException
+              # Keep usable methods next to malformed entries.
+            end
+          end
+          methods
+        end
+
+        def self.to_json(methods : Array(AuthMethod), builder : JSON::Builder) : Nil
+          methods.to_json(builder)
+        end
+      end
+
       # Parameters of an ACP v2 initialize request.
       struct InitializeParams
         include JSON::Serializable
@@ -413,14 +451,15 @@ module ACP
         property info : Implementation
 
         # Agent features.
+        @[JSON::Field(converter: ::ACP::Protocol::DefaultCapabilityObject(::ACP::Protocol::V2::AgentCapabilities))]
         property capabilities : AgentCapabilities = AgentCapabilities.new
 
         # Advertised authentication methods.
-        @[JSON::Field(key: "authMethods")]
+        @[JSON::Field(key: "authMethods", converter: ::ACP::Protocol::V2::OptionalAuthMethods)]
         property auth_methods : Array(AuthMethod) = [] of AuthMethod
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a successful ACP v2 initialize result.
