@@ -239,6 +239,79 @@ describe "ACP v2 tool call and terminal updates" do
   end
 end
 
+describe "ACP v2 session detail updates" do
+  it "decodes a child state snapshot without adding a notification discriminator" do
+    wire = JSON.parse(%({"sessionUpdate":"subagent_update","sessionId":"child","cwd":null,"additionalDirectories":[],"state":{"state":"idle","stopReason":"end_turn","background":[{"type":"tool_call","toolCallId":"tool"}]},"capabilities":{"cancel":{}},"_meta":{"old":null,"nested":{"new":true}}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::SubagentUpdate)
+    update.session_id.should eq("child")
+    update.state.not_nil!.stop_reason.should eq("end_turn")
+    update.state.not_nil!.background.not_nil!.first.entity_id.should eq("tool")
+    update.capabilities.not_nil!.cancel.should be_a(ACP::Protocol::V2::Capability)
+    update.cwd_present?.should be_true
+    update.cwd.should be_nil
+    update.additional_directories.should eq([] of String)
+    update.apply_metadata(JSON.parse(%({"old":1,"nested":{"old":true},"keep":2})).as_h).should eq(JSON.parse(%({"nested":{"new":true},"keep":2})).as_h)
+    JSON.parse(update.to_json).should eq(wire)
+  end
+
+  it "preserves links and open content for inter-session messages and chunks" do
+    wire = JSON.parse(%({"sessionUpdate":"session_message","messageId":"local","senderSessionId":"sender","recipientMessageId":null,"content":[{"type":"_future","value":1}]}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+    update.message_id.should eq("local")
+    update.sender_session_id.should eq("sender")
+    update.sender_message_id_present?.should be_false
+    update.recipient_message_id_present?.should be_true
+    update.content.not_nil!.first["value"].should eq(1)
+    JSON.parse(update.to_json).should eq(wire)
+
+    chunk = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"session_message_chunk","messageId":"local","content":{"type":"text","text":"Hello"}})).typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+    chunk.to_content_chunk.not_nil!.message_id.should eq("local")
+  end
+
+  it "preserves session info, cost, and compaction clears through serialization" do
+    info_wire = JSON.parse(%({"sessionUpdate":"session_info_update","updatedAt":null,"_meta":null}))
+    info = ACP::Protocol::V2::SessionUpdate.from_json(info_wire.to_json).typed.as(ACP::Protocol::V2::SessionInfoUpdate)
+    info.title_present?.should be_false
+    info.updated_at_present?.should be_true
+    info.apply_metadata({"keep" => JSON::Any.new(true)}).should be_nil
+    JSON.parse(info.to_json).should eq(info_wire)
+
+    usage_wire = JSON.parse(%({"sessionUpdate":"usage_update","used":10,"size":100,"cost":null}))
+    usage = ACP::Protocol::V2::SessionUpdate.from_json(usage_wire.to_json).typed.as(ACP::Protocol::V2::UsageUpdate)
+    usage.used.should eq(10)
+    usage.cost_present?.should be_true
+    usage.cost.should be_nil
+    JSON.parse(usage.to_json).should eq(usage_wire)
+
+    compaction_wire = JSON.parse(%({"sessionUpdate":"compaction_update","compactionId":"compact","status":null,"summary":[]}))
+    compaction = ACP::Protocol::V2::SessionUpdate.from_json(compaction_wire.to_json).typed.as(ACP::Protocol::V2::CompactionUpdate)
+    compaction.compaction_id.should eq("compact")
+    compaction.status_present?.should be_true
+    compaction.error_present?.should be_false
+    JSON.parse(compaction.to_json).should eq(compaction_wire)
+  end
+
+  it "decodes compaction chunks, notices, and plan removal" do
+    chunk = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"compaction_summary_chunk","compactionId":"compact","content":{"type":"text","text":"Summary"}})).typed.as(ACP::Protocol::CompactionSummaryChunkUpdate)
+    chunk.compaction_id.should eq("compact")
+    chunk.content_block.should be_a(ACP::Protocol::TextContentBlock)
+    notice = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"notice","severity":"info","title":"Welcome"})).typed.as(ACP::Protocol::NoticeUpdate)
+    notice.title.should eq("Welcome")
+    removed = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_removed","planId":"plan"})).typed.as(ACP::Protocol::PlanRemovedUpdate)
+    removed.plan_id.should eq("plan")
+  end
+
+  it "decodes known plans and retains unknown replacements with their ID" do
+    markdown = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"plan","content":"# Plan"}})).typed.as(ACP::Protocol::V2::PlanUpdate)
+    markdown.plan.typed.as(ACP::Protocol::PlanMarkdown).content.should eq("# Plan")
+    wire = JSON.parse(%({"sessionUpdate":"plan_update","plan":{"type":"_future","planId":"plan","ordered":true}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire.to_json).typed.as(ACP::Protocol::V2::PlanUpdate)
+    update.plan.plan_id.should eq("plan")
+    update.plan.typed.should be_nil
+    JSON.parse(update.to_json).should eq(wire)
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({
