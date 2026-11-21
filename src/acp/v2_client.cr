@@ -285,6 +285,9 @@ module ACP
       # Handler for custom Agent-to-Client requests.
       property on_extension_request : AgentRequestHandler?
 
+      # Resolves custom system prompt modes advertised through an ACP extension.
+      property on_system_prompt_mode : Protocol::SystemPromptModeResolver?
+
       @initializing = Atomic(Bool).new(false)
       @terminal_auth_running = Atomic(Bool).new(false)
 
@@ -750,8 +753,8 @@ module ACP
         validate_mcp_servers(caps.mcp, servers) if servers
         if system_prompt
           support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
-          if system_prompt.mode == "override" && !support.override?
-            raise InvalidStateError.new("The Agent did not advertise systemPrompt override")
+          unless support.supports_mode?(system_prompt.mode, @on_system_prompt_mode)
+            raise InvalidStateError.new("The Agent did not advertise systemPrompt #{system_prompt.mode.inspect}")
           end
           if system_prompt.content.empty? || !system_prompt.content.all?(Protocol::TextContentBlock)
             raise ArgumentError.new("ACP v2 system prompts require one or more text content blocks")
@@ -846,6 +849,7 @@ module ACP
         replacement.on_create_elicitation = on_create_elicitation
         replacement.on_elicitation_complete = on_elicitation_complete
         replacement.on_auth_status_update = on_auth_status_update
+        replacement.on_system_prompt_mode = on_system_prompt_mode
         begin
           replacement.initialize_connection(meta: @connection.initialization_offer.try(&.meta))
           close

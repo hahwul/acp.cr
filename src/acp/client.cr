@@ -31,6 +31,7 @@
 require "json"
 require "log"
 require "set"
+require "uri"
 require "./protocol/types"
 require "./protocol/session_fork"
 require "./protocol/client_methods"
@@ -147,6 +148,9 @@ module ACP
     # significantly longer than other requests, so this defaults to 5 minutes.
     # Set to nil to wait indefinitely.
     property prompt_timeout : Float64? = 300.0
+
+    # Resolves custom system prompt modes advertised through an ACP extension.
+    property on_system_prompt_mode : Protocol::SystemPromptModeResolver?
 
     # ─── Callbacks ──────────────────────────────────────────────────
 
@@ -396,8 +400,7 @@ module ACP
         client_info: @client_info
       )
 
-      raw_result = send_request(Protocol::AgentMethod::INITIALIZE, params)
-      result = decode_result(Protocol::InitializeResult, raw_result, Protocol::AgentMethod::INITIALIZE)
+      result = send_typed_request(Protocol::AgentMethod::INITIALIZE, params, Protocol::InitializeResult)
 
       # The handshake is a negotiation: the agent returns the version it will
       # use, which may be lower than we requested. Accept any version we still
@@ -499,6 +502,7 @@ module ACP
       replacement.on_notification = @on_notification
       replacement.on_disconnect = @on_disconnect
       replacement.on_auth_status_update = @on_auth_status_update
+      replacement.on_system_prompt_mode = @on_system_prompt_mode
       replacement.on_read_text_file = @on_read_text_file
       replacement.on_write_text_file = @on_write_text_file
       replacement.on_create_terminal = @on_create_terminal
@@ -620,7 +624,7 @@ module ACP
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, "session/new")
-      validate_initial_config_options(config_options) if config_options
+      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
 
       params = Protocol::SessionNewParams.new(cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
@@ -651,7 +655,10 @@ module ACP
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionLoadResult
       ensure_state(ClientState::Initialized, "session/load")
-      validate_initial_config_options(config_options) if config_options
+      unless @agent_capabilities.try(&.load_session?)
+        raise InvalidStateError.new("The Agent did not advertise loadSession")
+      end
+      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
 
       params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
@@ -682,6 +689,12 @@ module ACP
       archived : String? = nil,
     ) : Protocol::SessionListResult
       ensure_state(ClientState::Initialized, "session/list")
+      unless @agent_capabilities.try(&.session_capabilities).try(&.list?)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.list")
+      end
+      if cwd && !Protocol.absolute_path?(cwd)
+        raise ArgumentError.new("The ACP session list directory must be absolute")
+      end
       ensure_archive_support("session/list") if archived
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived)
@@ -719,35 +732,8 @@ module ACP
       unless caps && caps.fork
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.fork")
       end
-      unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
-        raise ArgumentError.new("ACP session directories must be absolute")
-      end
-      if params.additional_directories && !caps.additional_directories
-        raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
-      end
-      if choices = params.config_options
-        validate_initial_config_options(choices)
-      end
-      if servers = params.mcp_servers
-        mcp = agent.try(&.mcp_capabilities)
-        servers.each do |server|
-          case server.as_h?.try(&.["type"]?).try(&.as_s?)
-          when "http"
-            raise InvalidStateError.new("The Agent did not advertise MCP HTTP") unless mcp.try(&.http?)
-          when "sse"
-            raise InvalidStateError.new("The Agent did not advertise MCP SSE") unless mcp.try(&.sse?)
-          end
-        end
-      end
-      if prompt = params.system_prompt
-        support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
-        if prompt.mode == "override" && !support.override?
-          raise InvalidStateError.new("The Agent did not advertise systemPrompt override")
-        end
-        if prompt.content.empty? || !prompt.content.all?(Protocol::TextContentBlock)
-          raise ArgumentError.new("ACP system prompts require one or more text content blocks")
-        end
-      end
+      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt,
+        params.mcp_servers, params.config_options)
 
       attach_session(method, params, Protocol::SessionForkResult)
     end
@@ -800,6 +786,96 @@ module ACP
       end
     end
 
+    private def validate_session_setup(
+      cwd : String, directories : Array(String)?, prompt : Protocol::SystemPrompt?,
+      servers : Array(JSON::Any)?, config_options : Array(Protocol::InitialSessionConfigOption)?,
+    ) : Nil
+      unless Protocol.absolute_workspace?(cwd, directories)
+        raise ArgumentError.new("ACP session directories must be absolute")
+      end
+
+      caps = @agent_capabilities.try(&.session_capabilities)
+      if directories && !caps.try(&.additional_directories?)
+        raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
+      end
+      if prompt
+        support = caps.try(&.system_prompt) || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
+        unless support.supports_mode?(prompt.mode, @on_system_prompt_mode)
+          raise InvalidStateError.new("The Agent did not advertise systemPrompt #{prompt.mode.inspect}")
+        end
+        if prompt.content.empty? || !prompt.content.all?(Protocol::TextContentBlock)
+          raise ArgumentError.new("ACP system prompts require one or more text content blocks")
+        end
+      end
+      validate_initial_config_options(config_options) if config_options
+      validate_session_mcp_servers(servers) if servers
+    end
+
+    private def validate_session_mcp_servers(servers : Array(JSON::Any)) : Nil
+      caps = @agent_capabilities.try(&.mcp_capabilities)
+      servers.each do |server|
+        fields = server.as_h? || raise ArgumentError.new("ACP MCP servers must be objects")
+        type = fields["type"]?
+        unless type.nil? || type.raw.nil? || type.as_s?
+          raise ArgumentError.new("ACP MCP transport type must be a string")
+        end
+
+        transport = type.try(&.as_s?) || "stdio"
+        next unless transport.in?("stdio", "http", "sse")
+
+        unless fields["name"]?.try(&.as_s?)
+          raise ArgumentError.new("ACP MCP servers require a string name")
+        end
+        if transport == "stdio"
+          command = fields["command"]?.try(&.as_s?)
+          unless command && Protocol.absolute_path?(command)
+            raise ArgumentError.new("ACP MCP stdio commands must be absolute")
+          end
+          unless mcp_list(fields, "args").all?(&.as_s?)
+            raise ArgumentError.new("ACP MCP args must contain strings")
+          end
+          validate_mcp_named_values(fields, "env")
+        else
+          supported = transport == "http" ? caps.try(&.http?) : caps.try(&.sse?)
+          raise InvalidStateError.new("The Agent did not advertise MCP #{transport.upcase}") unless supported
+
+          validate_mcp_url(fields["url"]?.try(&.as_s?))
+          validate_mcp_named_values(fields, "headers")
+        end
+      end
+    end
+
+    private def mcp_list(fields : Hash(String, JSON::Any), key : String) : Array(JSON::Any)
+      value = fields[key]? || raise ArgumentError.new("ACP MCP servers require #{key}")
+      return [] of JSON::Any if value.raw.nil?
+
+      value.as_a? || raise ArgumentError.new("ACP MCP #{key} must be an array")
+    end
+
+    private def validate_mcp_named_values(fields : Hash(String, JSON::Any), key : String) : Nil
+      unless mcp_list(fields, key).all? { |entry| (pair = entry.as_h?) && pair["name"]?.try(&.as_s?) && pair["value"]?.try(&.as_s?) }
+        raise ArgumentError.new("ACP MCP #{key} entries require string names and values")
+      end
+    end
+
+    private def validate_mcp_url(value : String?) : Nil
+      if value && valid_uri_text?(value)
+        uri = URI.parse(value)
+        port = uri.port
+        if uri.scheme.try(&.downcase).in?("http", "https") && valid_uri_text?(uri.host.to_s) &&
+           (!port || (0..65535).includes?(port))
+          return
+        end
+      end
+      raise ArgumentError.new("ACP MCP HTTP and SSE servers require an absolute HTTP(S) URL")
+    rescue URI::Error | OverflowError
+      raise ArgumentError.new("ACP MCP HTTP and SSE servers require an absolute HTTP(S) URL")
+    end
+
+    private def valid_uri_text?(value : String) : Bool
+      !value.empty? && value.each_byte.none? { |byte| byte <= 32 || byte == 127 }
+    end
+
     private def validate_initial_config_options(values : Array(Protocol::InitialSessionConfigOption)) : Nil
       unless @agent_capabilities.try(&.session_capabilities).try(&.options)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.options")
@@ -818,8 +894,7 @@ module ACP
     # session is ready to continue.
     #
     # Requires the agent to advertise `sessionCapabilities.resume` during
-    # initialization. Callers SHOULD check `agent_capabilities&.session_capabilities&.resume?`
-    # before calling.
+    # initialization.
     #
     # Returns the resume result, which MAY include initial mode/config
     # state if the agent supports those features.
@@ -839,7 +914,10 @@ module ACP
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionResumeResult
       ensure_state(ClientState::Initialized, "session/resume")
-      validate_initial_config_options(config_options) if config_options
+      unless @agent_capabilities.try(&.session_capabilities).try(&.resume?)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.resume")
+      end
+      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
 
       params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
@@ -854,8 +932,7 @@ module ACP
     # work and release resources tied to the session.
     #
     # Requires the agent to advertise `sessionCapabilities.close` during
-    # initialization. Callers SHOULD check
-    # `agent_capabilities&.session_capabilities&.close?` before calling.
+    # initialization.
     #
     # If `session_id` is nil the active session is closed. After a
     # successful close the client transitions back to the Initialized
@@ -870,6 +947,9 @@ module ACP
 
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
+      unless @agent_capabilities.try(&.session_capabilities).try(&.close?)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.close")
+      end
 
       params = Protocol::SessionCloseParams.new(sid)
       raw_result = begin
@@ -890,8 +970,7 @@ module ACP
     # Removes a session from the agent's session history, so it no longer
     # appears in `session/list` results.
     #
-    # Requires the agent to advertise `sessionCapabilities.delete`; callers
-    # MUST check `agent_capabilities&.session_capabilities&.delete?` first.
+    # Requires the agent to advertise `sessionCapabilities.delete`.
     # A `-32002` (resource not found) answer counts as success, as the spec
     # recommends. What happens to an active session is up to the agent, so
     # the client's cached session state is left alone (see `forget_session`).
@@ -900,6 +979,9 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/session-delete
     def session_delete(session_id : String) : Protocol::SessionDeleteResult
       ensure_state(ClientState::Initialized, "session/delete")
+      unless @agent_capabilities.try(&.session_capabilities).try(&.delete?)
+        raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.delete")
+      end
 
       params = Protocol::SessionDeleteParams.new(session_id)
       raw_result = begin
@@ -967,6 +1049,19 @@ module ACP
     ) : Protocol::SessionPromptResult
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
+      raise InvalidStateError.new("ACP initialization is required") if @state.created?
+
+      caps = @agent_capabilities.try(&.prompt_capabilities)
+      prompt.each do |block|
+        case block.type
+        when "image"
+          raise InvalidStateError.new("The Agent did not advertise image prompts") unless caps.try(&.image?)
+        when "audio"
+          raise InvalidStateError.new("The Agent did not advertise audio prompts") unless caps.try(&.audio?)
+        when "resource"
+          raise InvalidStateError.new("The Agent did not advertise embedded context") unless caps.try(&.embedded_context?)
+        end
+      end
 
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
@@ -1843,7 +1938,9 @@ module ACP
           end
           if !v2_wire? && @initialize_request == id_str
             @initialize_request = nil
-            observe_initialize_response(msg) unless wire_frame
+            if result = Protocol::WireFrame.result_json(msg, wire_frame)
+              observe_initialize_response(result)
+            end
           end
           if error = created_session_response_error(request.creating_session, request.fork_source, msg)
             response = error
@@ -1906,11 +2003,8 @@ module ACP
     end
 
     # Runs under the pending-request mutex before releasing the initialize waiter.
-    private def observe_initialize_response(message : JSON::Any) : Nil
-      return if message["error"]?
-      return unless result = message["result"]?
-
-      typed = Protocol::InitializeResult.from_json(result.to_json)
+    private def observe_initialize_response(result : String) : Nil
+      typed = Protocol::InitializeResult.from_json(result)
       if ACP.supports_protocol_version?(typed.protocol_version)
         @mcp_acp_supported = typed.agent_capabilities.mcp_capabilities.try(&.acp?) || false
         @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?

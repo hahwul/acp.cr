@@ -73,7 +73,7 @@ class TestTransport < ACP::Transport
 end
 
 # Helper to build a standard initialize response for tests.
-def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
+def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16, *, session_capabilities : String? = nil) : String
   <<-JSON
     {
       "jsonrpc": "2.0",
@@ -90,7 +90,7 @@ def build_init_response(id : Int64, protocol_version : UInt16 = 1_u16) : String
           "mcpCapabilities": {
             "http": false,
             "sse": false
-          }
+          }#{session_capabilities ? %(,"sessionCapabilities":#{session_capabilities}) : ""}
         },
         "authMethods": [],
         "agentInfo": {

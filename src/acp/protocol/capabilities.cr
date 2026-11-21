@@ -16,6 +16,7 @@ require "./session_options"
 require "./prompt_suggestions"
 require "./providers"
 require "./mcp"
+require "./optional_capability"
 
 module ACP
   module Protocol
@@ -346,18 +347,20 @@ module ACP
       include JSON::Serializable
 
       # Whether the agent accepts image content blocks.
+      @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? image : Bool = false
 
       # Whether the agent accepts audio content blocks.
+      @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? audio : Bool = false
 
       # Whether the agent accepts embedded resource content blocks
       # (ContentBlock::Resource) in session/prompt requests.
-      @[JSON::Field(key: "embeddedContext")]
+      @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::CapabilityFlag)]
       property? embedded_context : Bool = false
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -375,18 +378,20 @@ module ACP
       include JSON::Serializable
 
       # Whether the agent supports connecting to MCP servers over HTTP.
+      @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? http : Bool = false
 
       # Whether the agent supports connecting to MCP servers over SSE.
       # Note: SSE transport has been deprecated by the MCP spec.
+      @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? sse : Bool = false
 
       # Whether the Agent consumes MCP servers over ACP.
-      @[JSON::Field(converter: ::ACP::Protocol::McpAcpFlag)]
+      @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? acp : Bool = false
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -406,7 +411,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -424,7 +429,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -442,7 +447,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -459,7 +464,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)
@@ -474,7 +479,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)
@@ -486,7 +491,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)
@@ -496,12 +501,14 @@ module ACP
     # System prompt modes the agent supports beyond the baseline `append`.
     struct SessionSystemPromptModeCapabilities
       include JSON::Serializable
+      include LosslessUnmapped
 
       # When present, the agent accepts `mode: "override"`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptOverrideCapabilities))]
       property override : SessionSystemPromptOverrideCapabilities?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -511,6 +518,9 @@ module ACP
       end
     end
 
+    # Interprets an extension-defined advertisement for a system prompt mode.
+    alias SystemPromptModeResolver = (String, SessionSystemPromptCapabilities -> Bool)
+
     # Presence of this object (even empty) indicates the agent accepts a
     # `systemPrompt` (mode `append`) on `session/new`, `session/load` and
     # `session/resume`.
@@ -519,10 +529,11 @@ module ACP
       include JSON::Serializable
 
       # Additional modes the agent supports.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptModeCapabilities))]
       property mode : SessionSystemPromptModeCapabilities?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -535,6 +546,20 @@ module ACP
       def override? : Bool
         !@mode.try(&.override).nil?
       end
+
+      # Whether the Agent accepts this baseline or advertised prompt mode.
+      # A resolver can recognize custom modes advertised through extension metadata.
+      def supports_mode?(name : String, resolve : SystemPromptModeResolver? = nil) : Bool
+        case name
+        when "append"   then true
+        when "override" then override?
+        else
+          declared = @mode.try do |modes|
+            modes.json_unmapped[name]?.try(&.as_h?) || modes.raw_field(name).try(&.starts_with?('{'))
+          end
+          !!(declared || resolve.try(&.call(name, self)))
+        end
+      end
     end
 
     # Session capabilities supported by the agent.
@@ -546,23 +571,27 @@ module ACP
 
       # When present (non-null), indicates the agent supports `session/list`.
       # The value is a `SessionListCapabilities` object.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionListCapabilities))]
       property list : SessionListCapabilities?
 
       # When present (non-null), indicates the agent supports `session/resume`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionResumeCapabilities))]
       property resume : SessionResumeCapabilities?
 
       # When present (non-null), indicates the agent supports `session/close`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionCloseCapabilities))]
       property close : SessionCloseCapabilities?
 
       # When present (non-null), indicates the agent supports `session/delete`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionDeleteCapabilities))]
       property delete : SessionDeleteCapabilities?
 
       # When present (non-null), the agent accepts `additionalDirectories`.
-      @[JSON::Field(key: "additionalDirectories")]
+      @[JSON::Field(key: "additionalDirectories", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionAdditionalDirectoriesCapabilities))]
       property additional_directories : SessionAdditionalDirectoriesCapabilities?
 
       # When present (non-null), the agent accepts a `systemPrompt`.
-      @[JSON::Field(key: "systemPrompt")]
+      @[JSON::Field(key: "systemPrompt", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptCapabilities))]
       property system_prompt : SessionSystemPromptCapabilities?
 
       # When present, the Agent supports the draft session/status query.
@@ -586,7 +615,7 @@ module ACP
       property fork : SessionForkCapabilities?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -643,7 +672,7 @@ module ACP
       include JSON::Serializable
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@meta : Hash(String, JSON::Any)? = nil)
@@ -655,6 +684,7 @@ module ACP
       include JSON::Serializable
 
       # When present (non-null), the agent supports `logout`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::LogoutCapabilities))]
       property logout : LogoutCapabilities?
 
       # When present, the Agent supports the draft auth/status method.
@@ -662,7 +692,7 @@ module ACP
       property status : AuthStatusCapabilities?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -685,22 +715,23 @@ module ACP
       include JSON::Serializable
 
       # Whether the agent supports loading previous sessions via `session/load`.
-      @[JSON::Field(key: "loadSession")]
+      @[JSON::Field(key: "loadSession", converter: ::ACP::Protocol::CapabilityFlag)]
       property? load_session : Bool = false
 
       # Describes which prompt content types the agent can accept.
-      @[JSON::Field(key: "promptCapabilities")]
+      @[JSON::Field(key: "promptCapabilities", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptCapabilities))]
       property prompt_capabilities : PromptCapabilities?
 
       # MCP transport capabilities.
-      @[JSON::Field(key: "mcpCapabilities")]
+      @[JSON::Field(key: "mcpCapabilities", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::McpCapabilities))]
       property mcp_capabilities : McpCapabilities?
 
       # Session capabilities beyond the baseline.
-      @[JSON::Field(key: "sessionCapabilities")]
+      @[JSON::Field(key: "sessionCapabilities", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionCapabilities))]
       property session_capabilities : SessionCapabilities?
 
       # Authentication capabilities (e.g. `logout`).
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::AgentAuthCapabilities))]
       property auth : AgentAuthCapabilities?
 
       # Presence advertises draft provider configuration methods.
@@ -708,7 +739,7 @@ module ACP
       property providers : ProvidersCapabilities?
 
       # Extension metadata for custom capabilities.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -736,13 +767,14 @@ module ACP
 
       # Intended for UI and end-user contexts — optimized to be human-readable.
       # If not provided, the name should be used for display.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property title : String?
 
       # Version of the implementation.
       property version : String
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
@@ -760,13 +792,14 @@ module ACP
 
       # Intended for UI and end-user contexts — optimized to be human-readable.
       # If not provided, the name should be used for display.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property title : String?
 
       # Version of the implementation.
       property version : String
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)

@@ -5,7 +5,7 @@ module ACP
   module Protocol
     # Checks absolute paths in the Agent's POSIX or Windows filesystem syntax.
     def self.absolute_path?(path : String) : Bool
-      Path.posix(path).absolute? || Path.windows(path).absolute?
+      !path.includes?('\0') && (Path.posix(path).absolute? || Path.windows(path).absolute?)
     end
 
     # :nodoc:

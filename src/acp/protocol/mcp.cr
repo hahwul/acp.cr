@@ -1,3 +1,4 @@
+require "./optional_capability"
 require "./raw_json"
 require "./optional_metadata"
 
@@ -10,18 +11,7 @@ module ACP
     alias McpRequestId = String
 
     # :nodoc:
-    module McpAcpFlag
-      def self.from_json(pull : JSON::PullParser) : Bool
-        return pull.read_bool if pull.kind.bool?
-
-        pull.skip
-        false
-      end
-
-      def self.to_json(value : Bool, json : JSON::Builder) : Nil
-        json.bool(value)
-      end
-    end
+    alias McpAcpFlag = CapabilityFlag
 
     # ACP declaration of a server hosted on the existing connection.
     struct McpServerAcp

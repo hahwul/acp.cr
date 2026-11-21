@@ -223,6 +223,26 @@ client.session_load(
 
 Resumes a previous session by ID.
 
+### ACP v1 request validation
+
+The client checks the Agent's advertised capabilities before calling
+`session/load`, `session/resume`, `session/list`, `session/close`, or
+`session/delete`. Images, audio, and embedded resources in prompts also require
+the matching capability. Text and resource links are available by default.
+
+Use absolute paths in the Agent's filesystem for session directories and MCP
+stdio executables. Additional roots, system prompts, and HTTP or SSE MCP
+servers require the Agent to advertise support. A system prompt accepts
+non-empty text content and uses `append` or a mode advertised by the Agent.
+For extensions that advertise custom modes through metadata, set
+`client.on_system_prompt_mode` to interpret the extension's declaration.
+The resolver receives the mode name and the Agent's system-prompt capability.
+
+The client raises `InvalidStateError` for missing capabilities and
+`ArgumentError` for invalid paths or content.
+[ACP v1 Session Setup](https://agentclientprotocol.com/protocol/v1/session-setup)
+[ACP v1 Prompt Turn](https://agentclientprotocol.com/protocol/v1/prompt-turn)
+
 ### `#session_status` (draft)
 
 Call `client.session_status(session_id)` to query a session without attaching
