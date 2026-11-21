@@ -1,9 +1,50 @@
 require "../updates"
+require "../raw_json"
 require "./metadata_patch"
 
 module ACP
   module Protocol
     module V2
+      # :nodoc:
+      module MessageContentPatch
+        @[JSON::Field(key: "content", presence: true, emit_null: true, ignore_serialize: !@content_wire_present, converter: ::ACP::Protocol::ContentBlockArray)]
+        @content_wire : PreservedJson?
+
+        @[JSON::Field(ignore: true)]
+        @content_wire_present : Bool = false
+
+        # Replacement content with representable fields in each block.
+        def content : Array(JSON::Any)?
+          @content_wire.try(&.value).try(&.as_a?)
+        end
+
+        # Replaces content. Assign nil to clear the message explicitly.
+        def content=(value : Array(JSON::Any)?) : Array(JSON::Any)?
+          @content_wire_present = true
+          @content_wire = value.try { |blocks| PreservedJson.new(JSON::Any.new(blocks)) }
+          value
+        end
+
+        # Whether the patch supplies content or explicitly clears it.
+        def content_present? : Bool
+          @content_wire_present
+        end
+
+        # Exact replacement content, including unknown blocks and numeric values.
+        def content_raw : RawJson?
+          @content_wire.try(&.raw)
+        end
+
+        # Standard content blocks in the replacement, in their original order.
+        def content_blocks : Array(Protocol::ContentBlock)?
+          content_raw.try(&.elements?).try &.compact_map do |block|
+            Protocol::ContentBlock.from_json(block.json)
+          rescue JSON::Error
+            nil
+          end
+        end
+      end
+
       # Patches a transcript's view of a message between sessions.
       struct SessionMessageUpdate
         include JSON::Serializable
@@ -22,10 +63,9 @@ module ACP
           recipient_session_id: {String, "recipientSessionId"},
           sender_message_id:    {String, "senderMessageId"},
           recipient_message_id: {String, "recipientMessageId"},
-          content:              {Array(JSON::Any), "content"},
-          meta:                 {Hash(String, JSON::Any), "_meta"},
         })
-        include MetadataPatch
+        include MessageContentPatch
+        include LosslessMetadataPatch
 
         # Creates an update for the specified transcript message.
         def initialize(@message_id : String)

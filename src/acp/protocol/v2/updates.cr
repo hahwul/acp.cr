@@ -174,12 +174,8 @@ module ACP
         @[JSON::Field(key: "messageId")]
         getter message_id : String
 
-        # Replacement content and key-level metadata patches.
-        PatchFields.define({
-          content: {Array(JSON::Any), "content"},
-          meta:    {Hash(String, JSON::Any), "_meta"},
-        })
-        include MetadataPatch
+        include MessageContentPatch
+        include LosslessMetadataPatch
 
         # Creates a message upsert. Assign nil explicitly to clear a field.
         def initialize(@session_update : String, @message_id : String)
@@ -189,13 +185,30 @@ module ACP
         def skill_references : Array(SkillReference)
           return [] of SkillReference unless @session_update == "user_message"
 
-          content.try(&.compact_map { |block| SkillReference.from_content_block(block) }) || [] of SkillReference
+          content_raw.try(&.elements?).try(&.compact_map { |block| SkillReference.from_content_block(block) }) || [] of SkillReference
+        end
+      end
+
+      # :nodoc:
+      module MessageChunkContent
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          location = pull.location
+          content = PreservedJson.new(pull, project_object_members: true)
+          unless content.value
+            raise JSON::ParseException.new("Message chunk content must be representable or a JSON object", *location)
+          end
+          content
+        end
+
+        def self.to_json(content : PreservedJson, builder : JSON::Builder) : Nil
+          content.to_json(builder)
         end
       end
 
       # Appends a content block to a transcript message.
       struct MessageChunkUpdate
         include JSON::Serializable
+        include LosslessMetadata
 
         # Discriminator for this message's role.
         @[JSON::Field(key: "sessionUpdate")]
@@ -205,28 +218,42 @@ module ACP
         @[JSON::Field(key: "messageId")]
         getter message_id : String
 
-        # One content block, including future variants.
-        property content : JSON::Any
-
-        # Extension metadata scoped to the chunk.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "content", converter: ::ACP::Protocol::V2::MessageChunkContent)]
+        @content_wire : PreservedJson
 
         # Creates a message chunk.
-        def initialize(@session_update : String, @message_id : String, @content : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@session_update : String, @message_id : String, content : JSON::Any, meta : Hash(String, JSON::Any)? = nil)
+          @content_wire = PreservedJson.new(content)
+          self.meta = meta
+        end
+
+        # Content fields that can be represented in JSON::Any.
+        def content : JSON::Any
+          @content_wire.value.not_nil!
+        end
+
+        # Replaces the content of this chunk.
+        def content=(value : JSON::Any) : JSON::Any
+          @content_wire = PreservedJson.new(value)
+          value
+        end
+
+        # Exact content JSON, including extension values.
+        def content_raw : RawJson
+          @content_wire.raw
         end
 
         # Converts a known content block to a typed chunk with its message ID.
         def to_content_chunk : Protocol::ContentChunk?
-          block = Protocol::ContentBlock.from_json(@content.to_json)
-          Protocol::ContentChunk.new(block, @meta, @message_id)
-        rescue JSON::ParseException
+          block = Protocol::ContentBlock.from_json(content_raw.json)
+          Protocol::ContentChunk.new(block, meta, @message_id)
+        rescue JSON::Error
           nil
         end
 
         # Returns the skill reference in a user message chunk, if present.
         def skill_reference : SkillReference?
-          SkillReference.from_content_block(@content) if @session_update == "user_message_chunk"
+          SkillReference.from_content_block(content_raw) if @session_update == "user_message_chunk"
         end
       end
 
@@ -321,9 +348,9 @@ module ACP
           when "state_update"
             StateUpdate.from_json(WireFrame.encode(self))
           when "user_message", "agent_message", "agent_thought"
-            MessageUpdate.from_json(to_json)
+            MessageUpdate.from_json(WireFrame.encode(self))
           when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
-            MessageChunkUpdate.from_json(to_json)
+            MessageChunkUpdate.from_json(WireFrame.encode(self))
           when "replay_complete"
             ReplayCompleteUpdate.from_json(to_json)
           when "cursor_update"
@@ -339,7 +366,7 @@ module ACP
           when "subagent_update"
             SubagentUpdate.from_json(WireFrame.encode(self))
           when "session_message"
-            SessionMessageUpdate.from_json(to_json)
+            SessionMessageUpdate.from_json(WireFrame.encode(self))
           when "session_info_update"
             SessionInfoUpdate.from_json(to_json)
           when "usage_update"
@@ -370,6 +397,7 @@ module ACP
       struct SessionUpdateParams
         include JSON::Serializable
         include LosslessUnmapped
+        include LosslessMetadata
 
         # Session whose state or transcript changed.
         @[JSON::Field(key: "sessionId")]
@@ -378,28 +406,9 @@ module ACP
         # Open update payload.
         property update : SessionUpdate
 
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalPreservedMetadata)]
-        @metadata_wire : PreservedJson?
-
         # Creates a notification payload.
         def initialize(@session_id : String, @update : SessionUpdate, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
-        end
-
-        # Metadata fields that can be represented as JSON::Any.
-        def meta : Hash(String, JSON::Any)?
-          @metadata_wire.try(&.value).try(&.as_h?)
-        end
-
-        # Replaces the notification metadata.
-        def meta=(value : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
-          @metadata_wire = value.try { |fields| PreservedJson.new(JSON::Any.new(fields)) }
-          value
-        end
-
-        # Notification metadata with its exact JSON values.
-        def meta_raw : RawJson?
-          @metadata_wire.try(&.raw)
         end
 
         # The delivered notification params, including extension fields and exact JSON numbers.

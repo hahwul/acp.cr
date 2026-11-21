@@ -129,35 +129,102 @@ module ACP
     # :nodoc:
     # Keeps exact JSON behind an existing mutable JSON::Any accessor.
     struct PreservedJson
+      private record BlockSource, view : Hash(String, JSON::Any), raw : RawJson, projected : String, partial : Bool
+
       getter value : JSON::Any?
       getter? partial = false
       @source : RawJson?
       @projected : String?
+      @block_sources : Hash(UInt64, BlockSource)?
+      @block_order : Array(UInt64?)?
 
       def initialize(@value : JSON::Any)
       end
 
-      def initialize(pull : JSON::PullParser, *, project_object_members : Bool = false)
+      def initialize(pull : JSON::PullParser, *, project_object_members : Bool = false, project_array_objects : Bool = false)
         source = RawJson.new(pull)
         @source = source
-        @value = source.to_json_any?
-        if @value.nil? && project_object_members && (members = source.members?)
-          projection = {} of String => JSON::Any
-          members.each do |key, member|
-            if value = member.to_json_any?
-              projection[key] = value
-            end
+        if project_array_objects && (elements = source.elements?)
+          @value = project_blocks(elements)
+        else
+          @value = source.to_json_any?
+          if @value.nil? && project_object_members && (object = project_members(source))
+            @value = object
+            @partial = true
           end
-          @value = JSON::Any.new(projection)
-          @partial = true
         end
         @projected = @value.try { |value| WireFrame.encode(value) }
+      end
+
+      private def project_members(source : RawJson) : JSON::Any?
+        return unless members = source.members?
+
+        projection = {} of String => JSON::Any
+        members.each do |key, value|
+          if projected = value.to_json_any?
+            projection[key] = projected
+          end
+        end
+        JSON::Any.new(projection)
+      end
+
+      private def project_blocks(elements : Array(RawJson)) : JSON::Any
+        sources = {} of UInt64 => BlockSource
+        blocks = elements.compact_map do |element|
+          projection = element.to_json_any?
+          partial = projection.nil?
+          projection ||= project_members(element)
+          if projection && (object = projection.as_h?)
+            encoded = WireFrame.encode(projection)
+            if element.json != encoded
+              sources[object.object_id] = BlockSource.new(object, element, encoded, partial)
+            end
+          end
+          projection
+        end
+        unless sources.empty?
+          @block_sources = sources
+          @block_order = blocks.map { |block| retained_block(block).try(&.view.object_id) }
+        end
+        JSON::Any.new(blocks)
+      end
+
+      private def retained_block(block : JSON::Any) : BlockSource?
+        if (view = block.as_h?) && (source = @block_sources.try(&.[view.object_id]?))
+          source if source.view.same?(view)
+        end
+      end
+
+      private def encode_blocks(blocks : Array(JSON::Any)) : String
+        JSON.build do |builder|
+          builder.max_nesting = 512
+          builder.array do
+            blocks.each do |block|
+              if source = retained_block(block)
+                if WireFrame.encode(block) == source.projected
+                  builder.raw(source.raw.json)
+                else
+                  builder.raw(WireFrame.merge_projection(source.raw.json, block, partial_object: source.partial))
+                end
+              else
+                block.to_json(builder)
+              end
+            end
+          end
+        end
       end
 
       def raw : RawJson
         if value = @value
           rendered = RawJson.new(value)
           if source = @source
+            if (order = @block_order) && (blocks = value.as_a?)
+              if rendered.json == @projected && blocks.map { |block| retained_block(block).try(&.view.object_id) } == order
+                return source
+              end
+
+              return RawJson.new(JSON::PullParser.new(encode_blocks(blocks)))
+            end
             return source if rendered.json == @projected
 
             merged = WireFrame.merge_projection(source.json, value, partial_object: partial?)
@@ -197,6 +264,28 @@ module ACP
 
       def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
         PreservedMetadata.to_json(value, json)
+      end
+    end
+
+    # :nodoc:
+    module LosslessMetadata
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalPreservedMetadata)]
+      @metadata_wire : PreservedJson?
+
+      # Metadata fields that can be represented as JSON::Any.
+      def meta : Hash(String, JSON::Any)?
+        @metadata_wire.try(&.value).try(&.as_h?)
+      end
+
+      # Replaces the extension metadata.
+      def meta=(value : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
+        @metadata_wire = value.try { |fields| PreservedJson.new(JSON::Any.new(fields)) }
+        value
+      end
+
+      # Extension metadata with its exact JSON values.
+      def meta_raw : RawJson?
+        @metadata_wire.try(&.raw)
       end
     end
 

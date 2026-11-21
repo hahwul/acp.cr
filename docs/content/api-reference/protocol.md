@@ -114,6 +114,26 @@ Content blocks are used to construct prompts. They form a discriminated union (`
 | `ResourceLinkContentBlock` | Resource link with metadata |
 | `FileContentBlock` | Backward-compatible alias for `ResourceLinkContentBlock` |
 
+ACP v2 resource links expose `icons` as `Array(Protocol::Icon)?`. Each
+icon carries `src`, optional MIME type and sizes, and an open `theme`
+string. Use `meta_raw` for exact extension metadata. When displaying icons,
+apply the ACP icon-fetching rules to the supplied source URI.
+[ACP v2 resource links](https://agentclientprotocol.com/protocol/v2/content#resource-link) ·
+[ACP URI guidance](https://agentclientprotocol.com/protocol/v2/security#uris-and-remote-resources)
+
+Use `size_bytes` for non-negative sizes through `UInt64::MAX`. The
+existing `size` accessor retains the signed view used by ACP v1. Pass
+`icons:` to a typed link or either `PromptBuilder#resource_link` overload.
+The v2 client sends exact prompt content with `StdioTransport`. Custom
+transports can override `send_wire` to support exact prompt frames.
+
+V2 full messages and session-directed messages expose `content_blocks` for
+standard typed content and `content_raw` for the complete replacement.
+Message chunks expose `content_raw` as well as `to_content_chunk`. The
+mutable `JSON::Any` views expose representable fields. Updating or
+reordering existing blocks preserves their other exact fields. A replacement
+block uses the supplied `JSON::Any` value.
+
 ## Tool Call Content
 
 Types for tool call content within updates:

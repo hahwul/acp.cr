@@ -410,14 +410,14 @@ module ACP
     # `resource_link("/a/b.cr", "text/plain")` resolves to the
     # `(uri, name, mime_type)` overload below, which would take
     # `"text/plain"` as the resource *name*.
-    def resource_link(path : String, *, mime_type : String? = nil) : self
-      @blocks << Protocol::ResourceLinkContentBlock.from_path(path, mime_type)
+    def resource_link(path : String, *, mime_type : String? = nil, icons : Array(Protocol::Icon)? = nil) : self
+      @blocks << Protocol::ResourceLinkContentBlock.from_path(path, mime_type, icons: icons)
       self
     end
 
     # Adds a resource link content block with explicit URI and name.
-    def resource_link(uri : String, name : String, mime_type : String? = nil) : self
-      @blocks << Protocol::ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type)
+    def resource_link(uri : String, name : String, mime_type : String? = nil, *, icons : Array(Protocol::Icon)? = nil) : self
+      @blocks << Protocol::ResourceLinkContentBlock.new(uri: uri, name: name, mime_type: mime_type, icons: icons)
       self
     end
 

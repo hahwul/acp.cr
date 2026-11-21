@@ -3816,3 +3816,190 @@ describe "ACP v2 negotiated prompt content" do
     end
   end
 end
+
+describe "ACP v2 resource link icons" do
+  it "preserves icons when a typed link is parsed and serialized" do
+    input = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","icons":[{"src":"https://example.test/icons/note.png","mimeType":"image/png","sizes":["48x48","any"],"theme":"_night","_meta":{"example.test/revision":0.1234567890123456789}}]})
+    link = ACP::Protocol::ContentBlock.from_json(input).as(ACP::Protocol::ResourceLinkContentBlock)
+
+    icon = link.icons.not_nil!.first
+    icon.src.should eq("https://example.test/icons/note.png")
+    icon.mime_type.should eq("image/png")
+    icon.sizes.should eq(["48x48", "any"])
+    icon.theme.should eq("_night")
+    icon.meta_raw.not_nil!.field("example.test/revision").not_nil!.json.should eq("0.1234567890123456789")
+    link.to_json.should contain(%("theme":"_night"))
+    link.to_json.should contain(%("example.test/revision":0.1234567890123456789))
+  end
+
+  it "keeps wide icon metadata and link sizes through stdio message and tool callbacks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(5)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      link = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","size":18446744073709551615,"icons":[{"src":"https://example.test/notes.png","_meta":{"example.test/revision":18446744073709551615}}]})
+      skill = %({"type":"skill","name":"notes","_meta":{"example.test/revision":18446744073709551615}})
+      outer = %({"example.test/sequence":18446744073709551615,"example.test/label":"event"})
+      updates = [
+        %({"sessionUpdate":"agent_message_chunk","messageId":"m","content":#{link},"_meta":#{outer}}),
+        %({"sessionUpdate":"user_message","messageId":"m2","content":[#{link},#{skill}],"_meta":#{outer}}),
+        %({"sessionUpdate":"session_message","messageId":"m3","content":[#{link}],"_meta":#{outer}}),
+        %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"content","content":#{link}}}),
+      ]
+      updates.each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+      chunk.content["name"].should eq("notes")
+      chunk.content_raw.json.should eq(link)
+      chunk.meta_raw.not_nil!.json.should eq(outer)
+      full = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::MessageUpdate)
+      full.content_present?.should be_true
+      full.content.not_nil!.map { |item| item["type"].as_s }.should eq(["resource_link", "skill"])
+      full.meta_raw.not_nil!.json.should eq(outer)
+      full.skill_references.map(&.name).should eq(["notes"])
+      session_message = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+      session_message.content.not_nil!.first["name"].should eq("notes")
+      session_message.meta_raw.not_nil!.json.should eq(outer)
+      tool_chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallContentChunk)
+
+      received = [
+        chunk.to_content_chunk.not_nil!.content,
+        full.content_blocks.not_nil!.first,
+        session_message.content_blocks.not_nil!.first,
+        tool_chunk.content.content_block.not_nil!,
+      ]
+      received.each do |value|
+        resource = value.as(ACP::Protocol::ResourceLinkContentBlock)
+        resource.size.should be_nil
+        resource.size_bytes.should eq(UInt64::MAX)
+        resource.icons.not_nil!.first.meta_raw.not_nil!.field("example.test/revision").not_nil!.json.should eq(UInt64::MAX.to_s)
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps usable icon entries when neighboring display fields are malformed" do
+    input = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","size":"bad","annotations":{"audience":["user",false,"_reviewer"],"lastModified":42},"icons":[false,{"theme":"light"},{"src":"data:image/png;base64,YQ==","mimeType":{},"sizes":["any",false,"48x48"],"theme":7},{"src":"https://example.test/dark.png","theme":"dark","future":0.9876543210987654321}]})
+    link = ACP::Protocol::ContentBlock.from_json(input).as(ACP::Protocol::ResourceLinkContentBlock)
+
+    link.size_bytes.should be_nil
+    link.annotations.not_nil!.audience.should eq(["user", "_reviewer"])
+    link.annotations.not_nil!.last_modified.should be_nil
+    inline_icon, dark_icon = link.icons.not_nil!
+    inline_icon.mime_type.should be_nil
+    inline_icon.sizes.should eq(["any", "48x48"])
+    inline_icon.theme.should be_nil
+    dark_icon.theme.should eq("dark")
+    dark_icon.to_json.should contain(%("future":0.9876543210987654321))
+  end
+
+  it "keeps the legacy signed size and sends builder-created icons in a v2 prompt" do
+    legacy = ACP::Protocol::ResourceLinkContentBlock.new("file:///work/old", "old", size: -1_i64)
+    legacy.size.should eq(-1_i64)
+    legacy.size_bytes.should be_nil
+    JSON.parse(legacy.to_json)["size"].as_i64.should eq(-1_i64)
+    legacy.size_bytes = UInt64::MAX
+    legacy.to_json.should contain(%("size":18446744073709551615))
+
+    with_v2_request_client do |client, transport|
+      icon = ACP::Protocol::Icon.new("https://example.test/notes.png", sizes: ["any"], theme: "light")
+      blocks = ACP::PromptBuilder.new.resource_link("/work/notes", icons: [icon]).build
+      negative = ACP::Protocol::ResourceLinkContentBlock.new("file:///work/notes", "notes", size: -1_i64)
+      expect_raises(ArgumentError, /non-negative/) do
+        client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [negative.as(ACP::Protocol::ContentBlock)]))
+      end
+      ["1.5", %("123"), "true", "18446744073709551616"].each do |size|
+        params = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"session","prompt":[{"type":"resource_link","uri":"file:///work/notes","name":"notes","size":#{size}}]}))
+        expect_raises(ArgumentError, /non-negative UInt64/) { client.session_prompt(params) }
+      end
+      ambiguous = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"session","prompt":[{"type":"image","type":"text","text":"hello"}]}))
+      expect_raises(ArgumentError, /unique JSON member names/) { client.session_prompt(ambiguous) }
+      transport.sent_messages.size.should eq(1)
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"messageId":"m"}}))
+      end
+      client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", blocks)).message_id.should eq("m")
+      transport.sent_messages.last["params"]["prompt"][0]["icons"].as_a.should eq([JSON.parse(icon.to_json)])
+
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"messageId":"zero"}}))
+      end
+      zero = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"session","prompt":[{"type":"resource_link","uri":"file:///work/notes","name":"notes","size":-0}]}))
+      client.session_prompt(zero).message_id.should eq("zero")
+      transport.sent_messages.last["params"]["prompt"][0]["size"].as_i64.should eq(0)
+    end
+  end
+
+  it "sends a typed link's wide size and icon metadata on the stdio wire" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+
+      icon = ACP::Protocol::Icon.from_json(%({"src":"https://example.test/note.png","_meta":{"example.test/sequence":18446744073709551615,"example.test/revision":0.1234567890123456789}}))
+      link = ACP::Protocol::ResourceLinkContentBlock.new("file:///work/notes", "notes", icons: [icon], size_bytes: UInt64::MAX)
+      params = ACP::Protocol::V2::SessionPromptParams.new("s", [link.as(ACP::Protocol::ContentBlock)])
+      params.prompt.first["name"].should eq("notes")
+      requests = Channel(ACP::Protocol::RawJson).new(1)
+      spawn do
+        request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        requests.send(request)
+        id = request.field("id").not_nil!.json
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"messageId":"inserted"}})
+      end
+
+      client.session_prompt(params).message_id.should eq("inserted")
+      select
+      when request = requests.receive
+        request.field("method").not_nil!.as_s?.should eq("session/prompt")
+        sent = request.field("params").not_nil!.field("prompt").not_nil!
+        sent.json.should eq(params.prompt_raw.json)
+        payload = sent.elements?.not_nil!.first
+        payload.field("size").not_nil!.json.should eq(UInt64::MAX.to_s)
+        payload.field("icons").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.json.should eq(icon.meta_raw.not_nil!.json)
+      when timeout(2.seconds)
+        fail "the exact prompt did not arrive"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps exact fields with the same projected objects after edits and reordering" do
+    first = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","size":18446744073709551615})
+    second = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","size":18446744073709551614})
+    params = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"s","prompt":[#{first},#{second}]}))
+    params.prompt.first.should eq(params.prompt.last)
+
+    params.prompt.reverse!
+    params.prompt_raw.json.should eq("[#{second},#{first}]")
+    params.prompt.last.as_h["name"] = JSON::Any.new("edited")
+    blocks = params.prompt_raw.elements?.not_nil!
+    blocks.first.field("size").not_nil!.json.should eq("18446744073709551614")
+    blocks.last.field("size").not_nil!.json.should eq("18446744073709551615")
+    blocks.last.field("name").not_nil!.as_s?.should eq("edited")
+
+    params.prompt.shift
+    params.prompt_raw.elements?.not_nil!.first.field("size").not_nil!.json.should eq("18446744073709551615")
+  end
+
+  it "keeps valid deep icon content and later message blocks" do
+    details = "[" * 120 + "0" + "]" * 120
+    block = %({"type":"resource_link","uri":"file:///work/notes","name":"notes","icons":[{"src":"https://example.test/notes.png","future":#{details}}]})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"agent_message","messageId":"m","content":[#{block},{"type":"text","text":"next"}]}))
+    blocks = update.typed.as(ACP::Protocol::V2::MessageUpdate).content_blocks.not_nil!
+    blocks.size.should eq(2)
+    icon = blocks.first.as(ACP::Protocol::ResourceLinkContentBlock).icons.not_nil!.first
+    ACP::Protocol::WireFrame.encode(icon).should contain(details)
+    blocks.last.as(ACP::Protocol::TextContentBlock).text.should eq("next")
+  end
+end

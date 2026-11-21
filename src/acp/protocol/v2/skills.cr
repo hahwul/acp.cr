@@ -1,3 +1,4 @@
+require "../raw_json"
 require "../content_block"
 require "../optional_capability"
 require "../optional_metadata"
@@ -134,10 +135,23 @@ module ACP
         def self.from_content_block(block : JSON::Any) : self?
           return unless block.as_h?.try(&.["type"]?).try(&.as_s?) == "skill"
 
-          reference = from_json(WireFrame.encode(block))
-          reference if Skill.valid_name?(reference.name)
+          decode_reference(WireFrame.encode(block))
         rescue JSON::Error
           nil
+        end
+
+        # Parses a skill reference from exact JSON.
+        def self.from_content_block(block : RawJson) : self?
+          return unless block.field("type").try(&.as_s?) == "skill"
+
+          decode_reference(block.json)
+        rescue JSON::Error
+          nil
+        end
+
+        private def self.decode_reference(json : String) : self?
+          reference = from_json(json)
+          reference if Skill.valid_name?(reference.name)
         end
       end
 

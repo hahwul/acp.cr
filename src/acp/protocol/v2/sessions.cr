@@ -388,8 +388,8 @@ module ACP
         @[JSON::Field(key: "sessionId")]
         property session_id : String
 
-        # Content blocks, preserving any custom block variants.
-        property prompt : Array(JSON::Any)
+        @[JSON::Field(key: "prompt", converter: ::ACP::Protocol::ContentBlockArray)]
+        @prompt_wire : PreservedJson
 
         # Optional key for retrying this prompt without inserting it twice.
         @[JSON::Field(key: "idempotencyKey")]
@@ -402,22 +402,37 @@ module ACP
         # Builds a prompt with raw or extension content blocks.
         def initialize(
           @session_id : String,
-          @prompt : Array(JSON::Any),
+          prompt : Array(JSON::Any),
           @idempotency_key : String? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
         )
+          @prompt_wire = PreservedJson.new(JSON::Any.new(prompt))
         end
 
-        # Builds a prompt from standard ACP content blocks.
-        def self.new(session_id : String, prompt : Array(Protocol::ContentBlock),
-                     idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)
-          new(session_id, prompt.map { |content| JSON.parse(content.to_json) }, idempotency_key, meta)
+        private def initialize(@session_id : String, @prompt_wire : PreservedJson, @idempotency_key : String?, @meta : Hash(String, JSON::Any)?)
         end
 
         # Builds a prompt from typed v2 content and skill references.
-        def self.new(session_id : String, prompt : Array(PromptContentBlock),
+        def self.new(session_id : String, prompt : Array(Protocol::ContentBlock) | Array(PromptContentBlock),
                      idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)
-          new(session_id, prompt.map { |content| JSON.parse(WireFrame.encode(content)) }, idempotency_key, meta)
+          blocks = ContentBlockArray.from_json(JSON::PullParser.new(WireFrame.encode(prompt)))
+          new(session_id, blocks, idempotency_key, meta)
+        end
+
+        # Prompt blocks with their representable JSON::Any fields.
+        def prompt : Array(JSON::Any)
+          @prompt_wire.value.not_nil!.as_a
+        end
+
+        # Replaces the prompt blocks.
+        def prompt=(value : Array(JSON::Any)) : Array(JSON::Any)
+          @prompt_wire = PreservedJson.new(JSON::Any.new(value))
+          value
+        end
+
+        # Exact JSON for the prompt blocks.
+        def prompt_raw : RawJson
+          @prompt_wire.raw
         end
       end
 
