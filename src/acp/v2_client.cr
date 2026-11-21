@@ -1,3 +1,4 @@
+require "uri"
 require "./client"
 require "./protocol/v2/methods"
 require "./protocol/v2/interactions"
@@ -57,7 +58,7 @@ module ACP
           input.request_id = id
           subject = input.typed_subject
           if command = subject.try(&.command)
-            unless Path.posix(command.cwd).absolute? || Path.windows(command.cwd).absolute?
+            unless Wire.absolute_path?(command.cwd)
               return invalid_permission("The command's working directory must be absolute")
             end
           end
@@ -243,12 +244,18 @@ module ACP
       # Lists available sessions using the provided filter and cursor.
       def session_list(params : Wire::SessionListParams = Wire::SessionListParams.new) : Wire::SessionListResult
         session_capabilities
+        if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
+          raise ArgumentError.new("The ACP v2 session list directory must be absolute")
+        end
         request(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
       end
 
       # Enqueues prompt insertion. The returned message ID acknowledges insertion.
       def session_prompt(params : Wire::SessionPromptParams) : Wire::SessionPromptResult
         caps = session_capabilities
+        if (key = params.idempotency_key) && !key.size.in?(1..255)
+          raise ArgumentError.new("ACP v2 idempotency keys must contain 1 to 255 characters")
+        end
         validate_prompt(caps.prompt, params.prompt)
         raw = @connection.send_request(AgentMethod::SESSION_PROMPT, params, prompt_timeout)
         decode(Wire::SessionPromptResult, raw, AgentMethod::SESSION_PROMPT)
@@ -282,6 +289,12 @@ module ACP
       # Changes a session configuration option.
       def session_set_config_option(params : Wire::SessionSetConfigOptionParams) : Wire::SessionSetConfigOptionResult
         session_capabilities
+        case params.value_type
+        when "id"
+          raise ArgumentError.new("ACP v2 configuration IDs must be strings") if params.value.as_s?.nil?
+        when "boolean"
+          raise ArgumentError.new("ACP v2 boolean option values must be booleans") if params.value.as_bool?.nil?
+        end
         request(AgentMethod::SESSION_SET_CONFIG_OPTION, params, Wire::SessionSetConfigOptionResult)
       end
 
@@ -349,40 +362,71 @@ module ACP
         servers : Array(Wire::McpServer)?,
         system_prompt : Protocol::SystemPrompt?,
       ) : Nil
-        unless Path[cwd].absolute? && (directories.nil? || directories.all? { |directory| Path[directory].absolute? })
+        unless Wire.absolute_path?(cwd) && (directories.nil? || directories.all? { |directory| Wire.absolute_path?(directory) })
           raise ArgumentError.new("ACP v2 session directories must be absolute")
         end
-        if directories && !directories.empty? && !caps.additional_directories
+        if directories && !caps.additional_directories
           raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
         end
-        servers.try &.each do |server|
-          case server.transport_type
-          when "stdio"
-            raise InvalidStateError.new("The Agent did not advertise MCP stdio") unless caps.mcp.try(&.stdio)
-          when "http"
-            raise InvalidStateError.new("The Agent did not advertise MCP HTTP") unless caps.mcp.try(&.http)
-          end
-        end
+        validate_mcp_servers(caps.mcp, servers) if servers
         if system_prompt
           support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
           if system_prompt.mode == "override" && !support.override?
             raise InvalidStateError.new("The Agent did not advertise systemPrompt override")
           end
+          if system_prompt.content.empty? || !system_prompt.content.all?(Protocol::TextContentBlock)
+            raise ArgumentError.new("ACP v2 system prompts require one or more text content blocks")
+          end
         end
       end
 
+      private def validate_mcp_servers(caps : Wire::McpCapabilities?, servers : Array(Wire::McpServer)) : Nil
+        names = Set(String).new
+        servers.each do |server|
+          case server.transport_type
+          when "stdio"
+            raise InvalidStateError.new("The Agent did not advertise MCP stdio") unless caps.try(&.stdio)
+            config = server.stdio_config || raise ArgumentError.new("Malformed ACP v2 MCP stdio configuration")
+            raise ArgumentError.new("ACP v2 MCP commands must be absolute") unless Wire.absolute_path?(config.command)
+          when "http"
+            raise InvalidStateError.new("The Agent did not advertise MCP HTTP") unless caps.try(&.http)
+            config = server.http_config || raise ArgumentError.new("Malformed ACP v2 MCP HTTP configuration")
+            url = URI.parse(config.url)
+            unless url.scheme.try(&.downcase).in?("http", "https") && url.host.try { |host| !host.empty? }
+              raise ArgumentError.new("ACP v2 MCP HTTP servers require an absolute HTTP(S) URL")
+            end
+          when "sse"
+            raise ArgumentError.new("ACP v2 does not define the MCP SSE transport")
+          end
+          if (name = server.json_unmapped["name"]?.try(&.as_s?)) && !names.add?(name)
+            raise ArgumentError.new("ACP v2 MCP server names must be unique")
+          end
+        end
+      rescue URI::Error
+        raise ArgumentError.new("ACP v2 MCP HTTP servers require an absolute HTTP(S) URL")
+      end
+
       private def validate_prompt(caps : Wire::PromptCapabilities?, blocks : Array(JSON::Any)) : Nil
+        raise ArgumentError.new("ACP v2 prompts require at least one content block") if blocks.empty?
+
         blocks.each do |block|
-          kind = block.as_h?.try(&.["type"]?).try(&.as_s?)
+          kind = block.as_h?.try(&.["type"]?).try(&.as_s?) ||
+                 raise ArgumentError.new("ACP v2 prompt content blocks require a type")
           case kind
+          when "text", "resource_link"
           when "image"
             raise InvalidStateError.new("The Agent did not advertise image prompts") unless caps.try(&.image)
           when "audio"
             raise InvalidStateError.new("The Agent did not advertise audio prompts") unless caps.try(&.audio)
           when "resource"
             raise InvalidStateError.new("The Agent did not advertise embedded context") unless caps.try(&.embedded_context)
+          else
+            next
           end
+          Protocol::ContentBlock.from_json(block.to_json)
         end
+      rescue JSON::ParseException
+        raise ArgumentError.new("Malformed ACP v2 prompt content block")
       end
 
       private def terminal_auth_flow(method_id : String, approve : Wire::AuthMethod -> Bool) : Client

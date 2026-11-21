@@ -1,9 +1,15 @@
+require "path"
 require "./initialization"
 require "./configuration"
 
 module ACP
   module Protocol
     module V2
+      # Checks absolute paths in the Agent's POSIX or Windows filesystem syntax.
+      def self.absolute_path?(value : String) : Bool
+        Path.posix(value).absolute? || Path.windows(value).absolute?
+      end
+
       # An inclusive cursor for replaying session history.
       struct ReplayFrom
         include JSON::Serializable

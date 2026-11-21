@@ -12,6 +12,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Validate ACP v2 prompts, idempotency keys, MCP server settings, workspace paths, system prompts, and configuration value types before sending requests.
 - Preserve message IDs when converting streaming updates to typed `ContentChunk` values. Preserve extension metadata on client and agent implementation info and typed MCP server, environment, and header values.
 - Answer both requests when the agent reuses the ID of a request still in flight and the newer one finishes first; the older one was taken for cancelled and never answered
 - Deliver each response to its request once: a response repeated three times in one burst blocked the dispatcher fiber forever, so no later response or notification arrived

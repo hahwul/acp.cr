@@ -1525,3 +1525,113 @@ describe "ACP typed content chunks" do
     end
   end
 end
+
+# ACP v2 restricts the requests a Client may send. In particular, invalid
+# params must be caught before an Agent can insert a prompt or start a session.
+describe "ACP v2 outgoing requests" do
+  it "rejects empty prompts, malformed content, and invalid idempotency keys before sending" do
+    with_v2_request_client do |client, transport|
+      expect_raises(ArgumentError, /at least one content block/) do
+        client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [] of JSON::Any))
+      end
+      [{"type" => "text"}, {"text" => "Missing type"}].each do |fields|
+        block = JSON.parse(fields.to_json)
+        expect_raises(ArgumentError, /content block/) do
+          client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("session", [block]))
+        end
+      end
+      ["", "한" * 256].each do |key|
+        expect_raises(ArgumentError, /1 to 255 characters/) { client.session_prompt_text("session", "Hello", key) }
+      end
+      transport.sent_messages.size.should eq(1)
+
+      valid_key = "한" * 255
+      spawn do
+        frame = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{frame["id"].to_json},"result":{"messageId":"m"}}))
+      end
+      client.session_prompt_text("session", "Hello", valid_key).message_id.should eq("m")
+      transport.sent_messages.last["params"]["idempotencyKey"].should eq(valid_key)
+    end
+  end
+
+  it "validates advertised setup options and absolute paths on both setup methods" do
+    caps = %({"mcp":{"stdio":{},"http":{}},"systemPrompt":{}})
+    with_v2_request_client(caps) do |client, transport|
+      stdio = ACP::Protocol::V2::McpServer.stdio(ACP::Protocol::McpServerStdio.new("tools", "/bin/true"))
+      relative = ACP::Protocol::V2::McpServer.stdio(ACP::Protocol::McpServerStdio.new("tools", "server"))
+      http = ACP::Protocol::V2::McpServer.http(ACP::Protocol::McpServerHttp.new("tools", "https://example.test/mcp"))
+      malformed_http = ACP::Protocol::V2::McpServer.new("http", {"name" => JSON::Any.new("missing-url")})
+      expect_raises(ArgumentError, /commands must be absolute/) do
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [relative]))
+      end
+      expect_raises(ArgumentError, /names must be unique/) do
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("session", "/work", mcp_servers: [stdio, http]))
+      end
+      expect_raises(ArgumentError, /MCP HTTP configuration/) do
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [malformed_http]))
+      end
+      invalid_url = ACP::Protocol::V2::McpServer.http(ACP::Protocol::McpServerHttp.new("tools", "/mcp"))
+      expect_raises(ArgumentError, /absolute HTTP\(S\) URL/) do
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [invalid_url]))
+      end
+      expect_raises(ArgumentError, /MCP SSE/) do
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [ACP::Protocol::V2::McpServer.new("sse")]))
+      end
+      expect_raises(ACP::InvalidStateError, /additionalDirectories/) do
+        client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", additional_directories: [] of String))
+      end
+      expect_raises(ArgumentError, /list directory must be absolute/) do
+        client.session_list(ACP::Protocol::V2::SessionListParams.new(cwd: "relative"))
+      end
+      system_prompt = ACP::Protocol::SystemPrompt.new("append", [] of ACP::Protocol::ContentBlock)
+      expect_raises(ArgumentError, /system prompts require/) do
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("session", "/work", system_prompt: system_prompt))
+      end
+      transport.sent_messages.size.should eq(1)
+
+      windows_server = ACP::Protocol::V2::McpServer.stdio(ACP::Protocol::McpServerStdio.new("win", "C:/tools/mcp.exe"))
+      spawn do
+        frame = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{frame["id"].to_json},"result":{"sessionId":"win"}}))
+      end
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("C:/work", mcp_servers: [windows_server])).session_id.should eq("win")
+      client.session_workspace("win").not_nil!.cwd.should eq("C:/work")
+      transport.sent_messages.last["params"]["mcpServers"][0]["command"].should eq("C:/tools/mcp.exe")
+    end
+  end
+
+  it "checks configuration value types and sends false as a valid boolean" do
+    with_v2_request_client do |client, transport|
+      expect_raises(ArgumentError, /IDs must be strings/) do
+        client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("session", "mode", "id", JSON::Any.new(false)))
+      end
+      expect_raises(ArgumentError, /must be booleans/) do
+        client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("session", "toggle", "boolean", JSON::Any.new("false")))
+      end
+      transport.sent_messages.size.should eq(1)
+
+      spawn do
+        frame = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{frame["id"].to_json},"result":{"configOptions":[]}}))
+      end
+      client.session_set_config_option(ACP::Protocol::V2::SessionSetConfigOptionParams.new("session", "toggle", false))
+      transport.sent_messages.last["params"]["value"].should eq(false)
+    end
+  end
+end
+
+private def with_v2_request_client(session_capabilities : String = "{}", &)
+  transport = SignalingTransport.new
+  client = ACP::V2::Client.new(transport)
+  client.request_timeout = 2.0
+  client.prompt_timeout = 2.0
+  spawn do
+    frame = next_answer(transport)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{frame["id"].to_json},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":#{session_capabilities}}}}))
+  end
+  client.initialize_connection
+  yield client, transport
+ensure
+  client.try(&.close)
+end

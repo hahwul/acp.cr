@@ -46,6 +46,13 @@ available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
 current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 
+For `session_prompt`, supply at least one content block. An optional
+`idempotency_key` must contain 1 to 255 characters. Session setup requires
+absolute Agent paths, unique MCP server names, and an absolute executable
+path for each stdio server. Invalid arguments raise `ArgumentError` before
+the client sends the request.
+[ACP v2 Session Setup](https://agentclientprotocol.com/protocol/v2/session-setup)
+
 In a permission callback, `typed_subject` exposes the optional tool-call patch
 or command details. Future subjects retain their raw fields. A tool-call
 patch from a permission request reaches `on_update` in receive order before
