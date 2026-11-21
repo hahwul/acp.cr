@@ -22,6 +22,19 @@ module ACP
       # Authentication status delivered by a draft update notification.
       alias AuthStatusUpdateParams = Protocol::AuthStatusUpdateParams
 
+      # Draft provider configuration uses the same payloads in v1 and v2.
+      alias ProvidersCapabilities = Protocol::ProvidersCapabilities
+      alias ProviderId = Protocol::ProviderId
+      alias LlmProtocol = Protocol::LlmProtocol
+      alias ProviderCurrentConfig = Protocol::ProviderCurrentConfig
+      alias ProviderInfo = Protocol::ProviderInfo
+      alias ListProvidersParams = Protocol::ListProvidersParams
+      alias ListProvidersResult = Protocol::ListProvidersResult
+      alias SetProviderParams = Protocol::SetProviderParams
+      alias SetProviderResult = Protocol::SetProviderResult
+      alias DisableProviderParams = Protocol::DisableProviderParams
+      alias DisableProviderResult = Protocol::DisableProviderResult
+
       # Presence advertises support for a feature with no named fields.
       struct Capability
         include JSON::Serializable
@@ -246,6 +259,10 @@ module ACP
         # Optional authentication extensions.
         property auth : Capability?
 
+        # Presence advertises draft provider configuration methods.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::ProvidersCapabilities))]
+        property providers : ProvidersCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -255,6 +272,7 @@ module ACP
           @session : SessionCapabilities? = nil,
           @auth : Capability? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @providers : ProvidersCapabilities? = nil,
         )
         end
 

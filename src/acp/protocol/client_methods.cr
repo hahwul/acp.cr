@@ -759,6 +759,12 @@ module ACP
       LOGOUT       = "logout"
       AUTH_STATUS  = "auth/status"
 
+      # Draft process-scoped provider configuration.
+      PROVIDERS_LIST    = "providers/list"
+      PROVIDERS_SET     = "providers/set"
+      PROVIDERS_DISABLE = "providers/disable"
+      PROVIDER_METHODS  = {PROVIDERS_LIST, PROVIDERS_SET, PROVIDERS_DISABLE}
+
       # Session management.
       SESSION_NEW               = "session/new"
       SESSION_LOAD              = "session/load"
@@ -790,7 +796,8 @@ module ACP
 
       # Returns true if the given method name is a known agent method.
       def self.known?(method : String) : Bool
-        method == INITIALIZE || method == AUTHENTICATE || method == LOGOUT || method == AUTH_STATUS || session_method?(method)
+        method == INITIALIZE || method == AUTHENTICATE || method == LOGOUT || method == AUTH_STATUS ||
+          PROVIDER_METHODS.includes?(method) || session_method?(method)
       end
 
       # Returns true if the given method name is a session method.

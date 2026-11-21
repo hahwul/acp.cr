@@ -276,6 +276,35 @@ module ACP
         request(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
       end
 
+      # Lists the Agent's configurable model providers and current routing.
+      def providers_list(params : Wire::ListProvidersParams = Wire::ListProvidersParams.new) : Wire::ListProvidersResult
+        ensure_provider_support
+        @connection.request_typed(AgentMethod::PROVIDERS_LIST, params, Wire::ListProvidersResult)
+      end
+
+      # Replaces the full routing configuration for one provider.
+      def providers_set(params : Wire::SetProviderParams) : Wire::SetProviderResult
+        ensure_provider_support
+        unless valid_provider_url?(params.base_url)
+          raise ArgumentError.new("ACP v2 provider base URLs must be absolute URIs")
+        end
+        @connection.request_typed(AgentMethod::PROVIDERS_SET, params, Wire::SetProviderResult)
+      end
+
+      # Disables a provider after checking that the Agent does not require it.
+      def providers_disable(params : Wire::DisableProviderParams) : Wire::DisableProviderResult
+        ensure_provider_support
+        if providers_list.required?(params.provider_id)
+          raise InvalidStateError.new("The Agent requires this provider")
+        end
+        @connection.request_typed(AgentMethod::PROVIDERS_DISABLE, params, Wire::DisableProviderResult)
+      end
+
+      # Disables the specified non-mandatory provider.
+      def providers_disable(provider_id : Wire::ProviderId) : Wire::DisableProviderResult
+        providers_disable(Wire::DisableProviderParams.new(provider_id))
+      end
+
       # Runs the approved terminal auth flow and returns the reinitialized client.
       def authenticate_terminal(method_id : String, &approve : Wire::AuthMethod -> Bool) : Client
         _, started = @terminal_auth_running.compare_and_set(false, true)
@@ -481,6 +510,24 @@ module ACP
         unless session_capabilities.archive
           raise InvalidStateError.new("The Agent did not advertise session.archive")
         end
+      end
+
+      private def ensure_provider_support : Nil
+        unless ready.capabilities.providers
+          raise InvalidStateError.new("The Agent did not advertise providers")
+        end
+      end
+
+      private def valid_provider_url?(value : String) : Bool
+        return false if value.each_byte.any? { |byte| byte <= 32 || byte == 127 }
+
+        uri = URI.parse(value)
+        return false unless uri.absolute?
+        return !uri.host.to_s.empty? if uri.scheme.try(&.downcase).in?("http", "https")
+
+        true
+      rescue URI::Error
+        false
       end
 
       private def request(method : String, params : JSON::Serializable, type : T.class) : T forall T

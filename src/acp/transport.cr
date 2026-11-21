@@ -18,6 +18,7 @@ require "log"
 require "path"
 require "./errors"
 require "./protocol/types"
+require "./protocol/client_methods"
 
 module ACP
   # Logger for transport-level diagnostics.
@@ -118,6 +119,12 @@ module ACP
     # first frame and hand the agent unparseable JSON.
     @write_mutex : Mutex = Mutex.new
 
+    # Keep late and repeated replies protected. Once the bounded history is
+    # full, nil means every response payload is redacted on this transport.
+    private MAX_PROVIDER_LOG_IDS = 256
+    @provider_request_id_hashes : Set(UInt64)? = Set(UInt64).new
+    @provider_log_mutex : Mutex = Mutex.new
+
     # Maximum size of a single incoming JSON-RPC line, in bytes. Clamped at
     # construction so the read loop's `@max_line_bytes + 1` cannot overflow.
     @max_line_bytes : Int32
@@ -179,6 +186,7 @@ module ACP
         preflight.try(&.call)
 
         begin
+          track_provider_request(message)
           @writer.print(frame)
           @writer.flush
         rescue ex : IO::Error
@@ -289,7 +297,7 @@ module ACP
       return message.to_json unless params = message["params"]?
 
       redacted = JSON::Any.new("[REDACTED]")
-      if method && SENSITIVE_METHODS.includes?(method)
+      if method && (SENSITIVE_METHODS.includes?(method) || Protocol::AgentMethod::PROVIDER_METHODS.includes?(method))
         message.merge({"params" => redacted}).to_json
       elsif (fields = params.as_h?) && fields.has_key?("mcpServers")
         message.merge({"params" => JSON::Any.new(fields.merge({"mcpServers" => redacted}))}).to_json
@@ -300,10 +308,43 @@ module ACP
       "[REDACTED frame]"
     end
 
+    private def track_provider_request(message : Hash(String, JSON::Any)) : Nil
+      return unless (method = message["method"]?.try(&.as_s?)) &&
+                    Protocol::AgentMethod::PROVIDER_METHODS.includes?(method)
+      return unless id = Protocol.extract_id(JSON::Any.new(message))
+
+      @provider_log_mutex.synchronize do
+        if ids = @provider_request_id_hashes
+          ids.add(id.to_s.hash)
+          @provider_request_id_hashes = nil if ids.size > MAX_PROVIDER_LOG_IDS
+        end
+      end
+    end
+
+    # Match the client's ID normalization. Hash collisions only redact extra logs.
+    private def redact_response?(frame : JSON::Any, fields : Hash(String, JSON::Any)) : Bool
+      return false unless fields.has_key?("result") || fields.has_key?("error")
+
+      @provider_log_mutex.synchronize do
+        if ids = @provider_request_id_hashes
+          if id = Protocol.extract_id(frame)
+            ids.includes?(id.to_s.hash)
+          else
+            !ids.empty?
+          end
+        else
+          true
+        end
+      end
+    end
+
     # Redacts incoming authentication payloads and launch descriptors.
-    private def redact_raw_frame(line : String) : String
-      parsed = JSON.parse(line).as_h?
-      return line unless parsed
+    private def redact_raw_frame(line : String, frame : IncomingFrame) : String
+      return "[REDACTED frame]" if frame.is_a?(Protocol::WireFrame)
+      return "[REDACTED frame]" unless fields = frame.as_h?
+      return "[REDACTED response]" if redact_response?(frame, fields)
+
+      parsed = fields.dup
       method = parsed["method"]?.try(&.as_s?)
       if method && SENSITIVE_METHODS.includes?(method)
         parsed["params"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("params")
@@ -311,12 +352,15 @@ module ACP
         return parsed.to_json
       end
 
-      if result = parsed["result"]?.try(&.as_h?)
+      if result = parsed["result"]?.try(&.as_h?).try(&.dup)
         has_methods = result.has_key?("authMethods")
         has_accounts = result.has_key?("accounts")
         result["authMethods"] = JSON::Any.new("[REDACTED]") if has_methods
         result["accounts"] = JSON::Any.new("[REDACTED]") if has_accounts
-        return parsed.to_json if has_methods || has_accounts
+        if has_methods || has_accounts
+          parsed["result"] = JSON::Any.new(result)
+          return parsed.to_json
+        end
       end
 
       line
@@ -407,17 +451,16 @@ module ACP
         line = raw.chomp.strip
         next if line.empty?
 
-        Log.debug { "<<< #{redact_raw_frame(line)}" }
-
         begin
           parsed = begin
             JSON.parse(line)
           rescue JSON::ParseException
             Protocol::WireFrame.new(line)
           end
+          Log.debug { "<<< #{redact_raw_frame(line, parsed)}" }
           @incoming.send(parsed)
-        rescue ex : JSON::Error
-          Log.warn { "Failed to parse incoming JSON: #{ex.message}" }
+        rescue JSON::Error
+          Log.warn { "Failed to parse incoming JSON" }
           # Don't log the raw line at any level — it may be a partially
           # received frame that contains sensitive data.
           send_parse_error
@@ -428,6 +471,7 @@ module ACP
         end
       end
     ensure
+      @provider_log_mutex.synchronize { @provider_request_id_hashes.try(&.clear) }
       # Signal that the reader has stopped, even after a decoding error.
       unless @close_sent
         @close_sent = true
