@@ -96,6 +96,10 @@ session.cancel : Nil
 
 Cancels an in-progress generation.
 
+`session.subagents` returns the immediate children announced for that session
+when the client advertises subagent support. Use the client's
+`session_cancel(child.session_id)` when `child.cancel?` is true.
+
 ### `#mode=`
 
 ```crystal

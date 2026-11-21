@@ -186,6 +186,48 @@ module ACP
       end
     end
 
+    # Presence advertises support for exposed child sessions.
+    struct SubagentCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the subagent capability.
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Presence authorizes cancellation for an announced child session.
+    struct SessionCancelCapabilities
+      include JSON::Serializable
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the cancellation capability, optionally with metadata.
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Methods the client can send to an announced child session.
+    struct SubagentSessionCapabilities
+      include JSON::Serializable
+
+      # A value authorizes `session/cancel` for the child.
+      property cancel : SessionCancelCapabilities?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta")]
+      property meta : Hash(String, JSON::Any)?
+
+      # Creates the child's method allowlist.
+      def initialize(@cancel : SessionCancelCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
     # The full set of capabilities the client advertises to the agent
     # during the `initialize` handshake.
     #
@@ -215,6 +257,9 @@ module ACP
       # Support for identified checklist and Markdown plans.
       property plan : PlanCapabilities?
 
+      # Support for Agent-owned child sessions.
+      property subagents : SubagentCapabilities?
+
       # Extension metadata for custom capabilities.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -226,6 +271,7 @@ module ACP
         @session : ClientSessionCapabilities? = nil,
         @elicitation : ElicitationCapabilities? = nil,
         @plan : PlanCapabilities? = nil,
+        @subagents : SubagentCapabilities? = nil,
       )
       end
     end

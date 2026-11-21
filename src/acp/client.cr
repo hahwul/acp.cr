@@ -35,6 +35,7 @@ require "./protocol/types"
 require "./protocol/client_methods"
 require "./transport"
 require "./errors"
+require "./subagents"
 
 module ACP
   # Logger for client-level diagnostics.
@@ -235,6 +236,9 @@ module ACP
     # @pending_mutex so forgetting a session or disconnecting can clear them.
     @plan_ids = {} of String => Set(String)
 
+    # Optional child sessions and their setup lifecycle. Guarded by @pending_mutex.
+    @subagent_registry : SubagentRegistry?
+
     # An agent request whose handler hasn't answered yet. Compared by
     # identity, so a duplicate ID can't claim another request's answer.
     private class InFlightRequest
@@ -300,6 +304,7 @@ module ACP
       @client_capabilities : Protocol::ClientCapabilities = Protocol::ClientCapabilities.new,
     )
       @client_info = Protocol::ClientInfo.new(client_name, client_version)
+      @subagent_registry = SubagentRegistry.new if @client_capabilities.subagents
       start_dispatcher
     end
 
@@ -617,7 +622,10 @@ module ACP
     #
     # Returns true if cached state was actually dropped.
     def forget_session(session_id : String) : Bool
-      @pending_mutex.synchronize { @plan_ids.delete(session_id) }
+      @pending_mutex.synchronize do
+        @plan_ids.delete(session_id)
+        @subagent_registry.try(&.drop_runtime(session_id))
+      end
       return false unless @session_id == session_id
 
       @session_id = nil
@@ -682,24 +690,27 @@ module ACP
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
 
-      # Claim the pending permissions first so a handler's late answer is
-      # dropped even if sending the notification below fails.
-      ids = @pending_mutex.synchronize do
-        pending = @in_flight.select do |_id, req|
-          req.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION && req.session_id == sid
-        end.keys
-        pending.each { |id| @in_flight.delete(id).try(&.answered = true) }
-        pending
-      end
-
       params = Protocol::SessionCancelParams.new(sid)
       send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
 
       ClientLog.info { "Sent cancel for session: #{sid}" }
+    end
 
-      return if ids.empty?
+    # The effective state of an announced child session, if subagents are enabled.
+    def subagent(session_id : String) : SubagentSession?
+      @pending_mutex.synchronize { @subagent_registry.try(&.snapshot(session_id)) }
+    end
 
-      ids.each { |id| respond_to_agent(id, cancelled_permission) }
+    # Child sessions announced under this parent, when subagents are enabled.
+    def subagents(parent_id : String) : Array(SubagentSession)
+      @pending_mutex.synchronize { @subagent_registry.try(&.children(parent_id)) || [] of SubagentSession }
+    end
+
+    # Effective workspace roots inherited by a session, when subagents are
+    # enabled and an enclosing workspace is known. Use these in request
+    # handlers together with your application's workspace policy.
+    def session_workspace(session_id : String) : SessionWorkspace?
+      @pending_mutex.synchronize { @subagent_registry.try(&.workspace(session_id)) }
     end
 
     # Changes the mode for the active session.
@@ -839,7 +850,7 @@ module ACP
       raise ConnectionClosedError.new if closed?
 
       message = Protocol.build_notification(method, params)
-      @transport.send(message)
+      send_client_notification(method, message)
 
       ClientLog.debug { "Sent notification method=#{method}" }
     end
@@ -871,7 +882,7 @@ module ACP
       raise ConnectionClosedError.new if closed?
 
       message = Protocol.build_notification_raw(method, params)
-      @transport.send(message)
+      send_client_notification(method, message)
 
       ClientLog.debug { "Sent raw notification method=#{method}" }
     end
@@ -946,26 +957,31 @@ module ACP
     ) : JSON::Any
       raise ConnectionClosedError.new if closed?
 
-      # Generate a unique ID and register the pending channel atomically.
+      # Generate a unique ID and build the frame before registering it.
+      # Serialization can fail without leaving a request or setup pending.
       response_channel = Channel(JSON::Any).new(1)
 
       id = @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         current_id = @next_id
         @next_id += 1
-        @pending[current_id.to_s] = response_channel
         current_id
       end
       id_str = id.to_s
-
-      # Build and send the request. If the send fails (e.g. the transport was
-      # closed underneath us), drop the pending entry we just registered so it
-      # can never linger unresolved in `@pending`.
       message = message_builder.call(id)
+
+      @pending_mutex.synchronize do
+        raise ConnectionClosedError.new if @disconnected
+        @subagent_registry.try(&.request_sent(id_str, method, message["params"]?.try(&.as_h?)))
+        @pending[id_str] = response_channel
+      end
       begin
         @transport.send(message)
       rescue ex
-        @pending_mutex.synchronize { @pending.delete(id_str) }
+        @pending_mutex.synchronize do
+          @pending.delete(id_str)
+          @subagent_registry.try(&.request_finished(id_str))
+        end
         raise ex
       end
 
@@ -999,6 +1015,25 @@ module ACP
       raw_response["result"]? || JSON::Any.new(nil)
     end
 
+    # Checks child session permissions before sending a notification. Direct
+    # session cancellation also claims and resolves pending user input.
+    private def send_client_notification(method : String, message : Hash(String, JSON::Any)) : Nil
+      sid = message["params"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
+      cancel = method == Protocol::AgentMethod::SESSION_CANCEL
+      pending = @pending_mutex.synchronize do
+        raise ConnectionClosedError.new if @disconnected
+        if sid && (registry = @subagent_registry) && registry.child?(sid)
+          unless cancel && registry.cancel?(sid)
+            raise InvalidStateError.new("#{method} is unavailable for child session #{sid.inspect}")
+          end
+        end
+        claim_session_inputs([sid], elicitations: !@subagent_registry.nil?) if sid && cancel
+      end
+
+      @transport.send(message)
+      answer_cancelled_session_inputs(pending) if pending
+    end
+
     # Deserializes an agent `result` payload into the expected protocol type.
     #
     # A misbehaving agent can return a result that does not match the ACP
@@ -1029,6 +1064,7 @@ module ACP
         @pending.each_value(&.close)
         @pending.clear
         @plan_ids.clear
+        @subagent_registry.try(&.clear)
       end
     end
 
@@ -1062,7 +1098,10 @@ module ACP
         # Clean up the pending entry. If it is already gone, the response was
         # delivered (or the channel closed) after the timer fired: use that.
         removed = @pending_mutex.synchronize do
-          @pending.delete(request_id.to_s)
+          id = request_id.to_s
+          pending = @pending.delete(id)
+          @subagent_registry.try(&.request_finished(id)) if pending
+          pending
         end
         return channel.receive unless removed
         # Nobody waits for the answer any more: tell the agent it can stop.
@@ -1212,13 +1251,24 @@ module ACP
       # response (JSON-RPC 2.0 §5), and the channel holds exactly one, so a
       # repeated response must not reach it — sending a second or third copy
       # into the full channel would block the dispatcher for good.
-      delivered = @pending_mutex.synchronize do
-        if channel = @pending.delete(id_str)
-          channel.send(msg)
-          true
+      cancelled_inputs = nil
+      channel = @pending_mutex.synchronize do
+        if response_channel = @pending.delete(id_str)
+          if closed_sessions = @subagent_registry.try(&.request_finished(id_str, msg))
+            cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
+          end
+          response_channel
         end
       end
-      ClientLog.warn { "Received response for unknown request id=#{id_str}" } unless delivered
+      if channel
+        begin
+          answer_cancelled_session_inputs(cancelled_inputs) if cancelled_inputs
+        ensure
+          channel.send(msg)
+        end
+      else
+        ClientLog.warn { "Received response for unknown request id=#{id_str}" }
+      end
     end
 
     # Handles a method call from the agent (e.g., session/request_permission).
@@ -1264,10 +1314,8 @@ module ACP
       # one `nil` key, and all but one would go unanswered.
       entry = nil
       unless id.nil?
-        perm_sid = if method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-                     params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
-                   end
-        entry = InFlightRequest.new(method_name, perm_sid)
+        session_id = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
+        entry = InFlightRequest.new(method_name, session_id)
         @pending_mutex.synchronize { @in_flight[id] = entry }
       end
 
@@ -1416,6 +1464,36 @@ module ACP
       JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
     end
 
+    # Marks pending user input answered. The caller holds @pending_mutex.
+    private def claim_session_inputs(session_ids : Array(String), *, elicitations : Bool) : Hash(Protocol::RequestId, InFlightRequest)
+      pending = @in_flight.select do |_id, req|
+        method = req.method
+        session = req.session_id
+        session && session_ids.includes?(session) &&
+          (method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION ||
+            (elicitations && method == Protocol::ClientMethod::ELICITATION_CREATE))
+      end
+      pending.each do |id, req|
+        req.answered = true
+        @in_flight.delete(id)
+      end
+      pending
+    end
+
+    # Resolves claimed user input independently from the callback fibers.
+    private def answer_cancelled_session_inputs(pending : Hash(Protocol::RequestId, InFlightRequest)) : Nil
+      pending.each do |id, req|
+        result = if req.method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+                   cancelled_permission
+                 else
+                   JSON.parse(Protocol::CreateElicitationResult.cancel.to_json)
+                 end
+        respond_to_agent(id, result)
+      rescue ex : TransportError
+        ClientLog.debug { "Could not answer cancelled input id=#{id}: #{ex.message}" }
+      end
+    end
+
     # The answer to an agent request whose handler raised. A handler that
     # raises `JsonRpcError` chooses the error the agent sees — e.g. -32002
     # for a missing file (error#unknown-sessions) or -32800 for a cancelled
@@ -1533,6 +1611,7 @@ module ACP
       # "type" → "sessionUpdate" for backward compatibility.
       raw_params = raw_h.dup
       plan_operation = false
+      child_state_update = false
       if update = raw_params["update"]?
         update_h = update.as_h?
         unless update_h
@@ -1547,10 +1626,11 @@ module ACP
         end
         kind = update_h["sessionUpdate"]?.try(&.as_s?)
         plan_operation = kind == "plan_update" || kind == "plan_removed"
+        child_state_update = kind == "subagent_update" || kind == "config_option_update" || kind == "config_options_update"
       end
 
       handler = @on_update
-      unless handler || (plan_operation && @client_capabilities.plan)
+      unless handler || (plan_operation && @client_capabilities.plan) || (child_state_update && @subagent_registry)
         # No typed handler registered. `session/update` is still a
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
@@ -1576,6 +1656,9 @@ module ACP
       if plan_operation && @client_capabilities.plan
         return unless track_plan_operation(update_params)
       end
+      if registry = @subagent_registry
+        update_params = observe_subagent_update(registry, update_params) || return
+      end
       return deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless handler
 
       begin
@@ -1583,6 +1666,30 @@ module ACP
       rescue ex
         ClientLog.error { "Error in update handler: #{ex.message}" }
       end
+    end
+
+    # Tracks child session state before dispatching the application callback.
+    private def observe_subagent_update(registry : SubagentRegistry, params : Protocol::SessionUpdateParams) : Protocol::SessionUpdateParams?
+      pending = @pending_mutex.synchronize do
+        return if @disconnected
+
+        sid = params.session_id
+        params.before_load_response = registry.replaying?(sid)
+        case update = params.update
+        when Protocol::SubagentUpdate
+          return unless registry.announce(sid, update)
+
+          state = update.state
+          if state && state.state == "idle" && state.stop_reason == "cancelled" && registry.current_updates?(update.session_id)
+            claim_session_inputs([update.session_id], elicitations: true)
+          end
+        when Protocol::ConfigOptionUpdate
+          registry.update_config(sid, update.typed_config_options)
+          nil
+        end
+      end
+      answer_cancelled_session_inputs(pending) if pending
+      params
     end
 
     # Tracks announced IDs even for raw handlers so an unknown removal has no effect.

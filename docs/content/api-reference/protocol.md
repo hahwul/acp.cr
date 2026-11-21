@@ -123,6 +123,7 @@ Types for tool call content within updates:
 | `ToolCallContentBlock` | Wraps a standard content block |
 | `ToolCallDiff` | File modification diff (path, oldText, newText) |
 | `ToolCallTerminal` | Embedded terminal reference by ID |
+| `ToolCallSessionReference` | Display reference to a session by ID |
 | `ToolCallLocation` | File location tracking (path, line) |
 
 ## Session Update Types
@@ -138,6 +139,9 @@ Session updates are received via the `on_update` callback. They form a discrimin
 | `PlanUpdate` | `entries : Array(PlanEntry)` for the session's baseline checklist |
 | `IdentifiedPlanUpdate` | `plan : PlanUpdateContent` (needs `plan`) |
 | `PlanRemovedUpdate` | `plan_id : String` (needs `plan`) |
+| `SubagentUpdate` | Child `session_id` with optional capability, state, and workspace patches |
+| `SessionMessageUpdate` | `message_id` with participant, linked transcript ID, and content patches |
+| `SessionMessageChunkUpdate` | `message_id` and a single typed `content` block to append |
 | `UserMessageChunkUpdate` | `content : JSON::Any`, `text : String`, `message_id : String?` |
 | `AvailableCommandsUpdate` | `available_commands : Array(AvailableCommand)` |
 | `CurrentModeUpdate` | `current_mode_id : String` |
@@ -156,6 +160,12 @@ receive identified plans. In your callback, replace the entire plan for
 the matching plan for that session. The client ignores removals of IDs it has
 not received. See [ACP Agent Plan](https://agentclientprotocol.com/protocol/v1/agent-plan).
 
+The `SubagentUpdate` and `SessionMessageUpdate` types expose `*_present?`
+methods for patch fields. An omitted field retains its previous value and an
+explicit `null` clears it. A `SubagentState` retains extension fields in
+`json_unmapped`, including any payload for a future state or stop reason.
+See [ACP Subagents](https://agentclientprotocol.com/protocol/v1/subagents).
+
 ## Capabilities
 
 ### ClientCapabilities
@@ -166,7 +176,8 @@ ACP::Protocol::ClientCapabilities.new(
   terminal : Bool = false,
   session : ClientSessionCapabilities? = nil,
   elicitation : ElicitationCapabilities? = nil,
-  plan : PlanCapabilities? = nil
+  plan : PlanCapabilities? = nil,
+  subagents : SubagentCapabilities? = nil
 )
 ```
 
@@ -177,6 +188,7 @@ ACP::Protocol::ClientCapabilities.new(
 | `session` | `ClientSessionCapabilities?` | `compaction`, `notices` and `config_options.boolean`; each one is opt-in |
 | `elicitation` | `ElicitationCapabilities?` | Supported `elicitation/create` modes (`form`, `url`) |
 | `plan` | `PlanCapabilities?` | Support for identified plan updates and removals |
+| `subagents` | `SubagentCapabilities?` | Support for child sessions and session-directed messages |
 
 Nothing is advertised by default. Only set a capability once the client handles it.
 

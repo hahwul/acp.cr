@@ -86,6 +86,12 @@ module ACP
       # The update payload. Deserialized using the "sessionUpdate" discriminator.
       property update : SessionUpdate
 
+      # Whether this update arrived during a pending `session/load`.
+      # Child state, capabilities, and config options from this interval
+      # describe history. Set by a client tracking subagent sessions.
+      @[JSON::Field(ignore: true)]
+      property? before_load_response : Bool = false
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -115,6 +121,9 @@ module ACP
         "plan"                      => PlanUpdate,
         "plan_update"               => IdentifiedPlanUpdate,
         "plan_removed"              => PlanRemovedUpdate,
+        "subagent_update"           => SubagentUpdate,
+        "session_message"           => SessionMessageUpdate,
+        "session_message_chunk"     => SessionMessageChunkUpdate,
         "available_commands_update" => AvailableCommandsUpdate,
         "current_mode_update"       => CurrentModeUpdate,
         "config_option_update"      => ConfigOptionUpdate,
@@ -134,6 +143,30 @@ module ACP
         "status"              => StatusUpdate,
         "error"               => ErrorUpdate,
       }
+
+      # Adds nullable fields that distinguish an omitted patch from a clear.
+      private macro session_update_patch_fields(fields)
+        {% for name, declaration in fields %}
+          @[JSON::Field(key: {{declaration[1]}}, presence: true)]
+          getter {{name.id}} : {{declaration[0]}}?
+
+          # True when the update includes this field, even if its value is null.
+          @[JSON::Field(ignore: true)]
+          getter? {{name.id}}_present : Bool = false
+
+          # Marks the field present. Assign nil to send a clear.
+          def {{name.id}}=(@{{name.id}} : {{declaration[0]}}?) : {{declaration[0]}}?
+            @{{name.id}}_present = true
+            @{{name.id}}
+          end
+        {% end %}
+
+        protected def on_to_json(json : ::JSON::Builder)
+          {% for name, declaration in fields %}
+            json.field({{declaration[1]}}, nil) if @{{name.id}}_present && @{{name.id}}.nil?
+          {% end %}
+        end
+      end
 
       # The discriminator field. In the ACP spec this is "sessionUpdate".
       @[JSON::Field(key: "sessionUpdate")]
@@ -1071,3 +1104,5 @@ module ACP
     end
   end
 end
+
+require "./subagent_updates"
