@@ -73,8 +73,10 @@ Communicates over existing IO pairs using newline-delimited JSON.
 ACP::StdioTransport.new(
   reader : IO,
   writer : IO,
-  buffer_size : Int32 = 256,
-  max_line_bytes : Int32 = 16 * 1024 * 1024
+  buffer_size : Int32? = nil,
+  max_line_bytes : Int32 = 16 * 1024 * 1024,
+  *,
+  exact_frames : Bool = false
 )
 ```
 
@@ -82,8 +84,14 @@ ACP::StdioTransport.new(
 |-----------|------|---------|-------------|
 | `reader` | `IO` | -- | IO to read agent messages from |
 | `writer` | `IO` | -- | IO to write client messages to |
-| `buffer_size` | `Int32` | `256` | Internal channel buffer size |
-| `max_line_bytes` | `Int32` | 16 MiB | Longer incoming lines are dropped with a warning |
+| `buffer_size` | `Int32?` | `nil` | Internal channel capacity. Defaults to 256 in ordinary mode and 4 in exact mode |
+| `max_line_bytes` | `Int32` | 16 MiB | Maximum JSON frame size in bytes |
+| `exact_frames` | `Bool` | `false` | Preserve exact JSON on every frame for a proxy or conductor |
+
+With `exact_frames: true`, use `receive_frame` and `send_wire` to preserve
+numeric values and explicit nulls. Oversized input ends the connection, and
+oversized exact output raises `TransportError`. In ordinary mode, the reader
+drops oversized lines and resumes at the next line.
 
 ### `#receive(timeout)`
 
@@ -113,8 +121,10 @@ ACP::ProcessTransport.new(
   env : Hash(String, String)? = nil,
   chdir : String? = nil,
   stderr : IO = STDERR,
-  buffer_size : Int32 = 256,
-  max_line_bytes : Int32 = 16 * 1024 * 1024
+  buffer_size : Int32? = nil,
+  max_line_bytes : Int32 = 16 * 1024 * 1024,
+  *,
+  exact_frames : Bool = false
 )
 ```
 
@@ -125,8 +135,9 @@ ACP::ProcessTransport.new(
 | `env` | `Hash(String, String)?` | `nil` | Environment variables |
 | `chdir` | `String?` | `nil` | Working directory for the process |
 | `stderr` | `IO` | `STDERR` | Where the agent's stderr goes |
-| `buffer_size` | `Int32` | `256` | Internal channel buffer size |
-| `max_line_bytes` | `Int32` | 16 MiB | Longer incoming lines are dropped with a warning |
+| `buffer_size` | `Int32?` | `nil` | Internal channel capacity. Defaults to 256 in ordinary mode and 4 in exact mode |
+| `max_line_bytes` | `Int32` | 16 MiB | Maximum JSON frame size in bytes |
+| `exact_frames` | `Bool` | `false` | Preserve exact JSON on every frame for a proxy or conductor |
 
 Raises `ACP::TransportError` if the agent can't be started (missing command, bad `chdir`).
 

@@ -1,3 +1,4 @@
+require "./raw_json"
 require "./optional_metadata"
 
 module ACP
@@ -50,92 +51,11 @@ module ACP
       end
     end
 
-    # JSON retained without rounding numbers or dropping explicit nulls.
-    struct McpJson
-      # JSON text, compacted for newline-delimited transport.
-      getter json : String
-
-      private def initialize(@json : String)
-      end
-
-      # Wraps a representable JSON value.
-      def self.new(value : JSON::Any) : self
-        new(WireFrame.encode(value))
-      end
-
-      # Parses exact JSON, including numeric values beyond JSON::Any.
-      def self.from_json(value : String) : self
-        WireFrame.new(value)
-        new(JSON::PullParser.new(value))
-      end
-
-      # Reads one JSON value without narrowing its numbers.
-      def self.new(pull : JSON::PullParser) : self
-        new(WireFrame.read_raw(pull))
-      end
-
-      # Whether the value is a JSON object.
-      def object? : Bool
-        @json.starts_with?('{')
-      end
-
-      # Reads a string or returns nil for other JSON values.
-      def as_s? : String?
-        JSON.parse(@json).as_s if @json.starts_with?('"')
-      end
-
-      # Reads a member without projecting the rest of the object.
-      def field(name : String) : McpJson?
-        if object? && (value = WireFrame.field(@json, name))
-          McpJson.new(JSON::PullParser.new(value))
-        end
-      end
-
-      # Decodes values that fit within JSON::Any.
-      def to_json_any : JSON::Any
-        JSON.parse(@json)
-      end
-
-      # Writes the JSON value directly.
-      def to_json(builder : JSON::Builder) : Nil
-        builder.raw(@json)
-      end
-
-      # Replaces an object member, preserving the other fields as exact JSON.
-      def with_field(name : String, value : McpJson) : McpJson
-        raise ArgumentError.new("MCP JSON value must be an object") unless object?
-
-        pull = JSON::PullParser.new(@json)
-        wire = JSON.build do |builder|
-          builder.max_nesting = pull.max_nesting
-          builder.object do
-            pull.read_object do |key|
-              if key == name
-                pull.skip
-              else
-                builder.field(key) { pull.read_raw(builder) }
-              end
-            end
-            builder.field(name, value)
-          end
-        end
-        McpJson.new(JSON::PullParser.new(wire))
-      end
-    end
+    # Exact JSON used by MCP-over-ACP.
+    alias McpJson = RawJson
 
     # :nodoc:
-    module OptionalMcpMetadata
-      def self.from_json(pull : JSON::PullParser) : McpJson?
-        return McpJson.new(pull) if pull.kind.begin_object?
-
-        pull.skip
-        nil
-      end
-
-      def self.to_json(value : McpJson, json : JSON::Builder) : Nil
-        value.to_json(json)
-      end
-    end
+    alias OptionalMcpMetadata = OptionalRawMetadata
 
     # The routing envelope shared by MCP requests and notifications.
     struct McpMessage

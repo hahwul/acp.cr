@@ -67,6 +67,7 @@ require "./acp/client"
 require "./acp/v2_client"
 require "./acp/negotiation"
 require "./acp/session"
+require "./acp/conductor"
 
 module ACP
   # The default protocol version this library implements.

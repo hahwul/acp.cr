@@ -8952,3 +8952,344 @@ describe ACP::V2::Client do
     client.try(&.close)
   end
 end
+
+# Uses the actual stdio decoder so the tests cover JSON values beyond JSON::Any.
+private class ProxyTestPeer
+  getter transport : ACP::StdioTransport
+  getter feed : IO::FileDescriptor
+  getter outgoing : IO::FileDescriptor
+
+  def initialize(max_line_bytes : Int32 = ACP::StdioTransport::DEFAULT_MAX_LINE_BYTES)
+    reader, @feed = IO.pipe
+    @outgoing, writer = IO.pipe
+    @outgoing.read_timeout = 2.seconds
+    @transport = ACP::StdioTransport.new(reader, writer, max_line_bytes: max_line_bytes, exact_frames: true)
+  end
+
+  def send(json : String) : Nil
+    @feed.puts(json)
+    @feed.flush
+  end
+
+  def receive : String
+    @outgoing.gets || raise "ACP peer closed before replying"
+  end
+
+  def read_json : JSON::Any
+    JSON.parse(receive)
+  end
+
+  def close : Nil
+    @feed.close
+    @outgoing.close
+  end
+end
+
+private def proxy_test_link : Tuple(ACP::StdioTransport, ACP::StdioTransport)
+  reader, conductor_writer = IO.pipe
+  conductor_reader, writer = IO.pipe
+  {
+    ACP::StdioTransport.new(conductor_reader, conductor_writer, exact_frames: true),
+    ACP::StdioTransport.new(reader, writer, exact_frames: true),
+  }
+end
+
+private def proxy_test_chain(client : ProxyTestPeer, agent : ProxyTestPeer, proxy_count : Int32) : ACP::Conductor
+  proxies = Array.new(proxy_count) do
+    outward, inward = proxy_test_link
+    proxy = ACP::Proxy.new(inward)
+    spawn proxy.run
+    outward
+  end
+  conductor = ACP::Conductor.new(client.transport, agent.transport, proxies: proxies)
+  spawn conductor.run
+  conductor
+end
+
+private def proxy_test_initialize(client : ProxyTestPeer, agent : ProxyTestPeer, request : String) : JSON::Any
+  client.send(request)
+  forwarded = agent.read_json
+  forwarded["method"].as_s.should eq("initialize")
+  agent.send(%({"jsonrpc":"2.0","id":#{forwarded["id"]},"result":{"protocolVersion":#{forwarded["params"]["protocolVersion"]}}}))
+  forwarded["params"]
+end
+
+describe ACP::Conductor do
+  it "negotiates v2 and routes requests and notifications both ways across two proxies" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = proxy_test_chain(client, agent, 2)
+    begin
+      params = proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":"start","method":"initialize","params":{"protocolVersion":2,"info":{"name":"crystal","version":"1"},"_meta":{"exampleExtension":true}}}))
+      params["info"]["name"].as_s.should eq("crystal")
+      params["_meta"]["exampleExtension"].as_bool.should be_true
+      initialized = client.read_json
+      initialized["id"].as_s.should eq("start")
+      initialized["result"]["protocolVersion"].as_i.should eq(2)
+
+      client.send(%({"jsonrpc":"2.0","id":"shared","method":"_down","params":[18446744073709551615,0.12345678901234567890,null]}))
+      agent.send(%({"jsonrpc":"2.0","id":"shared","method":"_up","params":{"_meta":{"exampleExtension":true}}}))
+      downstream = agent.receive
+      downstream.should contain(%("method":"_down"))
+      downstream.should contain(%("params":[18446744073709551615,0.12345678901234567890,null]))
+      upstream = client.read_json
+      upstream["method"].as_s.should eq("_up")
+      upstream["params"]["_meta"]["exampleExtension"].as_bool.should be_true
+      downstream_id = ACP::Protocol::RawJson.from_json(downstream).field("id").not_nil!.as_i64?.not_nil!
+      upstream_id = upstream["id"].as_i64
+      upstream_id.should_not eq(downstream_id)
+
+      agent.send(%({"jsonrpc":"2.0","id":#{downstream_id},"error":{"code":-32040,"message":"Unavailable","data":{"large":18446744073709551615,"precise":0.12345678901234567890},"extra":null}}))
+      client.send(%({"jsonrpc":"2.0","id":#{upstream_id},"result":null}))
+      client.receive.should eq(%({"jsonrpc":"2.0","id":"shared","error":{"code":-32040,"message":"Unavailable","data":{"large":18446744073709551615,"precise":0.12345678901234567890},"extra":null}}))
+      agent.receive.should eq(%({"jsonrpc":"2.0","id":"shared","result":null}))
+
+      agent.send(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"extension"}}}))
+      client.read_json["method"].as_s.should eq("session/update")
+      client.send(%({"jsonrpc":"2.0","method":"_note","params":null}))
+      notify = agent.read_json
+      notify["method"].as_s.should eq("_note")
+      notify["id"]?.should be_nil
+      notify["params"]?.should be_nil
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+
+  it "translates cancellation in both directions and preserves the request reply" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = proxy_test_chain(client, agent, 1)
+    begin
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}))
+      client.read_json
+      client.send(%({"jsonrpc":"2.0","id":19,"method":"session/prompt","params":{"sessionId":"s"}}))
+      agent.send(%({"jsonrpc":"2.0","id":19,"method":"session/request_permission","params":{"sessionId":"s"}}))
+      client_request = client.read_json["id"].as_i64
+      agent_request = agent.read_json["id"].as_i64
+      client.send(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":19,"_meta":{"hop":true}}}))
+      agent.send(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":19}}))
+      agent_cancel, client_cancel = agent.read_json, client.read_json
+      agent_cancel["method"].as_s.should eq("$/cancel_request")
+      client_cancel["method"].as_s.should eq("$/cancel_request")
+      agent_cancel["params"].as_h.should eq({"requestId" => JSON::Any.new(agent_request)})
+      client_cancel["params"].as_h.should eq({"requestId" => JSON::Any.new(client_request)})
+
+      agent.send(%({"jsonrpc":"2.0","id":#{agent_request},"error":{"code":-32800,"message":"Cancelled","data":null}}))
+      client.send(%({"jsonrpc":"2.0","id":#{client_request},"result":{}}))
+      reply = client.read_json
+      reply["id"].as_i.should eq(19)
+      reply["error"]["code"].as_i.should eq(-32800)
+      reply["error"]["data"].raw.should be_nil
+      agent.read_json["id"].as_i.should eq(19)
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+  it "routes nested chains and lets a proxy handle a request and transform capabilities" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    outside, inside = proxy_test_link
+    local, proxy_transport = proxy_test_link
+    nested = ACP::Conductor.new(inside, nil, proxies: [local])
+    proxy = ACP::Proxy.new(proxy_transport, versions: [1_u16])
+    proxy.on_initialize_result = ->(result : ACP::Protocol::RawJson) do
+      result.with_field("_meta", ACP::Protocol::RawJson.from_json(%({"local":true})))
+    end
+    proxy.on_message = ACP::Conductor::MessageHandler.new do |message, direction, request|
+      if direction.downstream? && request && message.method == "_local"
+        ACP::Protocol::ProxyReply.success(ACP::Protocol::RawJson.from_json(%({"ok":true})))
+      else
+        message
+      end
+    end
+    conductor = ACP::Conductor.new(client.transport, agent.transport, proxies: [outside])
+    spawn conductor.run
+    spawn nested.run
+    spawn proxy.run
+    begin
+      received = proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"info":{"name":"crystal","version":"1"},"capabilities":{"auth":{"terminal":{}}},"_meta":{"preserved":true}}}))
+      received["protocolVersion"].as_i.should eq(1)
+      received["info"]?.should be_nil
+      received["capabilities"]?.should be_nil
+      received["_meta"]["preserved"].as_bool.should be_true
+      initial = client.read_json["result"]
+      initial["protocolVersion"].as_i.should eq(1)
+      initial["_meta"]["local"].as_bool.should be_true
+
+      client.send(%({"jsonrpc":"2.0","id":2,"method":"_local"}))
+      client.read_json["result"]["ok"].as_bool.should be_true
+      agent.send(%({"jsonrpc":"2.0","id":3,"method":"_back","params":{"nested":true}}))
+      forwarded = client.read_json
+      forwarded["params"]["nested"].as_bool.should be_true
+      client.send(%({"jsonrpc":"2.0","id":#{forwarded["id"]},"result":{"nested":true}}))
+      reply = agent.read_json
+      reply["id"].as_i.should eq(3)
+      reply["result"]["nested"].as_bool.should be_true
+    ensure
+      conductor.close
+      nested.close
+      proxy.close
+      client.close
+      agent.close
+    end
+  end
+
+  it "retries malformed and failed initialization while retaining a previous successful version" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = proxy_test_chain(client, agent, 1)
+    begin
+      client.send(%({"jsonrpc":"2.0","id":1,"method":"_premature"}))
+      client.read_json["error"]["code"].as_i.should eq(-32600)
+      client.send(%({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":2.0}}))
+      client.read_json["error"]["code"].as_i.should eq(-32602)
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":2}}))
+      client.read_json["result"]["protocolVersion"].as_i.should eq(2)
+
+      client.send(%({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"crystal","version":"1"}}}))
+      request = agent.read_json
+      request["params"]["clientInfo"]["name"].as_s.should eq("crystal")
+      agent.send(%({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":-32602,"message":"Initialization refused"}}))
+      client.read_json["error"]["message"].as_s.should eq("Initialization refused")
+
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":5,"method":"initialize","params":{"protocolVersion":2}}))
+      client.read_json["result"]["protocolVersion"].as_i.should eq(2)
+      client.send(%({"jsonrpc":"2.0","id":null,"method":"_null_id"}))
+      client.read_json["error"]["code"].as_i.should eq(-32600)
+      client.send(%({"jsonrpc":"2.0","id":6,"method":"_ready"}))
+      forwarded = agent.read_json
+      forwarded["method"].as_s.should eq("_ready")
+      agent.send(%({"jsonrpc":"2.0","id":#{forwarded["id"]},"result":{}}))
+      client.read_json["id"].as_i.should eq(6)
+      client.send(%({"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":2}}))
+      client.read_json["error"]["code"].as_i.should eq(-32600)
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+
+  it "rejects wrong successor peers and invalid wrapper params and translates wrapped cancellation" do
+    client, agent, proxy = ProxyTestPeer.new, ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = ACP::Conductor.new(client.transport, agent.transport, proxies: [proxy.transport])
+    spawn conductor.run
+    begin
+      client.send(%({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}))
+      proxy_init = proxy.read_json
+      proxy_init["method"].as_s.should eq("proxy/initialize")
+      proxy.send(%({"jsonrpc":"2.0","id":"p-init","method":"proxy/successor","params":{"method":"initialize","params":{"protocolVersion":2}}}))
+      agent_init = agent.read_json
+      agent_init["method"].as_s.should eq("initialize")
+      agent.send(%({"jsonrpc":"2.0","id":#{agent_init["id"]},"result":{"protocolVersion":2}}))
+      proxy.read_json["id"].as_s.should eq("p-init")
+      proxy.send(%({"jsonrpc":"2.0","id":#{proxy_init["id"]},"result":{"protocolVersion":2}}))
+      client.read_json["result"]["protocolVersion"].as_i.should eq(2)
+
+      client.send(%({"jsonrpc":"2.0","id":2,"method":"proxy/successor","params":{"method":"_bad"}}))
+      agent.send(%({"jsonrpc":"2.0","id":3,"method":"proxy/successor","params":{"method":"_bad"}}))
+      proxy.send(%({"jsonrpc":"2.0","id":4,"method":"proxy/successor","params":{"method":"_bad","params":45}}))
+      client.read_json["error"]["code"].as_i.should eq(-32600)
+      agent.read_json["error"]["code"].as_i.should eq(-32600)
+      proxy.read_json["error"]["code"].as_i.should eq(-32602)
+
+      proxy.send(%({"jsonrpc":"2.0","id":5,"method":"proxy/successor","params":{"method":"proxy/initialize"}}))
+      proxy.read_json["error"]["code"].as_i.should eq(-32600)
+      proxy.send(%({"jsonrpc":"2.0","id":"p-call","method":"proxy/successor","params":{"method":"_call","params":{"_meta":{"inner":true}},"_meta":{"outer":true}}}))
+      call = agent.read_json
+      call["method"].as_s.should eq("_call")
+      call["params"]["_meta"].as_h.should eq({"inner" => JSON::Any.new(true)})
+      proxy.send(%({"jsonrpc":"2.0","method":"proxy/successor","params":{"method":"$/cancel_request","params":{"requestId":"p-call"},"_meta":{"outer":true}}}))
+      cancellation = agent.read_json
+      cancellation["method"].as_s.should eq("$/cancel_request")
+      cancellation["params"]["requestId"].should eq(call["id"])
+      cancellation["params"]["_meta"]?.should be_nil
+      agent.send(%({"jsonrpc":"2.0","id":#{call["id"]},"result":[1,2,3]}))
+      reply = proxy.read_json
+      reply["id"].as_s.should eq("p-call")
+      reply["result"].as_a.size.should eq(3)
+    ensure
+      conductor.close
+      client.close
+      agent.close
+      proxy.close
+    end
+  end
+
+  it "closes the chain when a proxy rejects a successful repeated initialization" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    outside, inside = proxy_test_link
+    proxy = ACP::Proxy.new(inside)
+    conductor = ACP::Conductor.new(client.transport, agent.transport, proxies: [outside])
+    spawn conductor.run
+    spawn proxy.run
+    begin
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}))
+      client.read_json["result"]["protocolVersion"].as_i.should eq(2)
+      proxy.on_initialize_result = ->(result : ACP::Protocol::RawJson) do
+        result.with_field("protocolVersion", ACP::Protocol::RawJson.from_json("2"))
+      end
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":1}}))
+      client.outgoing.gets.should be_nil
+      agent.outgoing.gets.should be_nil
+    ensure
+      conductor.close
+      proxy.close
+      client.close
+      agent.close
+    end
+  end
+  it "reports supported versions and lets a client retry the same connection" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = ACP::Conductor.new(client.transport, agent.transport, versions: [2_u16])
+    spawn conductor.run
+    begin
+      client.send(%({"jsonrpc":"2.0","id":"wrong","method":"initialize","params":{"protocolVersion":1}}))
+      error = client.read_json["error"]
+      error["code"].as_i.should eq(-32022)
+      error["data"]["requested"].as_i.should eq(1)
+      error["data"]["supported"].as_a.map(&.as_i).should eq([2])
+      params = proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":"right","method":"initialize","params":{"protocolVersion":2}}))
+      params["protocolVersion"].as_i.should eq(2)
+      client.read_json["id"].as_s.should eq("right")
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+
+  it "closes the chain when a forwarded frame exceeds a peer's wire limit" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new(128)
+    conductor = proxy_test_chain(client, agent, 0)
+    begin
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}))
+      client.read_json
+      client.send(%({"jsonrpc":"2.0","id":2,"method":"_large","params":{"payload":"#{"x" * 128}"}}))
+      client.outgoing.gets.should be_nil
+      agent.outgoing.gets.should be_nil
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+  it "closes on a malformed correlated initialization response" do
+    client, agent = ProxyTestPeer.new, ProxyTestPeer.new
+    conductor = proxy_test_chain(client, agent, 0)
+    begin
+      proxy_test_initialize(client, agent, %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}))
+      client.read_json
+      client.send(%({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":1}}))
+      forwarded = agent.read_json
+      agent.send(%({"jsonrpc":"2.0","id":#{forwarded["id"]},"result":{"protocolVersion":1},"error":{"code":-32602,"message":"Ambiguous outcome"}}))
+      client.outgoing.gets.should be_nil
+      agent.outgoing.gets.should be_nil
+    ensure
+      conductor.close
+      client.close
+      agent.close
+    end
+  end
+end

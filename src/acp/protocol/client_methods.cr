@@ -900,9 +900,20 @@ module ACP
       end
     end
 
-    # ─── Protocol Method Names ────────────────────────────────────────
-    # Protocol-level methods either side may send (`$/`-prefixed).
+    # ─── Proxy Method Names ───────────────────────────────────────────
 
+    # Methods exchanged between an ACP conductor and a proxy component.
+    module ProxyMethod
+      # Initializes a component in proxy mode.
+      INITIALIZE = "proxy/initialize"
+
+      # Carries a request or notification across the successor boundary.
+      SUCCESSOR = "proxy/successor"
+    end
+
+    # ─── Protocol Method Names ────────────────────────────────────────
+
+    # Protocol-level methods either side may send (`$/`-prefixed).
     module ProtocolMethod
       # Asks the peer to cancel one of our requests.
       # See: https://agentclientprotocol.com/protocol/v1/cancellation

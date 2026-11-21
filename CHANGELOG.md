@@ -33,6 +33,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add draft ACP Proxy Chains for v1 and v2 Preview. `ACP::Conductor` routes terminal and nested chains, and `ACP::Proxy` can forward or handle messages in either direction.
 - Host native MCP servers on ACP v1 and v2 connections with request-scoped notifications, cancellation, and exact JSON.
 - Configure draft ACP v1 and v2 model providers with typed discovery, replacement, and disable requests.
 - Advertise and invoke draft ACP v2 Agent Skills with typed command entries and prompt references.
