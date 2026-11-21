@@ -148,7 +148,7 @@ module ACP
 
     # Applies a response at the dispatch boundary, before the next update.
     # Returns closed session IDs whose pending user input needs a reply.
-    def request_finished(id : String, response : JSON::Any? = nil) : Array(String)?
+    def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Array(String)?
       return unless setup = @setups.delete(id)
       sid = setup.session_id
       method = setup.method
@@ -160,18 +160,18 @@ module ACP
         return unless sid
 
         @setup_by_session.delete(sid)
-        if valid_attach_result?(method, response, raw_result)
+        if valid_attach_result?(method, Protocol::WireFrame.result_json(response, frame))
           @closed_roots.delete(sid)
           @workspace[sid] = workspace if workspace
         else
           clear_descendant_runtime(sid)
         end
       when Protocol::AgentMethod::SESSION_NEW
-        if workspace && raw_result && !response.try(&.["error"]?) && (created_id = raw_result.as_h?.try(&.["sessionId"]?).try(&.as_s?))
+        if workspace && (created_id = created_session_id(Protocol::WireFrame.result_json(response, frame)))
           @workspace[created_id] = workspace
         end
       when Protocol::AgentMethod::SESSION_DELETE
-        if sid && closed_session?(response, raw_result)
+        if sid && !frame && closed_session?(response, raw_result)
           return close_runtime(sid)
         end
       end
@@ -323,19 +323,31 @@ module ACP
       @cancellable_entities.reject! { |entity| entity[0] == session_id || children.includes?(entity[0]) }
     end
 
-    private def valid_attach_result?(method : String, response : JSON::Any?, result : JSON::Any?) : Bool
-      return false unless result && !response.try(&.["error"]?)
+    private def valid_attach_result?(method : String, result : String?) : Bool
+      return false unless result
 
       if @v2
-        Protocol::V2::SessionResumeResult.from_json(result.to_json)
+        Protocol::V2::SessionResumeResult.from_json(result)
       elsif method == Protocol::AgentMethod::SESSION_LOAD
-        Protocol::SessionLoadResult.from_json(result.to_json)
+        Protocol::SessionLoadResult.from_json(result)
       else
-        Protocol::SessionResumeResult.from_json(result.to_json)
+        Protocol::SessionResumeResult.from_json(result)
       end
       true
-    rescue JSON::ParseException
+    rescue JSON::Error
       false
+    end
+
+    private def created_session_id(result : String?) : String?
+      return unless result
+
+      if @v2
+        Protocol::V2::SessionNewResult.from_json(result).session_id
+      else
+        Protocol::SessionNewResult.from_json(result).session_id
+      end
+    rescue JSON::Error
+      nil
     end
 
     private def closed_session?(response : JSON::Any?, result : JSON::Any?) : Bool

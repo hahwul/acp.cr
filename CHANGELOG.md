@@ -33,6 +33,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Preview draft ACP v1 and v2 session options and provide initial configuration during session setup.
 - Decode draft ACP v1 and v2 session cursors and track their anchors and capabilities across full replays.
 - Add draft ACP v1 and v2 session archiving, restoration, and archive filters on `session/list`.
 - Add draft ACP v1 and v2 session title changes and return the title stored by the Agent.

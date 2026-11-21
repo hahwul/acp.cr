@@ -6976,6 +6976,238 @@ describe "ACP draft session cursors" do
   end
 end
 
+describe "ACP draft session options" do
+  it "previews v1 modes and configuration without switching the active session" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"options":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"active","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"fast","options":[]}]})
+    transport.replies["session/options"] = %("result":{"modes":{"currentModeId":"review","availableModes":[{"id":"review","name":"Review"}]},"configOptions":[null,{"id":"model","name":"Model","type":"select","currentValue":"large","options":[]}],"_meta":{"example.test/source":"saved"}})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    client.session_new("/work")
+    take_v2_frame(transport.outgoing)["params"].as_h.has_key?("configOptions").should be_false
+
+    preview = ACP::Session.new(client, "saved").options("/work", additional_directories: ["/shared"])
+    preview.modes.not_nil!.current_mode_id.should eq("review")
+    preview.config_options.not_nil!.map(&.current_value).should eq(["large"])
+    preview.meta.not_nil!["example.test/source"].should eq("saved")
+    client.session_id.should eq("active")
+    client.session_config_options.not_nil!.map(&.current_value).should eq(["fast"])
+    wire = take_v2_frame(transport.outgoing)
+    wire["method"].should eq("session/options")
+    wire["params"].should eq(JSON.parse(%({"cwd":"/work","sessionId":"saved","additionalDirectories":["/shared"]})))
+  ensure
+    client.try(&.close)
+  end
+
+  it "allows v1 previews of saved sessions with any advertised restore or fork method" do
+    {
+      { %(,"loadSession":true), "" },
+      {"", %(,"resume":{})},
+      {"", %(,"fork":{})},
+    }.each do |(root, nested)|
+      transport = V2TestTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}#{nested}}#{root}}})
+      transport.replies["session/options"] = %("error":{"code":-32002,"message":"Unknown session"})
+      client = ACP::Client.new(transport)
+      begin
+        client.initialize_connection
+        error = expect_raises(ACP::JsonRpcError) { client.session_options(ACP::Protocol::SessionOptionsParams.new("/work", session_id: "unknown")) }
+        error.resource_not_found?.should be_true
+        transport.sent_messages.size.should eq(2)
+      ensure
+        client.close
+      end
+    end
+  end
+
+  it "requires v1 support for saved-session previews and advertised boolean choices" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}}}})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    expect_raises(ACP::InvalidStateError, /load, resume, or fork/) do
+      client.session_options(ACP::Protocol::SessionOptionsParams.new("/work", session_id: "s"))
+    end
+    expect_raises(ArgumentError, /absolute/) do
+      client.session_options(ACP::Protocol::SessionOptionsParams.new("/work", additional_directories: ["relative"]))
+    end
+    expect_raises(ACP::InvalidStateError, /boolean/) do
+      client.session_new("/work", config_options: [ACP::Protocol::InitialSessionConfigOption.new("reviews", false)])
+    end
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "forwards v1 options through create, load, and resume in list order" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"new"})
+    transport.replies["session/load"] = %("result":{})
+    transport.replies["session/resume"] = %("result":{})
+    config_caps = ACP::Protocol::SessionConfigOptionsCapabilities.new(boolean: ACP::Protocol::BooleanConfigOptionCapabilities.new)
+    caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(config_options: config_caps))
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    choices = [ACP::Protocol::InitialSessionConfigOption.new("model", "large"), ACP::Protocol::InitialSessionConfigOption.new("review", false)]
+    expected = JSON.parse(%([{"configId":"model","value":"large"},{"configId":"review","type":"boolean","value":false}]))
+    ACP::Session.create(client, "/work", config_options: choices)
+    take_v2_frame(transport.outgoing)["params"]["configOptions"].should eq(expected)
+    ACP::Session.load(client, "saved", "/work", config_options: choices)
+    take_v2_frame(transport.outgoing)["params"]["configOptions"].should eq(expected)
+    client.session_resume("saved", "/work", config_options: choices)
+    take_v2_frame(transport.outgoing)["params"]["configOptions"].should eq(expected)
+    expect_raises(ArgumentError, /unique/) { client.session_new("/work", config_options: [choices.first, choices.first]) }
+    transport.sent_messages.size.should eq(4)
+  ensure
+    client.try(&.close)
+  end
+
+  it "previews v2 commands and forwards typed initial choices to new and resume" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"options":{}}}})
+    transport.replies["session/options"] = %("result":{"configOptions":[false,{"configId":"review","name":"Review mode","type":"boolean","currentValue":false}],"availableCommands":[{"type":"command","name":"review","description":"Review changes"}]})
+    transport.replies["session/new"] = %("result":{"sessionId":"new"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    preview = client.session_options(ACP::Protocol::V2::SessionOptionsParams.new("C:/repo", session_id: "saved"))
+    take_v2_frame(transport.outgoing)["params"]["sessionId"].should eq("saved")
+    preview.typed_config_options.first.boolean_value.should be_false
+    preview.typed_available_commands.first.name.should eq("review")
+    client.session_workspace("saved").should be_nil
+
+    custom = ACP::Protocol::V2::InitialSessionConfigOption.new("custom", "_future", JSON.parse(%({"selected":true})))
+    choices = [ACP::Protocol::V2::InitialSessionConfigOption.new("model", "large"), ACP::Protocol::V2::InitialSessionConfigOption.new("review", false), custom]
+    expected = JSON.parse(%([{"configId":"model","type":"id","value":"large"},{"configId":"review","type":"boolean","value":false},{"configId":"custom","type":"_future","value":{"selected":true}}]))
+    client.session_new("C:/repo", config_options: choices)
+    take_v2_frame(transport.outgoing)["params"]["configOptions"].should eq(expected)
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("saved", "C:/repo", config_options: choices))
+    take_v2_frame(transport.outgoing)["params"]["configOptions"].should eq(expected)
+  ensure
+    client.try(&.close)
+  end
+
+  it "gates v1 and v2 preview and setup options on the capability" do
+    v1_transport = V2TestTransport.new
+    v1_transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":false}}})
+    v1 = ACP::Client.new(v1_transport)
+    v1.initialize_connection
+    expect_raises(ACP::InvalidStateError, /options/) { v1.session_options("/work") }
+    expect_raises(ACP::InvalidStateError, /options/) { v1.session_new("/work", config_options: [] of ACP::Protocol::InitialSessionConfigOption) }
+    v1_transport.sent_messages.size.should eq(1)
+
+    v2_transport = V2TestTransport.new
+    v2 = ACP::V2::Client.new(v2_transport)
+    v2.initialize_connection
+    expect_raises(ACP::InvalidStateError, /options/) { v2.session_options("/work") }
+    expect_raises(ACP::InvalidStateError, /options/) { v2.session_new("/work", config_options: [] of ACP::Protocol::V2::InitialSessionConfigOption) }
+    v2_transport.sent_messages.size.should eq(1)
+  ensure
+    v1.try(&.close)
+    v2.try(&.close)
+  end
+
+  it "defaults invalid optional snapshots and rejects malformed initial values" do
+    v1 = ACP::Protocol::SessionOptionsResult.from_json(%({"modes":true,"configOptions":[]}))
+    v1.modes.should be_nil
+    v1.config_options.not_nil!.should be_empty
+    ACP::Protocol::SessionOptionsResult.from_json(%({"configOptions":true})).config_options.should be_nil
+    malformed = ACP::Protocol::SessionOptionsResult.from_json(%({"configOptions":[{"id":"invalid","name":"Invalid","type":"select","currentValue":"missing"}]}))
+    malformed.config_options.not_nil!.should be_empty
+    v2 = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"availableCommands":null,"configOptions":true}))
+    v2.available_commands.should be_empty
+    v2.config_options.should be_empty
+    options = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"configOptions":[{"configId":"bad","name":"Bad","type":"boolean","currentValue":"yes"},{"configId":"missing","name":"Missing","type":"select","currentValue":"x"},{"configId":"future","name":"Future","type":"_future","currentValue":{"label":"One"}}]}))
+    options.typed_config_options.map(&.config_id).should eq(["future"])
+    reference = ACP::Protocol::V2::SessionOptionsResult.from_json(%({"configOptions":[{"configId":"model","name":"Model","type":"select","currentValue":"small","options":[{"value":"small","name":"Small","description":false,"_meta":true}]}]}))
+    value = reference.typed_config_options.first.select_options.as(Array(ACP::Protocol::ConfigOptionValue)).first
+    value.value.should eq("small")
+    value.description.should be_nil
+    value.meta.should be_nil
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::InitialSessionConfigOption.from_json(%({"configId":"review","value":false}))
+    end
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::V2::InitialSessionConfigOption.from_json(%({"configId":"review","type":"boolean","value":"yes"}))
+    end
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::V2::InitialSessionConfigOption.from_json(%({"configId":"model","value":"small"}))
+    end
+  end
+
+  it "leaves the active v1 config cache intact after a malformed setter response" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"fast","options":[]}]})
+    transport.replies["session/set_config_option"] = %("result":{"configOptions":true})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    expect_raises(ACP::ProtocolError) { client.session_set_config_option("model", "slow") }
+    client.session_config_options.not_nil!.first.current_value.should eq("fast")
+  ensure
+    client.try(&.close)
+  end
+
+  it "commits successful v1 and v2 setup responses with malformed wide list entries over stdio" do
+    {"v1", "v2"}.each do |version|
+      reader, feed = IO.pipe
+      outgoing, writer = IO.pipe
+      outgoing.read_timeout = 2.seconds
+      transport = ACP::StdioTransport.new(reader, writer)
+      config_caps = ACP::Protocol::SessionConfigOptionsCapabilities.new(boolean: ACP::Protocol::BooleanConfigOptionCapabilities.new)
+      caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(config_options: config_caps))
+      client = version == "v1" ? ACP::Client.new(transport, client_capabilities: caps) : ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      begin
+        spawn do
+          initialize_result = if version == "v1"
+                                %({"protocolVersion":1})
+                              else
+                                %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+                              end
+          created_result = if version == "v1"
+                             %({"sessionId":"s","_meta":{"counter":18446744073709551615},"configOptions":[18446744073709551615,{"id":"review","name":"Review","type":"boolean","currentValue":false}]})
+                           else
+                             nested = "[" * 120 + "true" + "]" * 120
+                             %({"sessionId":"s","_meta":{"nested":#{nested}},"configOptions":[{"configId":"review","name":"Review","type":"boolean","currentValue":false}]})
+                           end
+          {
+            initialize_result,
+            created_result,
+            %({"configOptions":[18446744073709551615,{"id":"review","configId":"review","name":"Review","type":"boolean","currentValue":true}]}),
+          }.each do |result|
+            break unless line = outgoing.gets
+
+            id = JSON.parse(line)["id"]
+            feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"result":#{result}})
+          end
+        end
+        client.initialize_connection
+        client.session_new("/work").session_id.should eq("s")
+        if client.is_a?(ACP::Client)
+          client.session_config_options.not_nil!.first.boolean_value.should be_false
+          client.session_resume("s", "/work/restored")
+          client.session_config_options.not_nil!.first.boolean_value.should be_true
+        else
+          result = client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work/restored"))
+          result.typed_config_options.first.boolean_value.should be_true
+          client.session_workspace("s").not_nil!.cwd.should eq("/work/restored")
+        end
+      ensure
+        client.close
+        feed.close
+        outgoing.close
+      end
+    end
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

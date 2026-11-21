@@ -158,6 +158,10 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::SessionArchiveCapabilities)]
         property archive : Protocol::SessionArchiveCapabilities?
 
+        # Presence advertises session/options and initial configuration values.
+        @[JSON::Field(converter: ::ACP::Protocol::SessionOptionsCapabilities)]
+        property options : Protocol::SessionOptionsCapabilities?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -173,6 +177,7 @@ module ACP
           @status : Protocol::SessionStatusCapabilities? = nil,
           @title : Protocol::SessionTitleCapabilities? = nil,
           @archive : Protocol::SessionArchiveCapabilities? = nil,
+          @options : Protocol::SessionOptionsCapabilities? = nil,
         )
         end
       end

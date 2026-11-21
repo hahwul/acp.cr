@@ -46,6 +46,16 @@ module ACP
         end
       end
 
+      # Returns the exact payload of a successful JSON-RPC response.
+      # :nodoc:
+      def self.result_json(response : JSON::Any?, frame : WireFrame? = nil) : String?
+        return unless response && !response["error"]? && (result = response["result"]?)
+
+        frame ? field(frame.json, "result") : encode(result)
+      rescue JSON::Error
+        nil
+      end
+
       # Original JSON text, including exact numeric tokens.
       getter json : String
 

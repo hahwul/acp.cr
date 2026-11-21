@@ -1,4 +1,3 @@
-require "path"
 require "./initialization"
 require "./configuration"
 
@@ -13,7 +12,7 @@ module ACP
 
       # Checks absolute paths in the Agent's POSIX or Windows filesystem syntax.
       def self.absolute_path?(value : String) : Bool
-        Path.posix(value).absolute? || Path.windows(value).absolute?
+        Protocol.absolute_path?(value)
       end
 
       # An inclusive cursor for replaying session history.
@@ -97,6 +96,10 @@ module ACP
         @[JSON::Field(key: "systemPrompt")]
         property system_prompt : Protocol::SystemPrompt?
 
+        # Initial configuration choices, in application order.
+        @[JSON::Field(key: "configOptions")]
+        property config_options : Array(InitialSessionConfigOption)?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -109,6 +112,7 @@ module ACP
           @mcp_servers : Array(McpServer)? = nil,
           @system_prompt : Protocol::SystemPrompt? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @config_options : Array(InitialSessionConfigOption)? = nil,
         )
         end
       end
@@ -140,6 +144,10 @@ module ACP
         @[JSON::Field(key: "systemPrompt")]
         property system_prompt : Protocol::SystemPrompt?
 
+        # Initial configuration choices, in application order.
+        @[JSON::Field(key: "configOptions")]
+        property config_options : Array(InitialSessionConfigOption)?
+
         # Extension metadata.
         @[JSON::Field(key: "_meta")]
         property meta : Hash(String, JSON::Any)?
@@ -154,6 +162,7 @@ module ACP
           @mcp_servers : Array(McpServer)? = nil,
           @system_prompt : Protocol::SystemPrompt? = nil,
           @meta : Hash(String, JSON::Any)? = nil,
+          @config_options : Array(InitialSessionConfigOption)? = nil,
         )
         end
       end
@@ -165,15 +174,15 @@ module ACP
         include AvailableCommandList
 
         # Agent configuration, including open option variants.
-        @[JSON::Field(key: "configOptions")]
+        @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalOptionList)]
         property config_options : Array(JSON::Any) = [] of JSON::Any
 
         # Available slash commands, including open command variants.
-        @[JSON::Field(key: "availableCommands")]
+        @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::OptionalOptionList)]
         property available_commands : Array(JSON::Any) = [] of JSON::Any
 
         # Extension metadata.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
       end
 
@@ -201,6 +210,65 @@ module ACP
           @available_commands : Array(JSON::Any) = [] of JSON::Any,
           @meta : Hash(String, JSON::Any)? = nil,
         )
+        end
+      end
+
+      # Workspace or saved session whose options the Agent should preview.
+      alias SessionOptionsParams = Protocol::SessionOptionsParams
+
+      # Advisory options and commands for a proposed v2 session.
+      struct SessionOptionsResult < SessionSetupResult
+        # Creates an options and commands preview.
+        def initialize(
+          @config_options : Array(JSON::Any) = [] of JSON::Any,
+          @available_commands : Array(JSON::Any) = [] of JSON::Any,
+          @meta : Hash(String, JSON::Any)? = nil,
+        )
+        end
+      end
+
+      # A configuration choice to apply when setting up a v2 session.
+      struct InitialSessionConfigOption
+        include JSON::Serializable
+        include LosslessUnmapped
+
+        # ID of the configuration option to set.
+        @[JSON::Field(key: "configId")]
+        getter config_id : String
+
+        # Value discriminator. V2 requires it, including for IDs and booleans.
+        @[JSON::Field(key: "type")]
+        getter value_type : String
+
+        # Choice to propose to the Agent, including extension payloads.
+        getter value : JSON::Any
+
+        # Extension metadata.
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+        getter meta : Hash(String, JSON::Any)?
+
+        # Creates an initial option with a built-in or extension value type.
+        def initialize(@config_id : String, @value_type : String, @value : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+          raise ArgumentError.new("Initial v2 config value does not match its type") unless valid_value?
+        end
+
+        # Creates an ID or boolean value.
+        def self.new(config_id : String, value : String | Bool, meta : Hash(String, JSON::Any)? = nil)
+          new(config_id, value.is_a?(Bool) ? "boolean" : "id", JSON::Any.new(value), meta)
+        end
+
+        private def valid_value? : Bool
+          case @value_type
+          when "id"      then !@value.as_s?.nil?
+          when "boolean" then !@value.as_bool?.nil?
+          else                true
+          end
+        end
+
+        private def after_initialize : Nil
+          unless valid_value?
+            raise JSON::ParseException.new("Initial v2 config value does not match its type", 0, 0)
+          end
         end
       end
 

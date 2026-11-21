@@ -144,10 +144,10 @@ module ACP
       end
     end
 
-    def finish_replay(request_id : String, response : JSON::Any? = nil) : Nil
+    def finish_replay(request_id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Nil
       return unless replay = @replay_requests.delete(request_id)
 
-      complete = replay_succeeded?(response)
+      complete = replay_succeeded?(Protocol::WireFrame.result_json(response, frame))
       replay.sessions.each do |session_id|
         @replaying.delete(session_id)
       end
@@ -172,13 +172,13 @@ module ACP
       @replaying[session_id] = replay
     end
 
-    private def replay_succeeded?(response : JSON::Any?) : Bool
-      return false unless response && !response["error"]? && (result = response["result"]?)
+    private def replay_succeeded?(result : String?) : Bool
+      return false unless result
 
       if @v2
-        Protocol::V2::SessionResumeResult.from_json(result.to_json)
+        Protocol::V2::SessionResumeResult.from_json(result)
       else
-        Protocol::SessionLoadResult.from_json(result.to_json)
+        Protocol::SessionLoadResult.from_json(result)
       end
       true
     rescue JSON::Error

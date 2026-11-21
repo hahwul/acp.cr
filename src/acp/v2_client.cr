@@ -251,20 +251,20 @@ module ACP
       # Creates a session with typed workspace and MCP settings.
       def session_new(params : Wire::SessionNewParams) : Wire::SessionNewResult
         caps = session_capabilities
-        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt)
-        request(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
+        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+        @connection.request_typed(AgentMethod::SESSION_NEW, params, Wire::SessionNewResult)
       end
 
       # Creates a session in the given absolute directory.
-      def session_new(cwd : String) : Wire::SessionNewResult
-        session_new(Wire::SessionNewParams.new(cwd))
+      def session_new(cwd : String, *, config_options : Array(Wire::InitialSessionConfigOption)? = nil) : Wire::SessionNewResult
+        session_new(Wire::SessionNewParams.new(cwd, config_options: config_options))
       end
 
       # Attaches to an existing session and can request history replay.
       def session_resume(params : Wire::SessionResumeParams) : Wire::SessionResumeResult
         caps = session_capabilities
-        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt)
-        request(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
+        validate_setup(caps, params.cwd, params.additional_directories, params.mcp_servers, params.system_prompt, params.config_options)
+        @connection.request_typed(AgentMethod::SESSION_RESUME, params, Wire::SessionResumeResult)
       end
 
       # Lists available sessions using the provided filter and cursor.
@@ -277,6 +277,21 @@ module ACP
           raise ArgumentError.new("The ACP v2 session list directory must be absolute")
         end
         @connection.request_typed(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
+      end
+
+      # Previews options and commands before creating or restoring a session.
+      def session_options(params : Wire::SessionOptionsParams) : Wire::SessionOptionsResult
+        raise InvalidStateError.new("The Agent did not advertise session.options") unless session_capabilities.options
+        unless Protocol.absolute_workspace?(params.cwd, params.additional_directories)
+          raise ArgumentError.new("ACP v2 session directories must be absolute")
+        end
+
+        @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult)
+      end
+
+      # Previews options and commands for a new session in the given workspace.
+      def session_options(cwd : String) : Wire::SessionOptionsResult
+        session_options(Wire::SessionOptionsParams.new(cwd))
       end
 
       # Queries a session and its foreground snapshot without attaching to it.
@@ -426,12 +441,17 @@ module ACP
         directories : Array(String)?,
         servers : Array(Wire::McpServer)?,
         system_prompt : Protocol::SystemPrompt?,
+        config_options : Array(Wire::InitialSessionConfigOption)?,
       ) : Nil
-        unless Wire.absolute_path?(cwd) && (directories.nil? || directories.all? { |directory| Wire.absolute_path?(directory) })
+        unless Protocol.absolute_workspace?(cwd, directories)
           raise ArgumentError.new("ACP v2 session directories must be absolute")
         end
         if directories && !caps.additional_directories
           raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
+        end
+        if config_options
+          raise InvalidStateError.new("The Agent did not advertise session.options") unless caps.options
+          Protocol.validate_initial_config_options(config_options)
         end
         validate_mcp_servers(caps.mcp, servers) if servers
         if system_prompt

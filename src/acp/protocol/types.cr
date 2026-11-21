@@ -321,6 +321,10 @@ module ACP
       @[JSON::Field(key: "systemPrompt")]
       property system_prompt : SystemPrompt?
 
+      # Initial configuration choices, in application order.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(InitialSessionConfigOption)?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -331,12 +335,14 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
+        @config_options : Array(InitialSessionConfigOption)? = nil,
       )
       end
 
       # Convenience constructor that accepts typed McpServer values.
       def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil,
-                   additional_directories : Array(String)? = nil, system_prompt : SystemPrompt? = nil)
+                   additional_directories : Array(String)? = nil, system_prompt : SystemPrompt? = nil,
+                   config_options : Array(InitialSessionConfigOption)? = nil)
         json_servers = mcp_servers.map do |server|
           case server
           when McpServerStdio
@@ -351,7 +357,7 @@ module ACP
         end
         inst = allocate
         inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta,
-          additional_directories: additional_directories, system_prompt: system_prompt)
+          additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
         inst
       end
     end
@@ -428,10 +434,11 @@ module ACP
       property name : String
 
       # Optional description for this option value.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalOptionDescription)]
       property description : String?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -675,6 +682,58 @@ module ACP
       end
     end
 
+    # :nodoc:
+    module OptionalConfigOptions
+      def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)?
+        return Protocol.parse_config_options(OptionalOptionList.from_json(pull)) if pull.kind.begin_array?
+
+        pull.skip
+        nil
+      end
+
+      def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
+        ConfigOptionsConverter.to_json(value, json)
+      end
+    end
+
+    # :nodoc:
+    module OptionalSessionModes
+      def self.from_json(pull : JSON::PullParser) : SessionModeState?
+        SessionModeState.from_json(WireFrame.read_raw(pull))
+      rescue JSON::Error
+        nil
+      end
+
+      def self.to_json(value : SessionModeState, json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
+    # Options a v1 Agent expects to use for a proposed session.
+    struct SessionOptionsResult
+      include JSON::Serializable
+
+      # Available modes and the current mode, when reported.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
+      getter modes : SessionModeState?
+
+      # Configuration options resolved for this workspace or saved session.
+      @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
+      getter config_options : Array(ConfigOption)?
+
+      # Extension metadata.
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+      getter meta : Hash(String, JSON::Any)?
+
+      # Creates an options preview.
+      def initialize(@modes : SessionModeState? = nil, @config_options : Array(ConfigOption)? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      end
+
+      private def after_initialize : Nil
+        @config_options = @config_options.try &.select { |option| option.boolean? || (option.current_value && option.options_raw) }
+      end
+    end
+
     # ─── Session/New Result ───────────────────────────────────────────
 
     # Result of the `session/new` method (Agent → Client).
@@ -687,15 +746,16 @@ module ACP
 
       # Initial mode state if supported by the Agent.
       # See: https://agentclientprotocol.com/protocol/session-modes
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
       property modes : SessionModeState?
 
       # Initial session configuration options if supported by the Agent.
       # See: https://agentclientprotocol.com/protocol/session-config-options
-      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
+      @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -844,6 +904,10 @@ module ACP
       @[JSON::Field(key: "systemPrompt")]
       property system_prompt : SystemPrompt?
 
+      # Initial configuration choices, in application order.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(InitialSessionConfigOption)?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -855,6 +919,7 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
+        @config_options : Array(InitialSessionConfigOption)? = nil,
       )
       end
     end
@@ -865,14 +930,15 @@ module ACP
       include JSON::Serializable
 
       # Mode state if supported by the Agent.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
+      @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(
@@ -919,6 +985,10 @@ module ACP
       @[JSON::Field(key: "systemPrompt")]
       property system_prompt : SystemPrompt?
 
+      # Initial configuration choices, in application order.
+      @[JSON::Field(key: "configOptions")]
+      property config_options : Array(InitialSessionConfigOption)?
+
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
       property meta : Hash(String, JSON::Any)?
@@ -930,6 +1000,7 @@ module ACP
         @meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
+        @config_options : Array(InitialSessionConfigOption)? = nil,
       )
       end
     end
@@ -942,14 +1013,15 @@ module ACP
       include JSON::Serializable
 
       # Mode state if supported by the Agent.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
       property modes : SessionModeState?
 
       # Session configuration options if supported by the Agent.
-      @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
+      @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
       # Extension metadata.
-      @[JSON::Field(key: "_meta")]
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
       property meta : Hash(String, JSON::Any)?
 
       def initialize(

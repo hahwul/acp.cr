@@ -14,11 +14,12 @@ module ACP
         # User-visible group label.
         getter name : String
 
-        # Unfiltered wire options, including any malformed list entries.
+        # Wire objects in the group's option list.
+        @[JSON::Field(converter: ::ACP::Protocol::OptionalOptionList)]
         getter options : Array(JSON::Any)
 
         # Extension metadata scoped to the group.
-        @[JSON::Field(key: "_meta")]
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
         property meta : Hash(String, JSON::Any)?
 
         # Creates a group with its selectable values.
@@ -156,9 +157,18 @@ module ACP
 
       # Typed access to configuration options while retaining their raw values.
       module ConfigOptionList
-        # Parses entries that carry a v2 option discriminator, ID, and name.
+        # Parses usable configuration entries, preserving future option types.
         def typed_config_options : Array(ConfigOption)
-          config_options.compact_map { |option| ConfigOption.from_json(option.to_json) rescue nil }
+          config_options.compact_map do |raw|
+            option = ConfigOption.from_json(WireFrame.encode(raw))
+            case option.type
+            when "select"  then option if option.selected_value && option.select_options
+            when "boolean" then option unless option.boolean_value.nil?
+            else                option
+            end
+          rescue JSON::Error
+            nil
+          end
         end
       end
 
