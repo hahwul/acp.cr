@@ -66,7 +66,7 @@ module ACP
       return unless child = @children[session_id]?
 
       attaching = !setup_for(session_id).nil?
-      state = child.state.try { |value| Protocol::SubagentState.new(value.state, value.json_unmapped.dup) } unless attaching
+      state = child.state.try(&.dup) unless attaching
       config = child.config_options.try(&.dup) unless attaching
       SubagentSession.new(session_id, child.parent_id, child.title, child.description, state, config, cancel?(session_id))
     end
@@ -197,17 +197,17 @@ module ACP
 
     # Observes v2 capabilities at the wire boundary. Each replaying session
     # has its own marker. A marked parent's upsert can authorize its child.
-    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any)) : Bool
+    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?) : Bool
       case update["sessionUpdate"]?.try(&.as_s?)
       when "replay_complete"
         setup_for(session_id).try(&.replay_markers).try(&.add(session_id))
       when "subagent_update"
-        return announce(session_id, Protocol::SubagentUpdate.from_json(update.to_json))
+        return announce(session_id, Protocol::SubagentUpdate.from_json(update_json || update.to_json))
       when "state_update"
         if (child = @children[session_id]?) && current_updates?(session_id)
-          fields = update.dup
-          fields.delete("sessionUpdate")
-          child.state = Protocol::SubagentState.from_json(fields.to_json)
+          state = Protocol::SubagentState.from_json(update_json || update.to_json)
+          state.json_unmapped.delete("sessionUpdate")
+          child.state = state
         end
       when "tool_call_update"
         observe_cancel_marker(session_id, "toolCallId", update)
@@ -258,7 +258,7 @@ module ACP
       if current_updates?(@v2 ? parent_id : sid)
         child.capabilities = patch.capabilities if patch.capabilities_present?
         if patch.state_present?
-          child.state = patch.state.try { |value| Protocol::SubagentState.new(value.state, value.json_unmapped.dup) }
+          child.state = patch.state.try(&.dup)
         end
       end
       true

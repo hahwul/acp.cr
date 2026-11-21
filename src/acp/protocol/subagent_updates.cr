@@ -2,6 +2,7 @@ require "json"
 require "./capabilities"
 require "./content_block"
 require "./patch_fields"
+require "./wire_frame"
 
 module ACP
   module Protocol
@@ -10,13 +11,20 @@ module ACP
     # in `json_unmapped` so applications can display future state variants.
     struct SubagentState
       include JSON::Serializable
-      include JSON::Serializable::Unmapped
+      include LosslessUnmapped
 
       # Current foreground state, e.g. running, requires_action, idle or unknown.
       getter state : String
 
       # Builds a foreground state snapshot with optional extra wire fields.
       def initialize(@state : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+      end
+
+      # Copies the representable attributes while preserving exact wire fields.
+      def dup : SubagentState
+        copy = self
+        copy.json_unmapped = @json_unmapped.dup
+        copy
       end
 
       # Reported reason why foreground work stopped.

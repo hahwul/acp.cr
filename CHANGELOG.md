@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Breaking Changes
+- `StdioTransport#incoming` now carries `Transport::IncomingFrame?`. Use `receive` for `JSON::Any?` or `receive_frame` to retain input beyond the range of `JSON::Any`.
 - Schema `uint32`/`uint64` fields are now unsigned: `ReadTextFileParams#line`/`#limit` and `ToolCallLocation#line` are `UInt32?`, `CreateTerminalParams#output_byte_limit` is `UInt64?`, and `UsageUpdate#used`/`#size` are `UInt64`. Valid values above the signed maximum now decode, and negative values are rejected (an `fs/read_text_file` / `terminal/create` request carrying one is answered with `-32602 Invalid params`)
 - An agent request for an unknown `_`-prefixed extension method with no `on_agent_request` handler is answered with `-32601 Method not found` (method name in `data`) instead of a `null` result, per extensibility#custom-requests and matching the Rust SDK
 - `WaitForTerminalExitResult#exit_code` and `TerminalExitStatus#exit_code` are `UInt32?` (schema `uint32`). Convert a `Process::Status` with `status.exit_code?.try(&.to_u32!)`. That is nil for a signal, and `to_u32!` keeps a Windows NTSTATUS such as `0xC0000005` instead of raising
@@ -12,6 +13,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve full `UInt64` values when stdio dispatches typed ACP usage updates, terminal requests, and elicitation forms.
 - Redact MCP server credentials from outgoing request logs.
 - Validate ACP v2 prompts, idempotency keys, MCP server settings, workspace paths, system prompts, and configuration value types before sending requests.
 - Preserve message IDs when converting streaming updates to typed `ContentChunk` values. Preserve extension metadata on client and agent implementation info and typed MCP server, environment, and header values.
