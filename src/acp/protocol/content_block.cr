@@ -21,6 +21,7 @@
 # Selects the concrete subtype from the "type" field.
 
 require "json"
+require "socket"
 require "uri"
 require "./raw_json"
 
@@ -44,6 +45,36 @@ module ACP
         else                                                                             false
         end
       end
+    end
+
+    # Checks the syntax of an absolute wire URI.
+    # :nodoc:
+    def self.absolute_uri?(value : String) : Bool
+      return false unless value.ascii_only?
+      return false if value.count('#') > 1 || value.matches?(%r{[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]|%(?![A-Fa-f0-9]{2})})
+      return false unless URI.parse(value).absolute?
+
+      _, _, remainder = value.partition(':')
+      unless hierarchy = remainder.lchop?("//")
+        return !remainder.matches?(/[\[\]]/)
+      end
+
+      # Check delimiters before URI.parse's percent decoding of host and user info.
+      authority, _, resource = hierarchy.partition(%r{[/?#]})
+      return false if resource.matches?(/[\[\]]/)
+
+      user, separator, host_port = authority.partition('@')
+      host_port = authority if separator.empty?
+      return false if (!separator.empty? && user.matches?(/[\[\]]/)) || host_port.includes?('@')
+      return true unless host_port.matches?(/[\[\]]/)
+
+      match = /\A\[([^\[\]]+)\](?::[0-9]*)?\z/.match(host_port)
+      return false unless match
+
+      literal = match[1]
+      Socket::IPAddress.valid_v6?(literal) || literal.matches?(%r{\A[vV][A-Fa-f0-9]+\.[A-Za-z0-9._~!$&'()*+,;=:\-]+\z})
+    rescue URI::Error | OverflowError
+      false
     end
 
     # :nodoc:
@@ -228,7 +259,7 @@ module ACP
       # Reads a standard block at the transport's JSON nesting limit.
       def self.new(pull : JSON::PullParser) : ContentBlock
         line, column = pull.location
-        decode(RawJson.new(pull), line, column, allow_unknown: false)
+        decode(RawJson.new(pull), line, column, v2: false)
       end
 
       # Reads ACP v2 display content, including custom and future block types.
@@ -238,7 +269,7 @@ module ACP
 
       # Reads ACP v2 display content from exact JSON.
       def self.from_v2_json(block : RawJson) : ContentBlock
-        decode(block, 1, 1, allow_unknown: true)
+        decode(block, 1, 1, v2: true)
       end
 
       # Reads usable v2 display blocks from an array in wire order.
@@ -251,30 +282,117 @@ module ACP
         end
       end
 
-      private def self.decode(block : RawJson, line : Int32, column : Int32, *, allow_unknown : Bool) : ContentBlock
+      private def self.decode(block : RawJson, line : Int32, column : Int32, *, v2 : Bool) : ContentBlock
         type = block.field("type").try(&.as_s?)
-        if allow_unknown && !WireFrame.unique_members?(block.json)
+        return decode_v2_resource_link(block, line, column) if v2 && type == "resource_link"
+
+        check_v2_members(block, line, column) if v2
+
+        content = case type
+                  when "text"          then TextContentBlock.from_json(block.json)
+                  when "image"         then ImageContentBlock.from_json(block.json)
+                  when "audio"         then AudioContentBlock.from_json(block.json)
+                  when "resource_link" then ResourceLinkContentBlock.from_json(block.json)
+                  when "resource"      then ResourceContentBlock.from_json(block.json)
+                  else
+                    # Skill references have a separate user-message API.
+                    if v2 && type && type != "skill"
+                      return UnknownContentBlock.from_wire(block, type)
+                    end
+                    raise JSON::SerializableError.new("Unknown or missing content type #{type.inspect}", to_s, "type", line, column, nil)
+                  end
+        v2 ? validate_v2(content, line, column) : content
+      end
+
+      private def self.check_v2_members(block : RawJson, line : Int32, column : Int32) : Nil
+        unless WireFrame.unique_members?(block.json)
           raise JSON::SerializableError.new("Ambiguous ACP v2 content fields", to_s, "type", line, column, nil)
         end
+      end
 
-        case type
-        when "text"          then TextContentBlock.from_json(block.json)
-        when "image"         then ImageContentBlock.from_json(block.json)
-        when "audio"         then AudioContentBlock.from_json(block.json)
-        when "resource_link" then ResourceLinkContentBlock.from_json(block.json)
-        when "resource"
-          resource = ResourceContentBlock.from_json(block.json)
-          if allow_unknown && !(resource.uri && (resource.text || resource.blob))
+      private def self.validate_v2(content : ContentBlock, line : Int32, column : Int32) : ContentBlock
+        case content
+        when ImageContentBlock, AudioContentBlock
+          unless Protocol.standard_base64?(content.data)
+            raise JSON::SerializableError.new("Malformed Base64 media data", to_s, "data", line, column, nil)
+          end
+          if content.is_a?(ImageContentBlock) && (uri = content.uri) && !Protocol.absolute_uri?(uri)
+            content.uri = nil
+          end
+        when ResourceContentBlock
+          content.check_display_blob = true
+          uri = content.uri
+          unless uri && Protocol.absolute_uri?(uri) && (content.text || content.blob)
             raise JSON::SerializableError.new("Malformed embedded resource", to_s, "resource", line, column, nil)
           end
-          resource
-        else
-          # Skill references have a separate user-message API.
-          if allow_unknown && type && type != "skill"
-            return UnknownContentBlock.from_wire(block, type)
-          end
-          raise JSON::SerializableError.new("Unknown or missing content type #{type.inspect}", to_s, "type", line, column, nil)
         end
+        content
+      end
+
+      private def self.decode_v2_resource_link(block : RawJson, line : Int32, column : Int32) : ResourceLinkContentBlock
+        icons = block.field("icons")
+        if icons
+          icons = nil unless WireFrame.repeated_members(block.json, "icons").empty?
+          block = block.without_field("icons")
+        end
+
+        check_v2_members(block, line, column)
+        link = ResourceLinkContentBlock.from_json(block.json)
+        unless Protocol.absolute_uri?(link.uri)
+          raise JSON::SerializableError.new("Malformed resource link URI", to_s, "uri", line, column, nil)
+        end
+        link.size = nil if (size = link.size) && size < 0
+        link.icons = icons.try(&.elements?).try(&.compact_map { |icon| decode_v2_icon(icon) })
+        link
+      end
+
+      private def self.decode_v2_icon(wire : RawJson) : Icon?
+        return unless wire.object? && WireFrame.unique_members?(wire.json)
+
+        icon = Icon.from_json(wire.json)
+        icon if display_icon_uri?(icon)
+      rescue JSON::ParseException
+        nil
+      end
+
+      private def self.display_icon_uri?(icon : Icon) : Bool
+        source = icon.src
+        return false unless Protocol.absolute_uri?(source)
+
+        uri = URI.parse(source)
+        case uri.scheme
+        when "https" then https_icon_uri?(uri, source)
+        when "data"  then image_data_uri?(uri, icon.mime_type)
+        else              false
+        end
+      end
+
+      private def self.https_icon_uri?(uri : URI, source : String) : Bool
+        host = uri.host
+        return false unless host && !host.empty? && host.valid_encoding? && uri.user.nil? && uri.password.nil?
+        return false if (port = uri.port) && port > UInt16::MAX
+
+        # The generic URI check validates IP literals before host percent decoding.
+        return source.partition("://").last.starts_with?('[') if host.starts_with?('[')
+
+        host.each_char.none? do |char|
+          char.whitespace? || char.control? || char.in?('#', '%', '/', ':', '<', '>', '?', '@', '[', '\\', ']', '^', '|')
+        end
+      end
+
+      private def self.image_data_uri?(uri : URI, mime_type : String?) : Bool
+        return false if uri.host || uri.query
+
+        header, comma, data = uri.path.partition(',')
+        return false if comma.empty? || data.empty? || !header.downcase.ends_with?(";base64")
+
+        media_type = URI.decode(header.partition(';').first)
+        if media_type.empty? || media_type.downcase == "application/octet-stream"
+          media_type = mime_type.try(&.partition(';').first.strip) || ""
+        end
+        media_type.ascii_only? &&
+          media_type.matches?(%r{\Aimage/[A-Za-z0-9][A-Za-z0-9!#$&^_.+\-]*\z}i) &&
+          Protocol.standard_base64?(URI.decode(data))
       end
 
       # The discriminator field present on every content block.
@@ -495,6 +613,9 @@ module ACP
       @[JSON::Field(key: "resource", converter: ::ACP::Protocol::ProjectedContent)]
       @resource_wire : PreservedJson
 
+      @[JSON::Field(ignore: true)]
+      protected property check_display_blob : Bool = false
+
       # Optional metadata about how the content should be used or displayed.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::Annotations))]
       property annotations : Annotations?
@@ -555,7 +676,8 @@ module ACP
 
       # Helper: get the blob from the embedded resource (nil if text).
       def blob : String?
-        resource.as_h?.try { |hash| hash["blob"]?.try(&.as_s?) }
+        data = resource.as_h?.try { |hash| hash["blob"]?.try(&.as_s?) }
+        data if data && (!@check_display_blob || Protocol.standard_base64?(data))
       end
 
       # Helper: get the MIME type from the embedded resource.

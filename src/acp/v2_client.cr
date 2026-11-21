@@ -1,5 +1,4 @@
 require "uri"
-require "socket"
 require "./client"
 require "./protocol/raw_json"
 require "./protocol/v2/methods"
@@ -948,14 +947,14 @@ module ACP
       private def validate_standard_prompt_block(block : Protocol::RawJson) : Nil
         case content = Protocol::ContentBlock.from_json(block.json)
         when Protocol::ImageContentBlock
-          if (uri = content.uri) && !valid_prompt_uri?(uri)
+          if (uri = content.uri) && !Protocol.absolute_uri?(uri)
             raise ArgumentError.new("ACP v2 image prompts require an absolute URI when one is supplied")
           end
           validate_prompt_media(content.data)
         when Protocol::AudioContentBlock
           validate_prompt_media(content.data)
         when Protocol::ResourceLinkContentBlock
-          unless valid_prompt_uri?(content.uri)
+          unless Protocol.absolute_uri?(content.uri)
             raise ArgumentError.new("ACP v2 resource links require an absolute URI")
           end
           if (size = block.field("size")) && !size.null? && content.size_bytes.nil?
@@ -964,7 +963,7 @@ module ACP
         when Protocol::ResourceContentBlock
           uri = content.uri
           blob = content.blob
-          unless uri && valid_prompt_uri?(uri) && (content.text || (blob && Protocol.standard_base64?(blob)))
+          unless uri && Protocol.absolute_uri?(uri) && (content.text || (blob && Protocol.standard_base64?(blob)))
             raise ArgumentError.new("Malformed ACP v2 embedded resource")
           end
         end
@@ -974,34 +973,6 @@ module ACP
 
       private def validate_prompt_media(data : String) : Nil
         raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless Protocol.standard_base64?(data)
-      end
-
-      private def valid_prompt_uri?(value : String) : Bool
-        return false if value.count('#') > 1 || value.matches?(%r{[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]|%(?![A-Fa-f0-9]{2})})
-
-        return false unless URI.parse(value).absolute?
-
-        _, _, remainder = value.partition(':')
-        unless hierarchy = remainder.lchop?("//")
-          return !remainder.matches?(/[\[\]]/)
-        end
-
-        # Check delimiters before URI.parse's percent decoding of host and user info.
-        authority, _, resource = hierarchy.partition(%r{[/?#]})
-        return false if resource.matches?(/[\[\]]/)
-
-        user, separator, host_port = authority.partition('@')
-        host_port = authority if separator.empty?
-        return false if (!separator.empty? && user.matches?(/[\[\]]/)) || host_port.includes?('@')
-        return true unless host_port.matches?(/[\[\]]/)
-
-        match = /\A\[([^\[\]]+)\](?::[0-9]*)?\z/.match(host_port)
-        return false unless match
-
-        literal = match[1]
-        Socket::IPAddress.valid_v6?(literal) || literal.matches?(%r{\A[vV][A-Fa-f0-9]+\.[A-Za-z0-9._~!$&'()*+,;=:\-]+\z})
-      rescue URI::Error | OverflowError
-        false
       end
 
       private def terminal_auth_flow(method_id : String, approve : Wire::AuthMethod -> Bool) : Client
