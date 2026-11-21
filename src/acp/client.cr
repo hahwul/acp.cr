@@ -262,12 +262,13 @@ module ACP
       on_result : (String -> Nil)?,
       on_response : (PendingResponse -> Nil)?,
       armed : Bool,
-      retirement_generation : UInt64? = nil
+      retirement_order : UInt64? = nil
 
     @pending = {} of String => PendingRequest
 
     # A timed-out v2 close, archive, or delete can still retire runtime.
-    private record LateSessionRetirement, session_id : String, generation : UInt64, close_on_missing : Bool
+    private record LateSessionRetirement, session_id : String, write_order : UInt64, close_on_missing : Bool
+    @session_lifecycle_order = 0_u64
     @late_session_retirements = {} of String => LateSessionRetirement
     private MAX_LATE_SESSION_RETIREMENTS = 128
 
@@ -1491,7 +1492,8 @@ module ACP
       changes_choice = @session_choices.change_method?(method)
       v2_retirement_session = closing_session if v2_wire?
       state_setup = v2_wire? && method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
-      arm_at_write = changes_choice || state_setup || !v2_retirement_session.nil?
+      entity_cancel = @subagent_registry.try(&.entity_cancel?(method))
+      arm_at_write = changes_choice || state_setup || entity_cancel || !v2_retirement_session.nil?
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         check_v2_request_order(initialize) if v2_wire?
@@ -1536,9 +1538,13 @@ module ACP
                   @session_choices.start_change(id_str, method, params, validate: validate_choice,
                     allow_boolean: v2_wire? || @v1_boolean_config_supported)
                 end
-                @subagent_registry.try(&.root_setup_written(id_str)) if state_setup
-                generation = v2_retirement_session.try { |sid| @subagent_registry.try(&.root_generation(sid)) }
-                @pending[id_str] = @pending[id_str].copy_with(armed: true, retirement_generation: generation)
+                @subagent_registry.try(&.check_entity_cancel(method, params)) if entity_cancel
+                if state_setup || v2_retirement_session
+                  @session_lifecycle_order += 1
+                end
+                @subagent_registry.try(&.root_setup_written(id_str, @session_lifecycle_order)) if state_setup
+                retirement_order = @session_lifecycle_order if v2_retirement_session
+                @pending[id_str] = @pending[id_str].copy_with(armed: true, retirement_order: retirement_order)
               end
             end
             mark_v2_request_sent if v2_request
@@ -1668,18 +1674,32 @@ module ACP
     private def send_client_notification(method : String, message : Hash(String, JSON::Any)) : Nil
       sid = message["params"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
       cancel = method == Protocol::AgentMethod::SESSION_CANCEL
-      pending = @pending_mutex.synchronize do
-        raise ConnectionClosedError.new if @disconnected || (v2_wire? && @v2_contract_unknown.get)
-        if sid && (registry = @subagent_registry) && registry.child?(sid)
-          unless cancel && registry.cancel?(sid)
-            raise InvalidStateError.new("#{method} is unavailable for child session #{sid.inspect}")
+      @pending_mutex.synchronize { check_session_notification(method, sid, cancel) }
+      pending = nil
+      if sid
+        @transport.send_checked(message) do
+          @pending_mutex.synchronize do
+            check_session_notification(method, sid, cancel)
+            if cancel && !v2_wire?
+              pending = claim_session_inputs([sid], elicitations: !@subagent_registry.nil?)
+            end
           end
         end
-        claim_session_inputs([sid], elicitations: !@subagent_registry.nil?) if sid && cancel && !v2_wire?
+      else
+        write_client_message(message)
       end
+      if claimed = pending
+        answer_cancelled_session_inputs(claimed)
+      end
+    end
 
-      write_client_message(message)
-      answer_cancelled_session_inputs(pending) if pending
+    private def check_session_notification(method : String, session_id : String?, cancel : Bool) : Nil
+      raise ConnectionClosedError.new if @disconnected || (v2_wire? && @v2_contract_unknown.get)
+      if session_id && (registry = @subagent_registry) && registry.child?(session_id)
+        unless cancel && registry.cancel?(session_id)
+          raise InvalidStateError.new("#{method} is unavailable for child session #{session_id.inspect}")
+        end
+      end
     end
 
     private def write_client_message(message : Hash(String, JSON::Any)) : Nil
@@ -1773,14 +1793,12 @@ module ACP
           if pending
             @session_choices.expire_attachment(id)
             @session_choices.expire_change(id)
-            if (session_id = pending.closing_session) && (generation = pending.retirement_generation)
-              if @subagent_registry.try(&.root_generation(session_id)) == generation
-                @session_choices.retirement_timed_out(session_id)
-                @late_session_retirements[id] = LateSessionRetirement.new(session_id, generation, pending.close_on_missing)
-                @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
-              end
+            if (session_id = pending.closing_session) && (order = pending.retirement_order)
+              @session_choices.retirement_timed_out(session_id) if retirement_applies?(session_id, order)
+              @late_session_retirements[id] = LateSessionRetirement.new(session_id, order, pending.close_on_missing)
+              @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
             end
-            @subagent_registry.try(&.request_finished(id))
+            @subagent_registry.try(&.request_timed_out(id))
             initialization = v2_wire? && @initialize_request == id
             @v2_contract_unknown.set(true) if initialization
           end
@@ -2012,29 +2030,32 @@ module ACP
             response = error
             @subagent_registry.try(&.request_finished(id_str))
           else
+            retired_setup = @subagent_registry.try(&.retired_setup?(id_str))
             @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
             request.on_response.try(&.call(response))
-            if (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
+            if !retired_setup && (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
             end
           end
           if (session_id = request.closing_session) && closes_session?(msg, request.close_on_missing)
-            if !v2_wire? || @subagent_registry.try(&.root_generation(session_id)) == request.retirement_generation
-              closed_sessions = retire_session_runtime(session_id)
-              cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true) unless v2_wire?
+            if (closed_sessions = apply_retirement(session_id, request.retirement_order)) && !v2_wire?
+              cancelled_inputs = claim_session_inputs(closed_sessions, elicitations: true)
             end
           end
           request.response
         elsif retirement = @late_session_retirements.delete(id_str)
           observed_reply = true
           session_id = retirement.session_id
-          if @subagent_registry.try(&.root_generation(session_id)) == retirement.generation
-            if closes_session?(msg, retirement.close_on_missing)
-              retire_session_runtime(session_id)
-            elsif response_error_code(msg)
-              @session_choices.retirement_failed(session_id)
-            end
+          if closes_session?(msg, retirement.close_on_missing)
+            apply_retirement(session_id, retirement.write_order)
+          elsif retirement_applies?(session_id, retirement.write_order) && response_error_code(msg)
+            @session_choices.retirement_failed(session_id)
           end
+          nil
+        elsif resumed = @subagent_registry.try(&.finish_late_resume(id_str, msg, wire_frame, rejected: !response_error_code(msg).nil?))
+          observed_reply = true
+          session_id, result = resumed
+          apply_session_choices(session_id, result, reattach: true) if result
           nil
         end
       end
@@ -2060,8 +2081,27 @@ module ACP
       end
     end
 
-    private def retire_session_runtime(session_id : String) : Array(String)
-      closed_sessions = @subagent_registry.try(&.close_runtime(session_id)) || [session_id]
+    private def retirement_applies?(session_id : String, order : UInt64?) : Bool
+      attached = @subagent_registry.try(&.attachment_order(session_id))
+      !order || !attached || attached < order
+    end
+
+    protected def apply_session_choices(session_id : String, result : String, *, reattach : Bool) : Nil
+      @session_choices.replace(session_id, result, reattach: reattach)
+      @late_session_retirements.each_value do |retirement|
+        if retirement.session_id == session_id && retirement_applies?(session_id, retirement.write_order)
+          @session_choices.retirement_timed_out(session_id)
+        end
+      end
+    end
+
+    private def apply_retirement(session_id : String, order : UInt64?) : Array(String)?
+      unless retirement_applies?(session_id, order)
+        @subagent_registry.try(&.discard_old_entity_grants(session_id, order.not_nil!))
+        return
+      end
+
+      closed_sessions = @subagent_registry.try(&.close_runtime(session_id, order)) || [session_id]
       closed_sessions.each do |sid|
         @plan_ids.delete(sid)
         @session_choices.drop(sid)
@@ -2449,7 +2489,9 @@ module ACP
         return false if @disconnected
 
         registry = @subagent_registry.not_nil!
-        return false unless registry.observe_v2_update(session_id, update, update_json)
+        waiting_to_write = registry.setup_waiting_to_write?(session_id) && !registry.resume_timed_out?(session_id)
+        replaying = !waiting_to_write && !!@cursor_registry.try(&.replaying?(session_id))
+        return false unless registry.observe_v2_update(session_id, update, update_json, replaying: replaying)
 
         case update["sessionUpdate"]?.try(&.as_s?)
         when "subagent_update"
@@ -2457,7 +2499,7 @@ module ACP
             @cursor_registry.try(&.include_child(session_id, child_id))
           end
         when "replay_complete"
-          unless registry.setup_waiting_to_write?(session_id)
+          unless waiting_to_write
             @cursor_registry.try(&.replay_complete(session_id))
             @session_choices.replay_complete(session_id)
           end
@@ -2467,7 +2509,7 @@ module ACP
                               !registry.child?(session_id) &&
                               registry.current_updates?(session_id)
         when "state_update"
-          if registry.setup_waiting_to_write?(session_id) || !@cursor_registry.try(&.replaying?(session_id))
+          unless replaying
             registry.observe_root_state(session_id, update_json || Protocol::WireFrame.encode(update))
           end
         when "config_option_update"

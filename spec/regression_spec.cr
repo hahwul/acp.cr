@@ -2764,3 +2764,464 @@ describe "Exact ACP v2 foreground state" do
     end
   end
 end
+
+private class QueuedCancellationTransport < ACP::Transport
+  getter agent = ChoiceStateTransport.new
+  getter queued = Channel(String).new(1)
+  getter ready_to_write = Channel(Nil).new(1)
+  property pause_method : String?
+
+  def receive : JSON::Any?
+    @agent.receive
+  end
+
+  def closed? : Bool
+    @agent.closed?
+  end
+
+  def close : Nil
+    @agent.close
+  end
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    wait_to_write(message)
+    @agent.send(message)
+  end
+
+  def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+    wait_to_write(message)
+    preflight.call
+    @agent.send(message)
+  end
+
+  private def wait_to_write(message : Hash(String, JSON::Any)) : Nil
+    if (method = message["method"]?.try(&.as_s?)) && method == @pause_method
+      @queued.send(method)
+      @ready_to_write.receive
+    end
+  end
+end
+
+describe "ACP cancellation grants at the writer" do
+  {
+    {"tool_call/cancel", "child", %({"sessionUpdate":"tool_call_update","toolCallId":"t","capabilities":{"cancel":{}}}), %({"sessionUpdate":"tool_call_update","toolCallId":"t","capabilities":null})},
+    {"terminal/cancel", "child", %({"sessionUpdate":"terminal_update","terminalId":"t","capabilities":{"cancel":{}}}), %({"sessionUpdate":"terminal_update","terminalId":"t","capabilities":{}})},
+    {"session/cancel", "root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}), %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":null}})},
+  }.each do |method, owner, grant, revoke|
+    it "withholds #{method} when the Agent revokes it before the write" do
+      transport = QueuedCancellationTransport.new
+      transport.agent.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+      transport.agent.replies["session/new"] = %("result":{"sessionId":"root"})
+      transport.agent.replies[method] = %("result":{})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work")
+      transport.agent.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+      transport.agent.update(owner, grant)
+      choice_state_barrier(client, transport.agent)
+
+      transport.pause_method = method
+      result = Channel(Exception?).new(1)
+      spawn do
+        case method
+        when "tool_call/cancel" then client.tool_call_cancel("child", "t")
+        when "terminal/cancel"  then client.terminal_cancel("child", "t")
+        when "session/cancel"   then client.session_cancel("child")
+        end
+        result.send(nil)
+      rescue ex
+        result.send(ex)
+      end
+      select
+      when queued = transport.queued.receive
+        queued.should eq(method)
+      when timeout(2.seconds)
+        fail "cancellation did not reach the write queue"
+      end
+
+      transport.agent.update(owner, revoke)
+      choice_state_barrier(client, transport.agent)
+      transport.ready_to_write.send(nil)
+      select
+      when error = result.receive
+        if error.nil? && transport.agent.sent_messages.any? { |frame| frame["method"]?.try(&.as_s?) == method }
+          fail "#{method} crossed the writer after its revocation was processed"
+        end
+        error.should be_a(ACP::InvalidStateError)
+      when timeout(2.seconds)
+        fail "queued cancellation did not finish"
+      end
+      transport.agent.sent_messages.none? { |frame| frame["method"]?.try(&.as_s?) == method }.should be_true
+    ensure
+      transport.try(&.ready_to_write.close)
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v2 cancellation grants during session synchronization" do
+  it "preserves current root grants across a resume without replay" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/resume"] = %("result":{})
+    transport.replies["tool_call/cancel"] = %("result":{})
+    transport.replies["terminal/cancel"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    transport.update("root", %({"sessionUpdate":"tool_call_update","toolCallId":"x","capabilities":{"cancel":{}}}))
+    transport.update("root", %({"sessionUpdate":"terminal_update","terminalId":"x","capabilities":{}}))
+    choice_state_barrier(client, transport)
+
+    transport.before_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+      if method == "session/resume"
+        transport.update("root", %({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"in_progress"}))
+        transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+      end
+      nil
+    end
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work"))
+    client.tool_call_cancel("root", "x")
+    expect_raises(ACP::InvalidStateError, /current cancel capability/) { client.terminal_cancel("root", "x") }
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps historical cancel grants inert after a local replay timeout" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["tool_call/cancel"] = %("result":{})
+    transport.replies["terminal/cancel"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) do
+      params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      client.session_resume(params)
+    end
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+    transport.update("root", %({"sessionUpdate":"terminal_update","terminalId":"term","capabilities":{"cancel":{}}}))
+    transport.update("child", %({"sessionUpdate":"tool_call_update","toolCallId":"x","capabilities":{"cancel":{}}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+    expect_raises(ACP::InvalidStateError) { client.terminal_cancel("root", "term") }
+    expect_raises(ACP::InvalidStateError) { client.tool_call_cancel("child", "x") }
+
+    transport.update("root", %({"sessionUpdate":"replay_complete"}))
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+    transport.update("root", %({"sessionUpdate":"terminal_update","terminalId":"term","capabilities":{"cancel":{}}}))
+    transport.update("child", %({"sessionUpdate":"replay_complete"}))
+    transport.update("child", %({"sessionUpdate":"tool_call_update","toolCallId":"x","capabilities":{"cancel":{}}}))
+    choice_state_barrier(client, transport)
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+    expect_raises(ACP::InvalidStateError) { client.tool_call_cancel("child", "x") }
+    expect_raises(ACP::InvalidStateError) { client.terminal_cancel("root", "term") }
+
+    resume = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    client.terminal_cancel("root", "term")
+    client.tool_call_cancel("child", "x")
+    client.session_cancel("child")
+  ensure
+    client.try(&.close)
+  end
+  it "keeps a descendant's replay isolated while a newer resume is waiting to write" do
+    transport = QueuedCancellationTransport.new
+    agent = transport.agent
+    agent.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+    agent.replies["session/new"] = %("result":{"sessionId":"root"})
+    agent.replies["terminal/cancel"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) do
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    end
+    old_resume = agent.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+    agent.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+    agent.update("root", %({"sessionUpdate":"replay_complete"}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, agent)
+
+    transport.pause_method = "session/resume"
+    rejected = Channel(Exception?).new(1)
+    spawn do
+      declaration = ACP::Protocol::McpServerAcp.new("missing", "unknown-server")
+      server = ACP::Protocol::V2::McpServer.acp(declaration)
+      params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", mcp_servers: [server])
+      client.session_resume(params)
+      rejected.send(nil)
+    rescue ex
+      rejected.send(ex)
+    end
+    select
+    when queued = transport.queued.receive
+      queued.should eq("session/resume")
+    when timeout(2.seconds)
+      fail "resume did not reach the write queue"
+    end
+    agent.update("child", %({"sessionUpdate":"terminal_update","terminalId":"historical","capabilities":{"cancel":{}}}))
+    agent.update("child", %({"sessionUpdate":"replay_complete"}))
+    agent.update("child", %({"sessionUpdate":"terminal_update","terminalId":"live","capabilities":{"cancel":{}}}))
+    agent.inject_raw(%({"jsonrpc":"2.0","id":#{old_resume["id"]},"result":{}}))
+    choice_state_barrier(client, agent)
+    transport.ready_to_write.send(nil)
+    select
+    when error = rejected.receive
+      error.should be_a(ACP::InvalidStateError)
+    when timeout(2.seconds)
+      fail "resume preflight did not finish"
+    end
+    expect_raises(ACP::InvalidStateError) { client.terminal_cancel("child", "historical") }
+    client.terminal_cancel("child", "live")
+  ensure
+    transport.try(&.ready_to_write.close)
+    client.try(&.close)
+  end
+
+  it "discards provisional child grants after a late resume rejection" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["tool_call/cancel"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) do
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work"))
+    end
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"running"},"capabilities":{"cancel":{}}}))
+    transport.update("child", %({"sessionUpdate":"tool_call_update","toolCallId":"t","capabilities":{"cancel":{}}}))
+    client.request_timeout = 2.0
+    choice_state_barrier(client, transport)
+    client.subagent("child").not_nil!.cancel?.should be_false
+    client.subagent("child").not_nil!.state.should be_nil
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+
+    resume = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"error":{"code":-32800,"message":"Cancelled"}}))
+    choice_state_barrier(client, transport)
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+    expect_raises(ACP::InvalidStateError) { client.tool_call_cancel("child", "t") }
+    client.subagent("child").not_nil!.state.should be_nil
+  ensure
+    client.try(&.close)
+  end
+  {true, false}.each do |close_reply_first|
+    order = close_reply_first ? "before" : "after"
+    it "keeps confirmed resume grants when an earlier close replies #{order} the resume" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+      transport.replies["session/new"] = %("result":{"sessionId":"root"})
+      transport.replies["terminal/cancel"] = %("result":{})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work")
+      next_answer(transport)["method"].as_s.should eq("initialize")
+      next_answer(transport)["method"].as_s.should eq("session/new")
+
+      transport.update("root", %({"sessionUpdate":"terminal_update","terminalId":"old","capabilities":{"cancel":{}}}))
+      choice_state_barrier(client, transport)
+      next_answer(transport)["method"].as_s.should eq("_barrier")
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) { client.session_close("root") }
+      close = next_answer(transport)
+      close["method"].as_s.should eq("session/close")
+      next_answer(transport)["method"].as_s.should eq("$/cancel_request")
+
+      client.request_timeout = 0.1
+      outcome = Channel(Exception?).new(1)
+      seen = Channel(Nil).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        seen.send(nil) if note.update.session_update == "terminal_update"
+        nil
+      end
+      spawn do
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work"))
+        outcome.send(nil)
+      rescue ex
+        outcome.send(ex)
+      end
+      resume = next_answer(transport)
+      resume["method"].as_s.should eq("session/resume")
+      transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+      transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"running"},"capabilities":{"cancel":{}}}))
+      transport.update("child", %({"sessionUpdate":"terminal_update","terminalId":"t","capabilities":{"cancel":{}}}))
+      select
+      when seen.receive
+      when timeout(2.seconds)
+        fail "terminal advertisement did not arrive"
+      end
+      select
+      when outcome.receive
+        fail "the resume timed out before the provisional advertisement"
+      else
+      end
+      client.subagent("child").not_nil!.cancel?.should be_false
+      select
+      when error = outcome.receive
+        error.should be_a(ACP::RequestTimeoutError)
+      when timeout(2.seconds)
+        fail "resume did not time out"
+      end
+
+      commands = %([{"type":"command","name":"status","description":"Status"}])
+      resumed = %({"jsonrpc":"2.0","id":#{resume["id"]},"result":{"availableCommands":#{commands}}})
+      closed = %({"jsonrpc":"2.0","id":#{close["id"]},"result":{}})
+      replies = close_reply_first ? [closed, resumed] : [resumed, closed]
+      replies.each { |reply| transport.inject_raw(reply) }
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+      client.session_available_commands("root").not_nil!.first.name.should eq("status")
+      client.session_state("root").not_nil!.state.should eq("running")
+      expect_raises(ACP::InvalidStateError) { client.terminal_cancel("root", "old") }
+      client.subagent("child").not_nil!.state.not_nil!.state.should eq("running")
+      client.session_cancel("child")
+      client.terminal_cancel("child", "t")
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps an older pending resume gated if a newer retry is rejected" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work")
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+    first = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+
+    client.request_timeout = 2.0
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Retry failed"})
+    expect_raises(ACP::JsonRpcError, /Retry failed/) { client.session_resume(params) }
+    transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child","capabilities":{"cancel":{}}}))
+    choice_state_barrier(client, transport)
+    expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{first["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    client.session_state("root").not_nil!.state.should eq("running")
+    client.session_workspace("child").not_nil!.cwd.should eq("/work")
+    client.session_cancel("child")
+  ensure
+    client.try(&.close)
+  end
+  it "reserves a detached root ID while its timed-out resume is still on the wire" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"other"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/other")
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) do
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("saved", "/saved"))
+    end
+    resume = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+
+    client.request_timeout = 2.0
+    transport.update("other", %({"sessionUpdate":"subagent_update","sessionId":"saved","capabilities":{"cancel":{}}}))
+    choice_state_barrier(client, transport)
+    client.subagent("saved").should be_nil
+
+    transport.replies["session/new"] = %("result":{"sessionId":"saved"})
+    expect_raises(ACP::ProtocolError, /existing session ID/) { client.session_new("/competing") }
+    client.session_workspace("saved").should be_nil
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("saved").not_nil!.cwd.should eq("/saved")
+    client.subagent("saved").should be_nil
+  ensure
+    client.try(&.close)
+  end
+  {true, false}.each do |resume_reply_first|
+    order = resume_reply_first ? "before" : "after"
+    it "releases a deleted root when an older resume reply arrives #{order} deletion completes" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"delete":{}}}})
+      transport.replies["session/new"] = %("result":{"sessionId":"root"})
+      transport.replies["session/delete"] = %("result":{})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work")
+
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) do
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work"))
+      end
+      request = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+      reply = %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"availableCommands":[{"type":"command","name":"stale","description":"Stale"}]}})
+      if resume_reply_first
+        transport.before_reply = ->(method : String, _message : Hash(String, JSON::Any)) do
+          transport.inject_raw(reply) if method == "session/delete"
+          nil
+        end
+      end
+
+      client.request_timeout = 2.0
+      client.session_delete("root")
+      transport.inject_raw(reply) unless resume_reply_first
+      choice_state_barrier(client, transport)
+      client.session_state("root").should be_nil
+      client.session_workspace("root").should be_nil
+      client.session_available_commands("root").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v2 cancellation replies" do
+  it "accepts a terminal cancel result with wide optional metadata" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      advertised = Channel(Nil).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        advertised.send(nil) if note.update.session_update == "terminal_update"
+        nil
+      end
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+        setup = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"terminal_update","terminalId":"term","capabilities":{"cancel":{}}}}})
+        cancel = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{cancel["id"]},"result":{"_meta":{"wide":18446744073709551615}}})
+      end
+      client.initialize_connection
+      client.session_new("/work")
+      select
+      when advertised.receive
+      when timeout(2.seconds)
+        fail "the Agent's terminal advertisement did not arrive"
+      end
+      client.terminal_cancel("root", "term").meta.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end
