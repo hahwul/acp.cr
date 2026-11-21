@@ -44,7 +44,25 @@ Performs the ACP handshake with the agent. Transitions state from `Created` to `
 client.authenticate(method_id : String) : Nil
 ```
 
-Authenticates with the agent using the specified method. Call after `initialize_connection` if authentication is required.
+Authenticates with the agent using an advertised Agent-managed method. Call
+after `initialize_connection` if authentication is required. Use
+`client.typed_auth_methods` to inspect the available flows.
+
+### `#authenticate_terminal`
+
+`client.authenticate_terminal(method_id) { |method| ... }` runs an advertised
+terminal login before session setup. Set
+`auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true)` in the
+client capabilities when your `ProcessTransport` can run the configured
+agent directly in an interactive terminal. The block receives
+`TerminalAuthMethod#args` and `#env`. Present them to the user and return true
+to approve the invocation.
+
+Use the returned `Client` for subsequent calls. It connects with the original
+process configuration, initializes, and carries over the previous callbacks
+and timeouts. A declined or unsuccessful login raises
+`ACP::AuthenticationError` and leaves the original connection available.
+See [ACP Terminal Authentication](https://agentclientprotocol.com/protocol/v1/authentication#terminal-authentication).
 
 ### `#logout`
 
@@ -200,6 +218,7 @@ Sends a custom extension notification (no response expected).
 | `agent_capabilities` | `AgentCapabilities?` | Negotiated agent capabilities |
 | `agent_info` | `AgentInfo?` | Agent metadata |
 | `auth_methods` | `Array(JSON::Any)?` | Available authentication methods |
+| `typed_auth_methods` | `Array(AuthenticationMethod)` | Supported protocol and terminal descriptors |
 | `negotiated_protocol_version` | `UInt16?` | Negotiated protocol version |
 
 ## Configuration

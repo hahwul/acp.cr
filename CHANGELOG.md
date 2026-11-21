@@ -28,6 +28,8 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add typed ACP v1 authentication methods, opt-in terminal login with a user-approved invocation, and reconnection with the original process configuration.
+- Validate advertised authentication method IDs and logout support before sending authentication requests.
 - Support opted-in ACP v1 subagent sessions with nested associations, inherited workspace roots, current state, and capability-gated cancellation. Replay and failed attachment keep historical child state separate from active permissions.
 - Add ACP v1 wire types for subagent announcements, session-directed messages and chunks, and session references in tool calls.
 - Support opt-in ACP v1 plan operations via `PlanCapabilities`, `IdentifiedPlanUpdate`, and `PlanRemovedUpdate`. Plans can carry a complete checklist or a Markdown document and use IDs scoped to their session.

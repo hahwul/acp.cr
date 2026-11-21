@@ -14,6 +14,7 @@
 
 require "json"
 require "log"
+require "path"
 require "./errors"
 require "./protocol/types"
 
@@ -246,19 +247,23 @@ module ACP
       %({"method":"#{method}","params":"[REDACTED]"})
     end
 
-    # Same as `redact_frame` but operates on a raw incoming JSON string
-    # whose method is the request being responded to or notified. We
-    # only redact when the line is parseable AND its method is
-    # sensitive; otherwise pass through the original line.
+    # Redacts incoming authentication payloads and launch descriptors.
     private def redact_raw_frame(line : String) : String
       parsed = JSON.parse(line).as_h?
       return line unless parsed
       method = parsed["method"]?.try(&.as_s?)
-      return line unless method && SENSITIVE_METHODS.includes?(method)
+      if method && SENSITIVE_METHODS.includes?(method)
+        parsed["params"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("params")
+        parsed["result"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("result")
+        return parsed.to_json
+      end
 
-      parsed["params"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("params")
-      parsed["result"] = JSON::Any.new("[REDACTED]") if parsed.has_key?("result")
-      parsed.to_json
+      if (result = parsed["result"]?.try(&.as_h?)) && result.has_key?("authMethods")
+        result["authMethods"] = JSON::Any.new("[REDACTED]")
+        return parsed.to_json
+      end
+
+      line
     rescue
       "[REDACTED frame]"
     end
@@ -394,6 +399,13 @@ module ACP
     # Guards the single reap of the child process.
     @wait_mutex : Mutex = Mutex.new
 
+    @agent_command : String
+    @agent_args : Array(String)
+    @agent_env : Process::Env
+    @agent_directory : String
+    @agent_stderr : IO
+    @agent_buffer_size : Int32
+
     # Spawns an agent process with the given command and arguments,
     # and sets up the stdio transport.
     #
@@ -416,6 +428,16 @@ module ACP
       buffer_size : Int32 = 256,
       max_line_bytes : Int32 = DEFAULT_MAX_LINE_BYTES,
     )
+      @agent_command = command
+      @agent_args = args.dup
+      @agent_env = env.try(&.dup)
+      @agent_directory = if chdir
+                           Path[chdir].absolute? ? chdir : File.join(Dir.current, chdir)
+                         else
+                           Dir.current
+                         end
+      @agent_stderr = stderr
+      @agent_buffer_size = buffer_size
       @process = begin
         Process.new(
           command,
@@ -434,6 +456,32 @@ module ACP
       end
 
       super(@process.output, @process.input, buffer_size, max_line_bytes)
+    end
+
+    # Runs the configured Agent in a terminal with the approved login additions.
+    # Use when the configured invocation accepts arguments directly.
+    def run_terminal_authentication(method : Protocol::TerminalAuthMethod) : Process::Status
+      env = {} of String => String?
+      @agent_env.try &.each { |key, value| env[key] = value }
+      method.env.each { |key, value| env[key] = value }
+
+      Process.run(
+        @agent_command,
+        @agent_args + method.args,
+        env: env,
+        chdir: @agent_directory,
+        input: Process::Redirect::Inherit,
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit,
+      )
+    rescue ex : File::Error | IO::Error | ArgumentError
+      raise TransportError.new("Failed to start terminal authentication: #{ex.message}", ex)
+    end
+
+    # Starts another ACP connection using the original process configuration.
+    def reconnect : ProcessTransport
+      ProcessTransport.new(@agent_command, @agent_args, @agent_env, @agent_directory,
+        @agent_stderr, @agent_buffer_size, @max_line_bytes)
     end
 
     # Closes the transport and terminates the agent process if it's

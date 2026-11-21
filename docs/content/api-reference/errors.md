@@ -106,7 +106,10 @@ rescue ex : ACP::NoActiveSessionError
 
 ### ACP::AuthenticationError
 
-Authentication with the agent failed. The client never raises it itself: `authenticate` raises the agent's `JsonRpcError`, and a request that needs authentication fails with `-32000` (`auth_required?`).
+`authenticate_terminal` raises this error when the user declines the terminal
+invocation or the login process exits unsuccessfully. Agent-managed
+authentication errors arrive as `JsonRpcError`. An agent can use `-32000`
+(`auth_required?`) to request authentication.
 
 ```crystal
 rescue ex : ACP::AuthenticationError

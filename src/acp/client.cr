@@ -239,6 +239,8 @@ module ACP
     # Optional child sessions and their setup lifecycle. Guarded by @pending_mutex.
     @subagent_registry : SubagentRegistry?
 
+    @terminal_auth_running = Atomic(Bool).new(false)
+
     # An agent request whose handler hasn't answered yet. Compared by
     # identity, so a duplicate ID can't claim another request's answer.
     private class InFlightRequest
@@ -370,17 +372,96 @@ module ACP
     def authenticate(method_id : String, credentials : JSON::Any? = nil) : Nil
       ensure_state(ClientState::Initialized, "authenticate")
 
+      # A terminal descriptor can never be passed to the protocol method.
+      # Inspect its discriminator even if its other fields could not decode.
+      method = @auth_methods.try(&.find { |entry| entry.as_h?.try(&.["id"]?).try(&.as_s?) == method_id })
+      raise InvalidStateError.new("Authentication method #{method_id.inspect} was not advertised") unless method
+      if (kind = method["type"]?) && !kind.raw.nil? && kind.as_s? != "agent"
+        raise InvalidStateError.new("Authentication method #{method_id.inspect} requires a different flow")
+      end
+
       params = Protocol::AuthenticateParams.new(method_id, credentials)
       send_request(Protocol::AgentMethod::AUTHENTICATE, params)
 
       ClientLog.info { "Authenticated with method: #{method_id}" }
     end
 
+    # Decoded authentication methods from the initialize handshake.
+    def typed_auth_methods : Array(Protocol::AuthenticationMethod)
+      Protocol.typed_auth_methods(@auth_methods)
+    end
+
+    # Runs an advertised terminal login, then returns a new initialized client.
+    # The approval block receives the additional arguments and environment to
+    # present to the user. Declining or a failed login preserves this connection.
+    # Requires a ProcessTransport, terminal auth capability, and no active session.
+    def authenticate_terminal(method_id : String, &approve : Protocol::TerminalAuthMethod -> Bool) : Client
+      _, started = @terminal_auth_running.compare_and_set(false, true)
+      raise InvalidStateError.new("Terminal authentication is already in progress") unless started
+
+      begin
+        authenticate_terminal_flow(method_id, approve)
+      ensure
+        @terminal_auth_running.set(false)
+      end
+    end
+
+    private def authenticate_terminal_flow(method_id : String, approve : Protocol::TerminalAuthMethod -> Bool) : Client
+      unless @state == ClientState::Initialized
+        raise InvalidStateError.new("Terminal authentication requires an initialized connection before session setup")
+      end
+      unless @client_capabilities.auth.try(&.terminal?) && (process_transport = @transport.as?(ProcessTransport))
+        raise InvalidStateError.new("Terminal authentication requires an advertised capability and a process transport")
+      end
+
+      method = typed_auth_methods.find { |candidate| candidate.id == method_id }.as?(Protocol::TerminalAuthMethod)
+      raise InvalidStateError.new("Unknown terminal authentication method #{method_id.inspect}") unless method
+      raise AuthenticationError.new("Terminal authentication declined") unless approve.call(method)
+      ensure_terminal_auth_state
+
+      status = process_transport.run_terminal_authentication(method)
+      raise AuthenticationError.new("Terminal authentication exited unsuccessfully") unless status.success?
+      ensure_terminal_auth_state
+
+      replacement = Client.new(process_transport.reconnect, @client_info.name, @client_info.version, @client_capabilities)
+      replacement.request_timeout = @request_timeout
+      replacement.prompt_timeout = @prompt_timeout
+      replacement.on_update = @on_update
+      replacement.on_agent_request = @on_agent_request
+      replacement.on_notification = @on_notification
+      replacement.on_disconnect = @on_disconnect
+      replacement.on_read_text_file = @on_read_text_file
+      replacement.on_write_text_file = @on_write_text_file
+      replacement.on_create_terminal = @on_create_terminal
+      replacement.on_terminal_output = @on_terminal_output
+      replacement.on_release_terminal = @on_release_terminal
+      replacement.on_wait_for_terminal_exit = @on_wait_for_terminal_exit
+      replacement.on_kill_terminal = @on_kill_terminal
+      replacement.on_create_elicitation = @on_create_elicitation
+      replacement.on_elicitation_complete = @on_elicitation_complete
+
+      begin
+        replacement.initialize_connection
+        ensure_terminal_auth_state
+        close
+      rescue ex
+        replacement.close rescue nil
+        raise ex
+      end
+
+      replacement
+    end
+
+    private def ensure_terminal_auth_state : Nil
+      unless @state == ClientState::Initialized
+        raise InvalidStateError.new("Client state changed during terminal authentication")
+      end
+    end
+
     # Ends the current authenticated state with the agent (`logout`).
     #
-    # Requires the agent to advertise `agentCapabilities.auth.logout`;
-    # callers MUST check `agent_capabilities.try(&.auth).try(&.logout?)`
-    # first. Afterwards, new sessions that need authentication require
+    # Requires the agent to advertise `agentCapabilities.auth.logout`.
+    # Afterwards, new sessions that need authentication require
     # `authenticate` again, and active sessions may start failing with
     # auth errors. Local client state is left unchanged.
     #
@@ -388,6 +469,9 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
     def logout : Protocol::LogoutResult
       ensure_state(ClientState::Initialized, "logout")
+      unless @agent_capabilities.try(&.auth).try(&.logout?)
+        raise InvalidStateError.new("The Agent did not advertise logout")
+      end
 
       raw_result = send_request(Protocol::AgentMethod::LOGOUT, Protocol::LogoutParams.new)
       result = decode_result(Protocol::LogoutResult, raw_result, Protocol::AgentMethod::LOGOUT)
