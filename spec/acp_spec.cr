@@ -66,6 +66,74 @@ describe "ACP v2 Preview initialization" do
   end
 end
 
+describe "ACP v2 Preview session types" do
+  it "creates a session with just a working directory" do
+    params = ACP::Protocol::V2::SessionNewParams.new("/work")
+    request = ACP::Protocol.build_request(1_i64, ACP::Protocol::V2::AgentMethod::SESSION_NEW, params)
+    request["params"].should eq(JSON.parse(%({"cwd":"/work"})))
+    result = ACP::Protocol::V2::SessionNewResult.from_json(%({"sessionId":"s","availableCommands":[{"type":"_next","name":"inspect","description":"Inspect","payload":1}]}))
+    result.session_id.should eq("s")
+    result.config_options.should be_empty
+    result.available_commands.first["payload"].should eq(1)
+  end
+
+  it "encodes tagged MCP transports and retains future transport settings" do
+    base_server = ACP::Protocol::McpServerStdio.new("local", "/work/mcp")
+    server = ACP::Protocol::V2::McpServer.stdio(base_server)
+    server.stdio_config.should eq(base_server)
+    params = ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [server])
+    JSON.parse(params.to_json)["mcpServers"][0]["type"].should eq("stdio")
+
+    base_http = ACP::Protocol::McpServerHttp.new("service", "https://example.test/mcp")
+    http = ACP::Protocol::V2::McpServer.http(base_http)
+    http.http_config.should eq(base_http)
+
+    wire = JSON.parse(%({"type":"_future","settings":{"endpoint":"custom"}}))
+    unknown = ACP::Protocol::V2::McpServer.from_json(wire.to_json)
+    unknown.http_config.should be_nil
+    JSON.parse(unknown.to_json).should eq(wire)
+  end
+
+  it "resumes with the start cursor and preserves future replay cursors" do
+    params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work",
+      replay_from: ACP::Protocol::V2::ReplayFrom.start,
+      additional_directories: ["/docs"])
+    JSON.parse(params.to_json).should eq(JSON.parse(%({"sessionId":"s","cwd":"/work","replayFrom":{"type":"start"},"additionalDirectories":["/docs"]})))
+
+    wire = JSON.parse(%({"sessionId":"s","cwd":"/work","replayFrom":{"type":"_bookmark","at":{"segment":8}}}))
+    decoded = ACP::Protocol::V2::SessionResumeParams.from_json(wire.to_json)
+    decoded.replay_from.not_nil!.cursor_type.should eq("_bookmark")
+    JSON.parse(decoded.to_json).should eq(wire)
+  end
+
+  it "sends idempotency keys and reads the inserted message ID from the acknowledgement" do
+    blocks = [ACP::Protocol::TextContentBlock.new("Review tests")] of ACP::Protocol::ContentBlock
+    params = ACP::Protocol::V2::SessionPromptParams.new("s", blocks, idempotency_key: "once")
+    request = ACP::Protocol.build_request(1_i64, ACP::Protocol::V2::AgentMethod::SESSION_PROMPT, params)
+    request["params"].should eq(JSON.parse(%({"sessionId":"s","prompt":[{"type":"text","text":"Review tests"}],"idempotencyKey":"once"})))
+    result = ACP::Protocol::V2::SessionPromptResult.from_json(%({"messageId":"inserted-message"}))
+    result.message_id.should eq("inserted-message")
+    expect_raises(JSON::SerializableError) do
+      ACP::Protocol::V2::SessionPromptResult.from_json(%({"stopReason":"end_turn"}))
+    end
+  end
+
+  it "encodes select and boolean changes with the v2 configuration discriminators" do
+    selection = ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "model", "fast")
+    JSON.parse(selection.to_json).should eq(JSON.parse(%({"sessionId":"s","configId":"model","type":"id","value":"fast"})))
+    toggle = ACP::Protocol::V2::SessionSetConfigOptionParams.new("s", "feature", false)
+    JSON.parse(toggle.to_json).should eq(JSON.parse(%({"sessionId":"s","configId":"feature","type":"boolean","value":false})))
+
+    future = JSON.parse(%({"sessionId":"s","configId":"example","type":"_next","value":2,"extra":"retained"}))
+    parsed = ACP::Protocol::V2::SessionSetConfigOptionParams.from_json(future.to_json)
+    JSON.parse(parsed.to_json).should eq(future)
+
+    wire = JSON.parse(%({"configOptions":[{"configId":"example","name":"Example","type":"_future","data":{"value":"next"}}]}))
+    result = ACP::Protocol::V2::SessionSetConfigOptionResult.from_json(wire.to_json)
+    JSON.parse(result.to_json).should eq(wire)
+  end
+end
+
 describe "ACP authentication descriptors" do
   it "decodes agent and terminal methods and keeps unknown wire entries accessible" do
     response = ACP::Protocol::InitializeResult.from_json(%({

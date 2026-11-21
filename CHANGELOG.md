@@ -29,6 +29,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add ACP v2 Preview session setup, resume and replay, and prompt acknowledgement wire types.
 - Add namespaced ACP v2 Preview wire types for initialization, authentication, capabilities, and unsupported-version errors.
 - Add typed ACP v1 authentication methods, opt-in terminal login with a user-approved invocation, and reconnection with the original process configuration.
 - Validate advertised authentication method IDs and logout support before sending authentication requests.
