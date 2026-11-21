@@ -177,4 +177,4 @@ When adding new features:
 - **Extension method prefix**: Extension methods use `_` prefix on the wire. Use `Protocol::ExtensionMethod.add_prefix` / `strip_prefix` rather than manual string manipulation. The `ext_method` / `ext_notification` APIs handle prefixing automatically.
 - **SessionUpdate dispatch**: The `SessionUpdate` struct uses `session_update` as a discriminator. When adding new update types, register them in the `from_json_object_key` mapping in `updates.cr`.
 - **Channel lifecycle**: Always handle `Channel::ClosedError` when sending/receiving on channels, as transports may close at any time.
-- **Process cleanup**: `ProcessTransport#close` sends a graceful termination signal and waits 2 seconds before force-killing. Ensure `client.close` is called in all exit paths.
+- **Process cleanup**: `ProcessTransport#close` closes stdin first and drains stdout during shutdown. It sends SIGTERM after one second and SIGKILL two seconds later if the process is still running. Ensure `client.close` is called in all exit paths.
