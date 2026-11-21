@@ -54,6 +54,7 @@ module ACP
     @setup_by_session = {} of String => SetupRequest
     @closed_roots = Set(String).new
     @cancellable_entities = Set(Tuple(String, String, String)).new
+    @skill_names : Hash(String, Set(String))?
 
     def initialize(@v2 : Bool = false)
     end
@@ -106,6 +107,28 @@ module ACP
     def known_session?(session_id : String) : Bool
       @workspace.has_key?(session_id) || @children.has_key?(session_id) ||
         @closed_roots.includes?(session_id) || @setup_by_session.has_key?(session_id)
+    end
+
+    def enable_skill_commands : Nil
+      @skill_names = {} of String => Set(String)
+    end
+
+    def skill_advertised?(session_id : String, name : String) : Bool
+      !setup_for(session_id) && (@skill_names.try(&.[session_id]?).try(&.includes?(name)) || false)
+    end
+
+    def observe_available_commands(session_id : String, update : Hash(String, JSON::Any), update_json : String?) : Nil
+      return unless @skill_names && @workspace.has_key?(session_id) && current_updates?(session_id)
+
+      listing = Protocol::V2::AvailableCommandsUpdate.from_json(update_json || Protocol::WireFrame.encode(update))
+      replace_skill_names(session_id, listing)
+    rescue JSON::Error
+    end
+
+    private def replace_skill_names(session_id : String, listing : Protocol::V2::AvailableCommandList) : Nil
+      if names = @skill_names
+        names[session_id] = listing.typed_available_skills.map(&.name).to_set
+      end
     end
 
     def request_sent(id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
@@ -161,15 +184,17 @@ module ACP
         return unless sid
 
         @setup_by_session.delete(sid)
-        if valid_attach_result?(method, Protocol::WireFrame.result_json(response, frame))
+        if attached = attach_result(method, Protocol::WireFrame.result_json(response, frame))
           @closed_roots.delete(sid)
           @workspace[sid] = workspace if workspace
+          replace_skill_names(sid, attached) if attached.is_a?(Protocol::V2::SessionResumeResult)
         else
           clear_descendant_runtime(sid)
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
-        if workspace && (created_id = created_session_id(Protocol::WireFrame.result_json(response, frame))) && created_id != sid
-          @workspace[created_id] = workspace
+        if workspace && (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
+          @workspace[created.session_id] = workspace
+          replace_skill_names(created.session_id, created) if created.is_a?(Protocol::V2::SessionNewResult)
         end
       when Protocol::AgentMethod::SESSION_DELETE
         if sid && !frame && closed_session?(response, raw_result)
@@ -189,6 +214,7 @@ module ACP
       return if child?(session_id)
 
       @closed_roots.add(session_id) if @workspace.delete(session_id) || @children.any? { |_, child| child.parent_id == session_id }
+      @skill_names.try(&.delete(session_id))
       clear_descendant_runtime(session_id)
     end
 
@@ -199,6 +225,7 @@ module ACP
       @setup_by_session.clear
       @closed_roots.clear
       @cancellable_entities.clear
+      @skill_names.try(&.clear)
     end
 
     # Observes v2 capabilities at the wire boundary. Each replaying session
@@ -324,8 +351,8 @@ module ACP
       @cancellable_entities.reject! { |entity| entity[0] == session_id || children.includes?(entity[0]) }
     end
 
-    private def valid_attach_result?(method : String, result : String?) : Bool
-      return false unless result
+    private def attach_result(method : String, result : String?)
+      return unless result
 
       if @v2
         Protocol::V2::SessionResumeResult.from_json(result)
@@ -334,18 +361,17 @@ module ACP
       else
         Protocol::SessionResumeResult.from_json(result)
       end
-      true
     rescue JSON::Error
-      false
+      nil
     end
 
-    private def created_session_id(result : String?) : String?
+    private def create_result(result : String?)
       return unless result
 
       if @v2
-        Protocol::V2::SessionNewResult.from_json(result).session_id
+        Protocol::V2::SessionNewResult.from_json(result)
       else
-        Protocol::SessionNewResult.from_json(result).session_id
+        Protocol::SessionNewResult.from_json(result)
       end
     rescue JSON::Error
       nil

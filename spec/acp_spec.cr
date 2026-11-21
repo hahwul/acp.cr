@@ -7208,7 +7208,7 @@ describe "ACP draft session options" do
   end
 end
 
-private class QueuedForkTransport < V2TestTransport
+private class QueuedRequestTransport < V2TestTransport
   getter queued = Channel(Nil).new(1)
   getter ready_to_write = Channel(Nil).new
 
@@ -7422,7 +7422,7 @@ describe "ACP draft session fork" do
   end
 
   it "rechecks the cursor grant when a queued fork reaches the writer" do
-    transport = QueuedForkTransport.new
+    transport = QueuedRequestTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{}}}})
     client = ACP::V2::Client.new(transport)
     client.initialize_connection
@@ -7728,6 +7728,242 @@ describe "ACP draft prompt suggestions" do
       feed.try(&.close)
       outgoing.try(&.close)
     end
+  end
+end
+
+private def v2_skill_client(transport : V2TestTransport) : ACP::V2::Client
+  commands = ACP::Protocol::V2::CommandsCapabilities.new(skill: ACP::Protocol::V2::CommandsSkillCapabilities.new)
+  session = ACP::Protocol::V2::ClientSessionCapabilities.new(commands: commands)
+  ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(session: session))
+end
+
+private def v2_skill_prompt(session_id : String, name : String, key : String? = nil) : ACP::Protocol::V2::SessionPromptParams
+  blocks = [ACP::Protocol::V2::SkillReference.new(name), ACP::Protocol::TextContentBlock.new("Review the fixture")] of ACP::Protocol::V2::PromptContentBlock
+  ACP::Protocol::V2::SessionPromptParams.new(session_id, blocks, idempotency_key: key)
+end
+
+describe "ACP v2 draft agent skills" do
+  it "models opt-in command and prompt capabilities" do
+    caps = ACP::Protocol::V2::ClientCapabilities.from_json(%({"session":{"commands":{"skill":{"_meta":false}},"promptSuggestions":{}}}))
+    caps.session.not_nil!.commands.not_nil!.skill.not_nil!.meta.should be_nil
+    JSON.parse(caps.to_json)["session"].should eq(JSON.parse(%({"commands":{"skill":{}},"promptSuggestions":{}})))
+    {"null", "true", "[]"}.each do |value|
+      caps = ACP::Protocol::V2::ClientCapabilities.from_json(%({"session":{"commands":{"skill":#{value}}}}))
+      caps.session.not_nil!.commands.not_nil!.skill.should be_nil
+    end
+    leading = ACP::Protocol::V2::PromptCapabilities.from_json(%({"skill":{"inline":true}}))
+    leading.skill.not_nil!.inline.should be_nil
+    inline = ACP::Protocol::V2::PromptCapabilities.from_json(%({"skill":{"inline":{}}}))
+    inline.skill.not_nil!.inline.should_not be_nil
+  end
+
+  it "projects known skills and skips ambiguous names in setup and command updates" do
+    commands = <<-JSON
+      [
+        {"type":"command","name":"shared","description":"A command"},
+        {"type":"skill","name":"shared","description":"Ambiguous"},
+        {"type":"skill","name":"needs space","description":"Invalid"},
+        {"type":"skill","name":"broken"},
+        {"type":"skill","name":18446744073709551615},
+        {"type":"_future","name":"next","description":"An extension","futureField":true},
+        {"type":"skill","name":"notes","description":"Notes","path":"C:/skills/notes/SKILL.md","_meta":{"example.test/source":"built-in"}},
+        {"type":"skill","name":"relative","description":"Relative path","path":"./SKILL.md"},
+        {"type":"skill","name":"wide","description":"Wide optional fields","path":18446744073709551615,"_meta":{"counter":18446744073709551615}}
+      ]
+      JSON
+    setup = ACP::Protocol::V2::SessionNewResult.from_json(%({"sessionId":"s","availableCommands":#{commands}}))
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"available_commands_update","availableCommands":#{commands}})).typed.as(ACP::Protocol::V2::AvailableCommandsUpdate)
+    {setup, update}.each do |value|
+      skills = value.typed_available_skills
+      skills.map(&.name).should eq(["notes", "relative", "wide"])
+      skills[0].path.should eq("C:/skills/notes/SKILL.md")
+      skills[0].meta.not_nil!["example.test/source"].should eq("built-in")
+      skills[1].path.should be_nil
+      skills[2].path.should be_nil
+      skills[2].meta.should be_nil
+      value.typed_available_commands.select(&.slash_command?).map(&.name).should eq(["shared"])
+      value.typed_available_commands.find!(&.type.==("_future")).json_unmapped["futureField"].should eq(true)
+    end
+  end
+
+  it "decodes user-message skill references without changing future block payloads" do
+    message = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"user_message","messageId":"m","content":[{"type":"skill","name":"plugin:notes","_meta":{"example.test/id":1}},{"type":"skill","name":42},{"type":"_future","value":true}]})).typed.as(ACP::Protocol::V2::MessageUpdate)
+    skill = message.skill_references.first
+    skill.name.should eq("plugin:notes")
+    skill.meta.not_nil!["example.test/id"].should eq(1)
+    message.skill_references.size.should eq(1)
+    message.content.not_nil!.last["value"].should eq(true)
+
+    chunk = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"user_message_chunk","messageId":"m","content":{"type":"skill","name":"notes"}})).typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+    chunk.skill_reference.not_nil!.name.should eq("notes")
+    agent = ACP::Protocol::V2::MessageChunkUpdate.new("agent_message_chunk", "m", chunk.content)
+    agent.skill_reference.should be_nil
+    expect_raises(JSON::ParseException) { ACP::Protocol::ContentBlock.from_json(chunk.content.to_json) }
+  end
+
+  it "guards leading-only skills and sends exact keyed retries after command replacement" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"notes","description":"Notes"}]})
+    transport.replies["session/prompt"] = %("result":{"messageId":"message"})
+    client = v2_skill_client(transport)
+    updates = Channel(ACP::Protocol::V2::AvailableCommandsUpdate).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      if update = note.update.typed.as?(ACP::Protocol::V2::AvailableCommandsUpdate)
+        updates.send(update)
+      end
+      nil
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)["params"]["capabilities"]["session"]["commands"]["skill"].should eq(JSON.parse("{}"))
+    client.session_new("/work").typed_available_skills.first.name.should eq("notes")
+    take_v2_frame(transport.outgoing)
+    prompt = v2_skill_prompt("s", "notes")
+    expect_raises(ArgumentError, /first prompt block/) { client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("s", prompt.prompt.reverse)) }
+    expect_raises(ArgumentError, /Malformed/) do
+      client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("s", [JSON.parse(%({"type":"skill","name":42}))]))
+    end
+    expect_raises(ACP::InvalidStateError, /not currently advertised/) { client.session_prompt(v2_skill_prompt("other", "notes")) }
+    expect_raises(ACP::InvalidStateError, /not currently advertised/) { client.session_prompt(v2_skill_prompt("s", "missing")) }
+    expect_raises(ACP::InvalidStateError, /not currently advertised/) { client.session_prompt(v2_skill_prompt("s", "missing", "fresh")) }
+    expect_raises(ArgumentError, /original idempotency key/) { client.session_prompt(prompt, retry_submission: true) }
+    client.session_prompt(prompt).message_id.should eq("message")
+    take_v2_frame(transport.outgoing)["params"]["prompt"][0].should eq(JSON.parse(%({"type":"skill","name":"notes"})))
+    keyed = v2_skill_prompt("s", "notes", "same-input")
+    client.session_prompt(keyed).message_id.should eq("message")
+    original = take_v2_frame(transport.outgoing)["params"]
+
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[]}))
+    take_v2_frame(updates).typed_available_skills.should be_empty
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(prompt) }
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(keyed) }
+    client.session_prompt(keyed, retry_submission: true).message_id.should eq("message")
+    take_v2_frame(transport.outgoing)["params"].should eq(original)
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps inline skill lists scoped across setup, preview, fork, and close" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"fork":{},"options":{},"prompt":{"skill":{"inline":{}}}}}})
+    first = %({"type":"skill","name":"notes","description":"Notes"})
+    second = %({"type":"skill","name":"chart","description":"Chart"})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[#{first},#{second}]})
+    transport.replies["session/options"] = %("result":{"availableCommands":[{"type":"skill","name":"preview","description":"Preview"}]})
+    transport.replies["session/fork"] = %("result":{"sessionId":"branch"})
+    transport.replies["session/resume"] = %("result":{"availableCommands":[#{second}]})
+    transport.replies["session/close"] = %("result":{})
+    transport.replies["session/prompt"] = %("result":{"messageId":"message"})
+    client = v2_skill_client(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    blocks = [ACP::Protocol::TextContentBlock.new("Use"), ACP::Protocol::V2::SkillReference.new("notes"),
+              ACP::Protocol::V2::SkillReference.new("chart")] of ACP::Protocol::V2::PromptContentBlock
+    client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("s", blocks))
+    client.session_options(ACP::Protocol::V2::SessionOptionsParams.new("/work", session_id: "s")).typed_available_skills.first.name.should eq("preview")
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "preview")) }
+    client.session_fork("s", "/branch")
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("branch", "notes")) }
+    client.session_prompt(v2_skill_prompt("s", "notes"))
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "notes")) }
+    client.session_prompt(v2_skill_prompt("s", "chart"))
+    client.session_close("s")
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "chart")) }
+  ensure
+    client.try(&.close)
+  end
+
+  it "requires both peers to enable skill references" do
+    {true, false}.each do |advertise|
+      transport = V2TestTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":#{advertise ? "null" : "{}"}}}}})
+      client = advertise ? v2_skill_client(transport) : ACP::V2::Client.new(transport)
+      begin
+        client.initialize_connection
+        expect_raises(ACP::InvalidStateError, /did not advertise/) { client.session_prompt(v2_skill_prompt("s", "notes", "retry")) }
+        transport.sent_messages.size.should eq(1)
+      ensure
+        client.close
+      end
+    end
+  end
+
+  it "keeps live command replacements received after the replay marker if resume fails" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"notes","description":"Notes"}]})
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Resume failed"})
+    transport.replies["session/prompt"] = %("result":{"messageId":"message"})
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"skill","name":"history","description":"History"}]}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"skill","name":"live","description":"Live"}]}))
+      end
+      nil
+    end
+    client = v2_skill_client(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    resume = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    expect_raises(ACP::JsonRpcError) { client.session_resume(resume) }
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "history")) }
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "notes")) }
+    client.session_prompt(v2_skill_prompt("s", "live")).message_id.should eq("message")
+
+    transport.replies["session/resume"] = %("result":{})
+    client.session_resume(resume)
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "live")) }
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps an existing session's list when another setup reuses its ID" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"notes","description":"Notes"}]})
+    transport.replies["session/prompt"] = %("result":{"messageId":"message"})
+    client = v2_skill_client(transport)
+    client.initialize_connection
+    client.session_new("/workspace")
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"other","description":"Other"}]})
+    expect_raises(ACP::ProtocolError, /existing session ID/) { client.session_new("/wrong") }
+    client.session_workspace("s").not_nil!.cwd.should eq("/workspace")
+    expect_raises(ACP::InvalidStateError) { client.session_prompt(v2_skill_prompt("s", "other")) }
+    client.session_prompt(v2_skill_prompt("s", "notes")).message_id.should eq("message")
+  ensure
+    client.try(&.close)
+  end
+
+  it "rechecks queued references when the Agent withdraws the skill" do
+    transport = QueuedRequestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"skill":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"skill","name":"notes","description":"Notes"}]})
+    client = v2_skill_client(transport)
+    client.initialize_connection
+    client.session_new("/work")
+    observed = Channel(Nil).new(1)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(nil)
+      nil
+    end
+    failure = Channel(Exception?).new(1)
+    spawn do
+      client.session_prompt(v2_skill_prompt("s", "notes"))
+      failure.send(nil)
+    rescue ex
+      failure.send(ex)
+    end
+    take_v2_frame(transport.queued)
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[]}))
+    take_v2_frame(observed)
+    transport.ready_to_write.send(nil)
+    take_v2_frame(failure).should be_a(ACP::InvalidStateError)
+    transport.sent_messages.size.should eq(2)
+  ensure
+    client.try(&.close)
+    transport.try(&.ready_to_write.close)
   end
 end
 

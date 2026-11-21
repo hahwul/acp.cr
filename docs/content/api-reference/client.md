@@ -432,6 +432,32 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+## Agent Skills (v2 draft)
+
+Advertise `commands: CommandsCapabilities.new(skill: CommandsSkillCapabilities.new)`
+on `Protocol::V2::ClientSessionCapabilities` and pass it as `session:` on
+the v2 client capabilities. Use `typed_available_skills` on a session setup
+result or a typed `AvailableCommandsUpdate` to read the available skills.
+Each setup result or update replaces the session's list. A `session_options`
+result previews the list. Each skill has a name, description, and optional
+path on the Agent's filesystem.
+
+When the user selects a skill, put its name in
+`Protocol::V2::SkillReference.new(name)` and send it through
+`SessionPromptParams.new`. Use `Array(Protocol::V2::PromptContentBlock)` to
+mix references with other typed content. An Agent that advertises
+`session.prompt.skill` accepts one reference as the first block. With
+`session.prompt.skill.inline`, references can appear anywhere.
+
+The client checks the session's current list before sending a new skill
+reference. To retry a keyed submission, call
+`session_prompt(original_params, retry_submission: true)` with the same
+prompt and `idempotency_key`. The Agent can then acknowledge an earlier
+submission after the command list has changed.
+In user-message updates, `skill_references` and `skill_reference` expose
+references in full messages and chunks, including during replay.
+[ACP Agent Skills Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/agent-skills.mdx)
+
 ## Prompt suggestions (draft)
 
 Opt in by setting `prompt_suggestions: PromptSuggestionsCapabilities.new`

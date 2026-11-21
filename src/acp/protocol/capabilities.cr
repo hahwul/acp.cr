@@ -142,7 +142,7 @@ module ACP
       property cursors : SessionCursorsCapabilities?
 
       # Draft prompt suggestions presented to the user.
-      @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsCapabilities))]
+      @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsCapabilities))]
       property prompt_suggestions : PromptSuggestionsCapabilities?
 
       # Extension metadata.
