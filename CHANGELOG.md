@@ -33,6 +33,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Expose draft ACP token usage from v1 prompt results and v2 idle state snapshots, with full unsigned 64-bit counters.
 - Add draft ACP Proxy Chains for v1 and v2 Preview. `ACP::Conductor` routes terminal and nested chains, and `ACP::Proxy` can forward or handle messages in either direction.
 - Host native MCP servers on ACP v1 and v2 connections with request-scoped notifications, cancellation, and exact JSON.
 - Configure draft ACP v1 and v2 model providers with typed discovery, replacement, and disable requests.

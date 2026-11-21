@@ -9293,3 +9293,125 @@ describe ACP::Conductor do
     end
   end
 end
+
+describe ACP::Protocol::Usage do
+  it "handles optional counts and preserves prompt-result constructor compatibility" do
+    metadata = {"test" => JSON::Any.new(true)}
+    usage = ACP::Protocol::Usage.new(13_u64, 10_u64, 3_u64, cached_write_tokens: 0_u64, meta: metadata)
+    result = ACP::Protocol::SessionPromptResult.new("end_turn", metadata, usage: usage)
+    decoded = ACP::Protocol::SessionPromptResult.from_json(result.to_json)
+    decoded.stop_reason.should eq("end_turn")
+    decoded.meta.should eq(metadata)
+    decoded.usage.not_nil!.cached_write_tokens.should eq(0_u64)
+    decoded.usage.not_nil!.meta.should eq(metadata)
+
+    parsed = ACP::Protocol::Usage.from_json(%({"totalTokens":3,"inputTokens":2,"outputTokens":1,"thoughtTokens":-1,"cachedReadTokens":"4","cachedWriteTokens":18446744073709551616}))
+    parsed.thought_tokens.should be_nil
+    parsed.cached_read_tokens.should be_nil
+    parsed.cached_write_tokens.should be_nil
+
+    [%({}), "null", %({"totalTokens":1,"inputTokens":1}), %({"totalTokens":-1,"inputTokens":1,"outputTokens":0}), %({"totalTokens":18446744073709551616,"inputTokens":1,"outputTokens":0})].each do |json|
+      response = ACP::Protocol::SessionPromptResult.from_json(%({"stopReason":"end_turn","usage":#{json}}))
+      response.stop_reason.should eq("end_turn")
+      response.usage.should be_nil
+    end
+  end
+
+  it "decodes wide usage from an ordinary v1 prompt response over stdio" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 2.0
+    client.prompt_timeout = 2.0
+    outcome = Channel(Exception?).new(1)
+    spawn do
+      init = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":1}})
+      setup = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}})
+      prompt = JSON.parse(outgoing.gets.not_nil!)
+      prompt["method"].as_s.should eq("session/prompt")
+      feed.puts %({"jsonrpc":"2.0","id":#{prompt["id"]},"result":{"stopReason":"end_turn","usage":{"totalTokens":18446744073709551615,"inputTokens":9223372036854775808,"outputTokens":10,"thoughtTokens":4,"cachedReadTokens":0,"cachedWriteTokens":null}}})
+      outcome.send(nil)
+    rescue ex
+      outcome.send(ex)
+    end
+
+    client.initialize_connection
+    session = ACP::Session.create(client, cwd: "/work")
+    result = session.prompt("hello")
+    result.stop_reason.should eq("end_turn")
+    usage = result.usage.not_nil!
+    usage.total_tokens.should eq(UInt64::MAX)
+    usage.input_tokens.should eq(9223372036854775808_u64)
+    usage.output_tokens.should eq(10_u64)
+    usage.thought_tokens.should eq(4_u64)
+    usage.cached_read_tokens.should eq(0_u64)
+    usage.cached_write_tokens.should be_nil
+    error = take_v2_frame(outcome)
+    raise error if error
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "exposes exact v2 usage only on idle snapshots and preserves repeated updates" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::V2::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 2.0
+    updates = Channel(ACP::Protocol::V2::StateUpdate | ACP::Protocol::V2::SubagentUpdate).new(4)
+    client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+      case typed = update.update.typed
+      when ACP::Protocol::V2::StateUpdate, ACP::Protocol::V2::SubagentUpdate
+        updates.send(typed)
+      end
+      nil
+    end
+    outcome = Channel(Exception?).new(1)
+    spawn do
+      init = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+      setup = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"s"}})
+      notification = %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn","usage":{"totalTokens":18446744073709551615,"inputTokens":2,"outputTokens":1}}}})
+      feed.puts notification
+      feed.puts notification
+      nested_meta = "[" * 110 + "true" + "]" * 110
+      state = %("state":"idle","usage":{"totalTokens":3,"inputTokens":2,"outputTokens":1,"_meta":{"nested":#{nested_meta}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"subagent_update","sessionId":"child","state":{#{state}}}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"child","update":{"sessionUpdate":"state_update",#{state}}}})
+      outcome.send(nil)
+    rescue ex
+      outcome.send(ex)
+    end
+    client.initialize_connection
+    client.session_new("/work")
+    2.times do
+      state = take_v2_frame(updates).as(ACP::Protocol::V2::StateUpdate)
+      state.stop_reason.should eq("end_turn")
+      state.usage.not_nil!.total_tokens.should eq(UInt64::MAX)
+      state.to_json.should contain(%("totalTokens":18446744073709551615))
+    end
+    subagent = take_v2_frame(updates).as(ACP::Protocol::V2::SubagentUpdate)
+    subagent.state.not_nil!.usage.not_nil!.total_tokens.should eq(3_u64)
+    child = take_v2_frame(updates).as(ACP::Protocol::V2::StateUpdate)
+    child.usage.not_nil!.meta.not_nil!.has_key?("nested").should be_true
+    error = take_v2_frame(outcome)
+    raise error if error
+
+    idle = ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"idle","usage":{"totalTokens":3,"inputTokens":2,"outputTokens":1}}))
+    idle.usage.not_nil!.total_tokens.should eq(3_u64)
+    running = ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"running","usage":{"totalTokens":3,"inputTokens":2,"outputTokens":1}}))
+    running.usage.should be_nil
+    empty = ACP::Protocol::V2::StateSnapshot.from_json(%({"state":"idle","usage":null}))
+    empty.usage.should be_nil
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+end
