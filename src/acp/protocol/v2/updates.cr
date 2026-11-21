@@ -1,4 +1,5 @@
 require "./initialization"
+require "./session_updates"
 require "./tool_updates"
 
 module ACP
@@ -31,13 +32,9 @@ module ACP
 
       # Foreground and background state snapshot for a session. Variant fields
       # are retained for forward compatibility.
-      struct StateUpdate
+      abstract struct SessionState
         include JSON::Serializable
         include JSON::Serializable::Unmapped
-
-        # Discriminator for this session update.
-        @[JSON::Field(key: "sessionUpdate")]
-        getter session_update : String = "state_update"
 
         # Foreground state, e.g. running, requires_action, idle, or unknown.
         getter state : String
@@ -75,6 +72,46 @@ module ACP
         # Extension metadata for this snapshot.
         def meta : Hash(String, JSON::Any)?
           @json_unmapped["_meta"]?.try(&.as_h?)
+        end
+      end
+
+      # A state snapshot embedded in a child-session announcement.
+      struct StateSnapshot < SessionState
+      end
+
+      # Standalone notification carrying a foreground and background snapshot.
+      struct StateUpdate < SessionState
+        # Discriminator for this session update.
+        @[JSON::Field(key: "sessionUpdate")]
+        getter session_update : String = "state_update"
+      end
+
+      # Announces or patches a child session on its parent session's timeline.
+      struct SubagentUpdate
+        include JSON::Serializable
+
+        # Session update discriminator.
+        @[JSON::Field(key: "sessionUpdate")]
+        getter session_update : String = "subagent_update"
+
+        # ID of the child. The enclosing update identifies its parent.
+        @[JSON::Field(key: "sessionId")]
+        getter session_id : String
+
+        # A cleared state removes the report. Cleared directories inherit the parent's values.
+        PatchFields.define({
+          title:                  {String, "title"},
+          description:            {String, "description"},
+          capabilities:           {EntityCapabilities, "capabilities"},
+          state:                  {StateSnapshot, "state"},
+          cwd:                    {String, "cwd"},
+          additional_directories: {Array(String), "additionalDirectories"},
+          meta:                   {Hash(String, JSON::Any), "_meta"},
+        })
+        include MetadataPatch
+
+        # Creates an update for the specified child. Set only the patched fields.
+        def initialize(@session_id : String)
         end
       end
 
@@ -166,13 +203,13 @@ module ACP
         end
 
         # Returns the typed form of a recognized session update.
-        def typed : StateUpdate | MessageUpdate | MessageChunkUpdate | ReplayCompleteUpdate | ToolCallUpdate | ToolCallContentChunk | TerminalUpdate | TerminalOutputChunk | Nil
+        def typed
           case @session_update
           when "state_update"
             StateUpdate.from_json(to_json)
           when "user_message", "agent_message", "agent_thought"
             MessageUpdate.from_json(to_json)
-          when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk"
+          when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
             MessageChunkUpdate.from_json(to_json)
           when "replay_complete"
             ReplayCompleteUpdate.from_json(to_json)
@@ -184,6 +221,24 @@ module ACP
             TerminalUpdate.from_json(to_json)
           when "terminal_output_chunk"
             TerminalOutputChunk.from_json(to_json)
+          when "subagent_update"
+            SubagentUpdate.from_json(to_json)
+          when "session_message"
+            SessionMessageUpdate.from_json(to_json)
+          when "session_info_update"
+            SessionInfoUpdate.from_json(to_json)
+          when "usage_update"
+            UsageUpdate.from_json(to_json)
+          when "compaction_update"
+            CompactionUpdate.from_json(to_json)
+          when "compaction_summary_chunk"
+            Protocol::CompactionSummaryChunkUpdate.from_json(to_json)
+          when "plan_update"
+            PlanUpdate.from_json(to_json)
+          when "plan_removed"
+            Protocol::PlanRemovedUpdate.from_json(to_json)
+          when "notice"
+            Protocol::NoticeUpdate.from_json(to_json)
           end
         rescue JSON::ParseException
           nil

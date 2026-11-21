@@ -199,6 +199,14 @@ patch text. Terminal snapshots and chunks expose decoded bytes through
 supplies, including explicit clears.
 [ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls)
 
+Typed child-session announcements expose the mirrored `StateSnapshot`, and
+inter-session messages retain their transcript links and open content.
+`SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
+fields from clears and apply metadata patches by key. Plans expose their ID
+even when the representation is unknown. Plan removal, notices, and
+compaction summary chunks reuse their wire-compatible `ACP::Protocol` types.
+[ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
+
 ## Capabilities
 
 ### ClientCapabilities
