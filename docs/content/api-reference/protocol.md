@@ -248,6 +248,14 @@ chunks. Terminal snapshots and chunks expose decoded bytes through `bytes`.
 The `*_present?` methods on upserts identify fields the update supplies,
 including explicit clears.
 
+Terminal updates treat malformed optional fields as omitted. A concrete
+`exit_status` still marks an exit when its code and signal are unknown.
+Output snapshots and chunks validate standard Base64 on receipt. Decode each
+chunk independently with `bytes` and append the decoded bytes in receive
+order. A snapshot replaces the accumulated output. Repeated capability
+fields clear the cancel grant for the addressed terminal.
+[ACP v2 display-only terminals](https://agentclientprotocol.com/protocol/v2/tool-calls#display-only-terminals)
+
 Tool-call updates and permission tool-call subjects treat malformed optional
 fields as omitted. Content and locations arrays replace the previous list
 with their usable entries in wire order. Explicit `null` and empty arrays

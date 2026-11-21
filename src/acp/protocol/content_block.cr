@@ -27,6 +27,26 @@ require "./raw_json"
 module ACP
   module Protocol
     # :nodoc:
+    def self.standard_base64?(data : String) : Bool
+      length = data.bytesize
+      return false unless length % 4 == 0
+      return true if length.zero?
+
+      2.times do
+        break unless data.byte_at(length - 1) == '='.ord
+
+        length -= 1
+      end
+
+      data.to_slice[0, length].all? do |byte|
+        case byte
+        when 'A'.ord..'Z'.ord, 'a'.ord..'z'.ord, '0'.ord..'9'.ord, '+'.ord, '/'.ord then true
+        else                                                                             false
+        end
+      end
+    end
+
+    # :nodoc:
     module OptionalContentValue(T)
       def self.from_json(pull : JSON::PullParser) : T?
         T.from_json(WireFrame.read_raw(pull))

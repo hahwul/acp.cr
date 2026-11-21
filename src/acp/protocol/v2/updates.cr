@@ -272,17 +272,41 @@ module ACP
         getter session_update : String
 
         @[JSON::Field(ignore: true)]
-        @duplicate_advertisements : Set(String)?
+        @duplicate_fields : Set(String)?
+
+        @[JSON::Field(ignore: true)]
+        @earlier_terminal_fields : Hash(String, Array(String))?
 
         # Creates an update with its variant payload.
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
         protected def on_unknown_json_attribute(pull, key, key_location)
-          if key.in?("configOptions", "availableCommands") && (@json_unmapped.has_key?(key) || raw_field(key))
-            (@duplicate_advertisements ||= Set(String).new).add(key)
+          if key.in?("terminalId", "data", "output", "capabilities")
+            if earlier = exact_unmapped_json(key)
+              (@duplicate_fields ||= Set(String).new).add(key)
+              fields = @earlier_terminal_fields ||= {} of String => Array(String)
+              fields.put_if_absent(key) { [] of String } << earlier
+            end
+          elsif key.in?("configOptions", "availableCommands") && (@json_unmapped.has_key?(key) || raw_field(key))
+            (@duplicate_fields ||= Set(String).new).add(key)
           end
           super
+        end
+
+        protected def on_to_json(json)
+          if @session_update.in?("terminal_update", "terminal_output_chunk")
+            @earlier_terminal_fields.try &.each do |key, values|
+              next unless @json_unmapped.has_key?(key) || raw_field(key)
+              values.each { |value| json.field(key) { json.raw(value) } }
+            end
+          end
+          super
+        end
+
+        # :nodoc:
+        def repeated_field?(key : String) : Bool
+          @duplicate_fields.try(&.includes?(key)) == true
         end
 
         protected def keep_exact_unmapped?(_key : String) : Bool
@@ -355,9 +379,9 @@ module ACP
           when "notice"
             Protocol::NoticeUpdate.from_json(WireFrame.encode(self))
           when "available_commands_update"
-            AvailableCommandsUpdate.from_json(WireFrame.encode(self)) unless @duplicate_advertisements.try(&.includes?("availableCommands"))
+            AvailableCommandsUpdate.from_json(WireFrame.encode(self)) unless repeated_field?("availableCommands")
           when "config_option_update"
-            ConfigOptionUpdate.from_json(WireFrame.encode(self)) unless @duplicate_advertisements.try(&.includes?("configOptions"))
+            ConfigOptionUpdate.from_json(WireFrame.encode(self)) unless repeated_field?("configOptions")
           when "prompt_suggestions_update"
             PromptSuggestionsUpdate.from_json(WireFrame.encode(self))
           end

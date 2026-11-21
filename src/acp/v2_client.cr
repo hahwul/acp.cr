@@ -237,7 +237,16 @@ module ACP
               if params_json && update.update.session_update.in?("state_update", "subagent_update", "available_commands_update", "config_option_update")
                 update_json = Protocol::WireFrame.field(params_json, "update")
               end
-              return unless observe_v2_session_update(update.session_id, params["update"].as_h, update_json)
+              fields = params["update"].as_h
+              if update.update.session_update == "terminal_update"
+                if update.update.repeated_field?("terminalId")
+                  fields = fields.dup
+                  fields.delete("terminalId")
+                elsif update.update.repeated_field?("capabilities")
+                  fields = fields.merge({"capabilities" => JSON::Any.new(nil)})
+                end
+              end
+              return unless observe_v2_session_update(update.session_id, fields, update_json)
               if update.update.session_update == "cursor_update" && (cursor = update.update.typed.as?(Protocol::CursorUpdate))
                 observe_cursor_update(update.session_id, cursor)
               elsif update.update.session_update.in?("plan_update", "plan_removed")
@@ -955,7 +964,7 @@ module ACP
         when Protocol::ResourceContentBlock
           uri = content.uri
           blob = content.blob
-          unless uri && valid_prompt_uri?(uri) && (content.text || (blob && valid_prompt_base64?(blob)))
+          unless uri && valid_prompt_uri?(uri) && (content.text || (blob && Protocol.standard_base64?(blob)))
             raise ArgumentError.new("Malformed ACP v2 embedded resource")
           end
         end
@@ -964,11 +973,7 @@ module ACP
       end
 
       private def validate_prompt_media(data : String) : Nil
-        raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless valid_prompt_base64?(data)
-      end
-
-      private def valid_prompt_base64?(data : String) : Bool
-        data.bytesize % 4 == 0 && data.matches?(/\A[A-Za-z0-9+\/]*={0,2}\z/)
+        raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless Protocol.standard_base64?(data)
       end
 
       private def valid_prompt_uri?(value : String) : Bool
