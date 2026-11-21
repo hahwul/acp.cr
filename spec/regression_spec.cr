@@ -1508,6 +1508,33 @@ describe "ACP terminal authentication logging" do
   end
 end
 
+# Launch settings contain environment values and HTTP headers. Debug logs
+# must redact those while the Agent still receives the original request.
+describe "ACP MCP configuration logging" do
+  it "redacts MCP configurations without altering the outgoing frames" do
+    reader, feed = IO.pipe
+    writer = IO::Memory.new
+    Log.capture("acp.transport", level: :debug) do |logs|
+      transport = ACP::StdioTransport.new(reader, writer)
+      ["session/new", "session/load", "session/resume"].each do |method|
+        frame = JSON.parse(%({"jsonrpc":"2.0","id":1,"method":#{method.to_json},"params":{"cwd":"/work","mcpServers":[{"type":"stdio","env":[{"name":"API_KEY","value":"example-secret"}]},{"type":"http","headers":[{"name":"Authorization","value":"example-token"}]}]}}))
+        transport.send(frame.as_h)
+        logs.check(:debug, /"mcpServers":"\[REDACTED\]"/)
+        logs.entry.message.should contain(%("method":#{method.to_json}))
+        logs.entry.message.should contain(%("cwd":"/work"))
+        logs.entry.message.should_not contain("example-secret")
+        logs.entry.message.should_not contain("example-token")
+        JSON.parse(writer.to_s.lines.last).should eq(frame)
+      end
+    ensure
+      transport.try(&.close)
+    end
+  ensure
+    reader.try(&.close)
+    feed.try(&.close)
+  end
+end
+
 describe "ACP typed content chunks" do
   it "retains the message ID and metadata from each message update" do
     %w(agent_message_chunk user_message_chunk agent_thought_chunk).each do |kind|
