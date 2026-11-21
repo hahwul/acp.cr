@@ -34,6 +34,7 @@
 
 ### Features
 - Create draft ACP v1 and v2 session forks, including forks at an announced cursor and initial configuration choices.
+- Opt in to draft prompt suggestions in ACP v1 and v2 and receive ordered, typed replacement lists.
 - Preview draft ACP v1 and v2 session options and provide initial configuration during session setup.
 - Decode draft ACP v1 and v2 session cursors and track their anchors and capabilities across full replays.
 - Add draft ACP v1 and v2 session archiving, restoration, and archive filters on `session/list`.

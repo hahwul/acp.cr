@@ -106,9 +106,13 @@ module ACP
     end
 
     def fork_revision(session_id : String, cursor_id : String) : UInt64?
-      return if @replaying[session_id]?.try(&.staged.has_key?(session_id))
+      return if replaying?(session_id)
 
       @sessions[session_id]?.try(&.[cursor_id]?).try(&.fork_revision)
+    end
+
+    def replaying?(session_id : String) : Bool
+      @replaying[session_id]?.try(&.staged.has_key?(session_id)) || false
     end
 
     def reject_fork(session_id : String, cursor_id : String, revision : UInt64) : Nil

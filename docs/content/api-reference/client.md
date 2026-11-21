@@ -432,6 +432,26 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+## Prompt suggestions (draft)
+
+Opt in by setting `prompt_suggestions: PromptSuggestionsCapabilities.new`
+on the `ClientSessionCapabilities` for your protocol version. Pass that group
+as `session:` on `ClientCapabilities`. An empty prompt suggestion capability
+supports text and resource links. Add the `image:`, `audio:`, or
+`embedded_context:` markers to offer those content types when the Agent also
+supports them.
+
+In v1, read `Protocol::PromptSuggestionsUpdate` from `on_update`. In v2, read
+`Protocol::V2::PromptSuggestionsUpdate` from `note.update.typed`. Treat the
+list as a replacement for that session's current suggestions. An empty
+list withdraws the previous suggestions. Typed updates keep compatible
+candidates in the Agent's order and skip entire unusable candidates. Start
+with an empty list when you open or restore a session.
+
+After the user accepts a suggestion, pass its `prompt` to `session_prompt`
+in v1 or to `Protocol::V2::SessionPromptParams.new` in v2. Call the request
+outside the dispatcher callback. [ACP Prompt Suggestions Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/prompt-suggestions.mdx)
+
 ## Session cursors (draft)
 
 On v1, opt in with

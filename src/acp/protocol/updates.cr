@@ -37,6 +37,7 @@
 
 require "json"
 require "./content_block"
+require "./prompt_suggestions"
 require "./tool_call_content"
 require "./tool_call_content_helper"
 require "./chunk_content_helper"
@@ -115,7 +116,33 @@ module ACP
     abstract struct SessionUpdate
       include JSON::Serializable
 
-      use_json_discriminator "sessionUpdate", {
+      # Keep the wire nesting limit when copying a discriminated update.
+      # Candidates inside a suggestion list are validated individually.
+      private macro use_session_update_discriminator(mapping)
+        def self.new(pull : JSON::PullParser)
+          location = pull.location_i64
+          kind = nil
+          wire = JSON.build do |json|
+            json.max_nesting = pull.max_nesting
+            json.object do
+              pull.read_object do |key|
+                kind = pull.kind.string? ? pull.string_value : nil if key == "sessionUpdate"
+                json.field(key) { pull.read_raw(json) }
+              end
+            end
+          end
+
+          case kind
+          {% for name, type in mapping %}
+            when {{name}} then {{type}}.from_json(wire)
+          {% end %}
+          else
+            raise JSON::SerializableError.new("Unknown or missing 'sessionUpdate' discriminator: #{kind.inspect}", to_s, nil, *location, nil)
+          end
+        end
+      end
+
+      use_session_update_discriminator({
         # ── ACP Spec Standard Types ──
         "user_message_chunk"        => UserMessageChunkUpdate,
         "agent_message_chunk"       => AgentMessageChunkUpdate,
@@ -138,6 +165,7 @@ module ACP
         "compaction_update"         => CompactionUpdate,
         "compaction_summary_chunk"  => CompactionSummaryChunkUpdate,
         "cursor_update"             => CursorUpdate,
+        "prompt_suggestions_update" => PromptSuggestionsUpdate,
         # ── Non-Standard / Backward Compatibility ──
         "agent_message_start" => AgentMessageStartUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
@@ -147,7 +175,7 @@ module ACP
         "tool_call_end"       => ToolCallEndUpdate,
         "status"              => StatusUpdate,
         "error"               => ErrorUpdate,
-      }
+      })
 
       # The discriminator field. In the ACP spec this is "sessionUpdate".
       @[JSON::Field(key: "sessionUpdate")]
@@ -156,6 +184,22 @@ module ACP
       # Backward-compatible alias: returns the session update type string.
       def type : String
         @session_update
+      end
+    end
+
+    # Replaces the suggestions for the next user prompt.
+    struct PromptSuggestionsUpdate < SessionUpdate
+      # Suggestions in Agent priority order. An empty list withdraws them.
+      @[JSON::Field(converter: ::ACP::Protocol::PromptSuggestionList(::ACP::Protocol::PromptSuggestion))]
+      getter suggestions : Array(PromptSuggestion)
+
+      # Extension metadata scoped to the replacement.
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+      getter meta : Hash(String, JSON::Any)?
+
+      # Creates a replacement list for the session.
+      def initialize(@suggestions : Array(PromptSuggestion), @meta : Hash(String, JSON::Any)? = nil)
+        @session_update = "prompt_suggestions_update"
       end
     end
 

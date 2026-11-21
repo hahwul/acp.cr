@@ -7481,6 +7481,256 @@ describe "ACP draft session fork" do
   end
 end
 
+describe "ACP draft prompt suggestions" do
+  it "negotiates nullable object capabilities in both versions" do
+    {
+      ACP::Protocol::ClientCapabilities,
+      ACP::Protocol::V2::ClientCapabilities,
+    }.each do |type|
+      type.from_json(%({"session":null})).session.should be_nil
+      type.from_json(%({"session":{"promptSuggestions":null}})).session.not_nil!.prompt_suggestions.should be_nil
+      type.from_json(%({"session":{"promptSuggestions":true}})).session.not_nil!.prompt_suggestions.should be_nil
+
+      wire = %({"session":{"promptSuggestions":{"image":{"_meta":{"example.test/mime":"png"}},"audio":true,"embeddedContext":{},"_meta":null}}})
+      caps = type.from_json(wire)
+      suggestions = caps.session.not_nil!.prompt_suggestions.not_nil!
+      suggestions.image.not_nil!.meta.not_nil!["example.test/mime"].should eq("png")
+      suggestions.audio.should be_nil
+      suggestions.embedded_context.should_not be_nil
+      JSON.parse(caps.to_json)["session"]["promptSuggestions"].should eq(
+        JSON.parse(%({"image":{"_meta":{"example.test/mime":"png"}},"embeddedContext":{}})))
+    end
+  end
+
+  it "decodes candidates independently and requires a replacement list" do
+    wire = <<-JSON
+      {"sessionUpdate":"prompt_suggestions_update","_meta":{"example.test/rank":1},"suggestions":[
+        {"prompt":[{"type":"text","text":"Keep this"}],"_meta":null},
+        {"prompt":[{"type":"text","text":"Must skip entire candidate"},{"type":"_unknown"}]},
+        {"prompt":[{"type":"text","text":"   "}]},
+        {"prompt":[]},
+        {"prompt":null},
+        {"prompt":[{"type":"resource","resource":false}]},
+        {"prompt":[{"type":"resource","resource":18446744073709551615}]},
+        null,
+        {"prompt":[{"type":"resource_link","uri":"file:///work/fixture","name":"Fixture","futureField":{"key":1}}],"_meta":{"example.test/rank":2}}
+      ]}
+      JSON
+    v1 = ACP::Protocol::SessionUpdate.from_json(wire).as(ACP::Protocol::PromptSuggestionsUpdate)
+    v1.suggestions.size.should eq(2)
+    v1.suggestions[0].prompt[0].as(ACP::Protocol::TextContentBlock).text.should eq("Keep this")
+    v1.suggestions[1].prompt[0].as(ACP::Protocol::ResourceLinkContentBlock).uri.should eq("file:///work/fixture")
+    v1.suggestions[0].meta.should be_nil
+    v1.meta.not_nil!["example.test/rank"].should eq(1)
+
+    v2 = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::PromptSuggestionsUpdate)
+    v2.suggestions.size.should eq(2)
+    v2.suggestions[1].prompt[0]["futureField"]["key"].should eq(1)
+    v2.suggestions[1].meta.not_nil!["example.test/rank"].should eq(2)
+
+    missing = %({"sessionUpdate":"prompt_suggestions_update"})
+    invalid = %({"sessionUpdate":"prompt_suggestions_update","suggestions":null})
+    {missing, invalid}.each do |json|
+      expect_raises(JSON::ParseException) { ACP::Protocol::SessionUpdate.from_json(json) }
+      ACP::Protocol::V2::SessionUpdate.from_json(json).typed.should be_nil
+    end
+  end
+
+  {"v1", "v2"}.each do |version|
+    it "delivers live, usable replacements and withdraws suggestions on #{version}" do
+      transport = V2TestTransport.new
+      nested = "[" * 115 + "null" + "]" * 115
+      initial_update = <<-JSON
+        {"sessionUpdate":"prompt_suggestions_update","suggestions":[
+          {"prompt":[{"type":"text","text":"first"},{"type":"resource_link","uri":"file:///work/notes","name":"notes"}]},
+          {"prompt":[{"type":"image","data":"YQ==","mimeType":"image/png"}]},
+          {"prompt":[{"type":"text","text":"discard me"},{"type":"audio","data":"YQ==","mimeType":"audio/wav"}]},
+          {"prompt":{"invalid":#{nested}}},
+          {"prompt":[{"type":"resource","resource":{"uri":"file:///work/notes","text":"notes"}}]}
+        ]}
+        JSON
+      media = ACP::Protocol::PromptSuggestionsCapabilities.new(
+        image: ACP::Protocol::PromptSuggestionsImageCapabilities.new,
+        audio: ACP::Protocol::PromptSuggestionsAudioCapabilities.new)
+      updates = Channel(Tuple(String, JSON::Any)).new(16)
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true,"embeddedContext":true},"loadSession":true}})
+        transport.replies["session/load"] = %("result":{})
+        capabilities = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(prompt_suggestions: media))
+        client = ACP::Client.new(transport, client_capabilities: capabilities)
+        client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+          if update = note.update.as?(ACP::Protocol::PromptSuggestionsUpdate)
+            updates.send({note.session_id, JSON.parse(update.to_json)["suggestions"]})
+          end
+          nil
+        end
+        setup_method = "session/load"
+        handshake_group = "clientCapabilities"
+      else
+        transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"prompt":{"image":{},"embeddedContext":{}}}}})
+        transport.replies["session/resume"] = %("result":{})
+        capabilities = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: media))
+        client = ACP::V2::Client.new(transport, capabilities: capabilities)
+        client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+          if update = note.update.typed.as?(ACP::Protocol::V2::PromptSuggestionsUpdate)
+            updates.send({note.session_id, JSON.parse(update.to_json)["suggestions"]})
+          end
+          nil
+        end
+        setup_method = "session/resume"
+        handshake_group = "capabilities"
+      end
+      transport.before_reply = ->(method : String) do
+        if method == setup_method
+          transport.update("saved", initial_update)
+          transport.update("other", initial_update)
+          transport.update("saved", %({"sessionUpdate":"replay_complete"})) if version == "v2"
+        end
+        nil
+      end
+      transport.after_reply = ->(method : String) do
+        transport.update("saved", initial_update) if method == setup_method
+      end
+
+      client.initialize_connection
+      advertised = take_v2_frame(transport.outgoing)["params"][handshake_group]["session"]["promptSuggestions"]
+      advertised.should eq(JSON.parse(%({"image":{},"audio":{}})))
+      case client
+      when ACP::Client
+        client.session_load("saved", "/work")
+      when ACP::V2::Client
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("saved", "/work",
+          replay_from: ACP::Protocol::V2::ReplayFrom.start))
+      end
+      take_v2_frame(transport.outgoing)["method"].should eq(setup_method)
+
+      other_session, other_suggestions = take_v2_frame(updates)
+      other_session.should eq("other")
+      main_session, suggestions = take_v2_frame(updates)
+      main_session.should eq("saved")
+      suggestions.should eq(other_suggestions)
+      suggestions.as_a.size.should eq(2)
+      suggestions[0]["prompt"][1]["type"].should eq("resource_link")
+      suggestions[1]["prompt"][0]["type"].should eq("image")
+
+      transport.update("saved", %({"sessionUpdate":"prompt_suggestions_update","suggestions":[{"prompt":[]}]}))
+      take_v2_frame(updates).should eq({"saved", JSON.parse("[]")})
+      transport.update("other", %({"sessionUpdate":"prompt_suggestions_update","suggestions":[]}))
+      take_v2_frame(updates).should eq({"other", JSON.parse("[]")})
+      transport.sent_messages.size.should eq(2)
+    ensure
+      client.try(&.close)
+    end
+
+    it "ignores unadvertised suggestions on #{version}" do
+      transport = V2TestTransport.new
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1})
+        client = ACP::Client.new(transport)
+      else
+        client = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(
+          session: ACP::Protocol::V2::ClientSessionCapabilities.new))
+      end
+      received = Channel(String).new(2)
+      client.on_notification = ->(method : String, _params : JSON::Any?) do
+        received.send(method)
+        nil
+      end
+      client.initialize_connection
+      transport.update("s", %({"sessionUpdate":"prompt_suggestions_update","suggestions":[]}))
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","_meta":true,"update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[]}}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"_fixture/barrier"}))
+      take_v2_frame(received).should eq("_fixture/barrier")
+    ensure
+      client.try(&.close)
+    end
+
+    it "filters generic callbacks and suppresses history until a timed-out replay ends on #{version}" do
+      transport = V2TestTransport.new
+      media = ACP::Protocol::PromptSuggestionsCapabilities.new
+      if version == "v1"
+        transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}})
+        capabilities = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(prompt_suggestions: media))
+        client = ACP::Client.new(transport, client_capabilities: capabilities)
+      else
+        capabilities = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: media))
+        client = ACP::V2::Client.new(transport, capabilities: capabilities)
+      end
+      received = Channel(Tuple(String, JSON::Any?)).new(4)
+      client.on_notification = ->(method : String, params : JSON::Any?) do
+        received.send({method, params})
+        nil
+      end
+      client.initialize_connection
+      take_v2_frame(transport.outgoing)
+      client.request_timeout = 0.02
+      expect_raises(ACP::RequestTimeoutError) do
+        case client
+        when ACP::Client
+          client.session_load("s", "/work")
+        when ACP::V2::Client
+          client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work",
+            replay_from: ACP::Protocol::V2::ReplayFrom.start))
+        end
+      end
+      request = take_v2_frame(transport.outgoing)
+      take_v2_frame(transport.outgoing)["method"].should eq("$/cancel_request")
+      transport.update("s", %({"sessionUpdate":"prompt_suggestions_update","suggestions":[]}))
+      transport.inject_raw(%({"jsonrpc":"2.0","method":"_fixture/barrier"}))
+      take_v2_frame(received).first.should eq("_fixture/barrier")
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"].to_json},"error":{"code":-32800,"message":"Cancelled"}}))
+      transport.update("s", %({"sessionUpdate":"prompt_suggestions_update","futureField":true,"suggestions":[{"prompt":[{"type":"text","text":"Live"}]},{"prompt":[{"type":"image","mimeType":"image/png","data":"YQ=="}]}]}))
+      method, params = take_v2_frame(received)
+      method.should eq("session/update")
+      update = params.not_nil!["update"]
+      update["futureField"].should eq(true)
+      update["suggestions"].should eq(JSON.parse(%([{"prompt":[{"type":"text","text":"Live"}]}])))
+    ensure
+      client.try(&.close)
+    end
+
+    it "delivers a filtered replacement to generic callbacks from a wide stdio frame on #{version}" do
+      reader, feed = IO.pipe
+      outgoing, writer = IO.pipe
+      outgoing.read_timeout = 2.seconds
+      transport = ACP::StdioTransport.new(reader, writer)
+      media = ACP::Protocol::PromptSuggestionsCapabilities.new
+      if version == "v1"
+        client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(
+          session: ACP::Protocol::ClientSessionCapabilities.new(prompt_suggestions: media)))
+        result = %({"protocolVersion":1})
+      else
+        client = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(
+          session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: media)))
+        result = %({"protocolVersion":2,"info":{"name":"fixture","version":"1"}})
+      end
+      received = Channel(JSON::Any).new(2)
+      client.on_notification = ->(method : String, params : JSON::Any?) do
+        received.send(params.not_nil!) if method == "session/update"
+        nil
+      end
+      client.request_timeout = 2.0
+      spawn do
+        if line = outgoing.gets
+          id = JSON.parse(line)["id"]
+          feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"result":#{result}})
+        end
+      end
+      client.initialize_connection
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","futureField":123,"update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[{"prompt":[{"type":"resource","resource":18446744073709551615}]},{"prompt":[{"type":"text","text":"Keep"}]}]}}})
+      replaced = take_v2_frame(received)
+      replaced["futureField"].should eq(123)
+      replaced["update"]["suggestions"].should eq(JSON.parse(%([{"prompt":[{"type":"text","text":"Keep"}]}])))
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[18446744073709551615]}}})
+      take_v2_frame(received)["update"]["suggestions"].as_a.should be_empty
+    ensure
+      client.try(&.close)
+      feed.try(&.close)
+      outgoing.try(&.close)
+    end
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new

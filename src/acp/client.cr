@@ -242,6 +242,12 @@ module ACP
     # V1 session IDs learned through successful setup, guarded by @pending_mutex.
     @known_session_ids = Set(String).new
 
+    # Negotiated once by the dispatcher before delivering any suggestions.
+    @suggestion_content_types : Set(String)?
+
+    # Keep v1 history out of the composer until the wire reply, even after a timeout.
+    @suggestion_loads = {} of String => String
+
     # Mutex for thread-safe access to @pending (though Crystal fibers
     # are cooperative, this protects against unexpected scheduling).
     @pending_mutex : Mutex = Mutex.new
@@ -1288,6 +1294,9 @@ module ACP
       if method == Protocol::AgentMethod::SESSION_FORK
         fork_source = params.try(&.["sessionId"]?).try(&.as_s?)
       end
+      if !v2_wire? && method == Protocol::AgentMethod::SESSION_LOAD
+        loading_session = params.try(&.["sessionId"]?).try(&.as_s?)
+      end
 
       fork_cursor = nil
       @pending_mutex.synchronize do
@@ -1299,6 +1308,9 @@ module ACP
         rescue ex
           @cursor_registry.try(&.finish_replay(id_str))
           raise ex
+        end
+        if loading_session && @suggestion_content_types
+          @suggestion_loads[id_str] = loading_session
         end
         @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, fork_source, fork_cursor, on_result)
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
@@ -1314,6 +1326,7 @@ module ACP
       rescue ex
         @pending_mutex.synchronize do
           @pending.delete(id_str)
+          @suggestion_loads.delete(id_str)
           @subagent_registry.try(&.request_finished(id_str))
           @cursor_registry.try(&.finish_replay(id_str))
         end
@@ -1432,6 +1445,7 @@ module ACP
         @pending.each_value { |request| request.response.close }
         @pending.clear
         @known_session_ids.clear
+        @suggestion_loads.clear
         @plan_ids.clear
         @subagent_registry.try(&.clear)
         @cursor_registry.try(&.clear)
@@ -1647,6 +1661,7 @@ module ACP
       response = wire_frame || msg
       channel = @pending_mutex.synchronize do
         @cursor_registry.try(&.finish_replay(id_str, msg, wire_frame))
+        @suggestion_loads.delete(id_str)
         if request = @pending.delete(id_str)
           if (grant = request.fork_cursor) && msg["error"]?.try(&.as_h?).try(&.["code"]?).try(&.as_i64?) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
@@ -1719,16 +1734,26 @@ module ACP
       return if message["error"]?
       return unless result = message["result"]?
 
+      suggestions = @client_capabilities.session.try(&.prompt_suggestions)
       if v2_wire?
         typed = Protocol::V2::InitializeResult.from_json(result.to_json)
         if typed.protocol_version == Protocol::V2::VERSION
           @v2_initialization_result = typed
           @auth_status_supported = typed.capabilities.auth_status?
+          prompt = typed.capabilities.session.try(&.prompt)
+          @suggestion_content_types = suggestions.try &.content_types(
+            image: !!prompt.try(&.image), audio: !!prompt.try(&.audio),
+            embedded_context: !!prompt.try(&.embedded_context))
         end
       else
         typed = Protocol::InitializeResult.from_json(result.to_json)
-        @auth_status_supported = ACP.supports_protocol_version?(typed.protocol_version) &&
-                                 !typed.agent_capabilities.auth.try(&.status).nil?
+        if ACP.supports_protocol_version?(typed.protocol_version)
+          @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?
+          prompt = typed.agent_capabilities.prompt_capabilities
+          @suggestion_content_types = suggestions.try &.content_types(
+            image: prompt.try(&.image?) || false, audio: prompt.try(&.audio?) || false,
+            embedded_context: prompt.try(&.embedded_context?) || false)
+        end
       end
     rescue JSON::ParseException
     end
@@ -2078,6 +2103,11 @@ module ACP
           end
         when "replay_complete"
           @cursor_registry.try(&.replay_complete(session_id))
+        when "prompt_suggestions_update"
+          return false unless @suggestion_content_types &&
+                              !@cursor_registry.try(&.replaying?(session_id)) &&
+                              !@subagent_registry.not_nil!.child?(session_id) &&
+                              @subagent_registry.not_nil!.current_updates?(session_id)
         end
         true
       end
@@ -2177,7 +2207,7 @@ module ACP
         if !update_h.has_key?("sessionUpdate") && update_h.has_key?("type")
           update_h["sessionUpdate"] = update_h["type"]
           raw_params["update"] = JSON::Any.new(update_h)
-          params_json = normalize_session_update_json(params_json, update_h["type"]) if params_json
+          params_json = replace_session_update_field(params_json, "sessionUpdate", update_h["type"]) if params_json
         end
         kind = update_h["sessionUpdate"]?.try(&.as_s?)
         plan_operation = kind == "plan_update" || kind == "plan_removed"
@@ -2186,9 +2216,12 @@ module ACP
       end
 
       return if cursor_update && !@cursor_registry
+      if kind == "prompt_suggestions_update"
+        return unless (suggestion_types = @suggestion_content_types) && prompt_suggestions_live?(raw_params)
+      end
 
       handler = @on_update
-      unless handler || cursor_update || (plan_operation && @client_capabilities.plan) || (child_state_update && @subagent_registry)
+      unless handler || cursor_update || suggestion_types || (plan_operation && @client_capabilities.plan) || (child_state_update && @subagent_registry)
         # No typed handler registered. `session/update` is still a
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
@@ -2203,12 +2236,12 @@ module ACP
       # parse the update, re-delivering the same notification to
       # `on_notification` a second time.
       update_params = begin
-        json = params_json || (cursor_update ? Protocol::WireFrame.encode(raw_params) : raw_params.to_json)
+        json = params_json || ((cursor_update || suggestion_types) ? Protocol::WireFrame.encode(raw_params) : raw_params.to_json)
         Protocol::SessionUpdateParams.from_json(json)
       rescue ex : JSON::ParseException
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
-        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
+        deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json || suggestion_types
         return
       end
 
@@ -2220,6 +2253,14 @@ module ACP
       end
       if cursor = update_params.update.as?(Protocol::CursorUpdate)
         observe_cursor_update(update_params.session_id, cursor)
+      end
+      if suggestion_types && (suggestions = update_params.update.as?(Protocol::PromptSuggestionsUpdate))
+        suggestions.suggestions.select! { |suggestion| suggestion.allowed?(suggestion_types) }
+        unless handler
+          list = JSON.parse(Protocol::WireFrame.encode(suggestions.suggestions))
+          deliver_suggestion_notification(JSON::Any.new(raw_params), params_json, list)
+          return
+        end
       end
       unless handler
         deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
@@ -2233,8 +2274,33 @@ module ACP
       end
     end
 
-    # Adds the legacy discriminator while keeping every original number.
-    private def normalize_session_update_json(params_json : String, kind : JSON::Any) : String
+    # Replayed history does not offer suggestions to the current composer.
+    private def prompt_suggestions_live?(params : Hash(String, JSON::Any)) : Bool
+      return false unless sid = params["sessionId"]?.try(&.as_s?)
+
+      @pending_mutex.synchronize do
+        !@suggestion_loads.has_value?(sid) && !@subagent_registry.try(&.child?(sid))
+      end
+    end
+
+    # Gives the generic callback the usable list while preserving other envelope fields.
+    protected def deliver_suggestion_notification(params : JSON::Any, params_json : String?, suggestions : JSON::Any) : Nil
+      if params_json
+        params = JSON.parse(replace_session_update_field(params_json, "suggestions", suggestions))
+      else
+        envelope = params.as_h.dup
+        update = envelope["update"].as_h.dup
+        update["suggestions"] = suggestions
+        envelope["update"] = JSON::Any.new(update)
+        params = JSON::Any.new(envelope)
+      end
+      deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
+    rescue JSON::ParseException
+      # Other fields can still be outside the generic callback's numeric range.
+    end
+
+    # Adds or replaces an update field while keeping every other original number.
+    private def replace_session_update_field(params_json : String, name : String, value : JSON::Any) : String
       pull = JSON::PullParser.new(params_json)
       JSON.build do |json|
         json.max_nesting = pull.max_nesting
@@ -2243,8 +2309,14 @@ module ACP
             if key == "update"
               json.field(key) do
                 json.object do
-                  json.field("sessionUpdate", kind)
-                  pull.read_object { |field| json.field(field) { pull.read_raw(json) } }
+                  json.field(name, value)
+                  pull.read_object do |field|
+                    if field == name
+                      pull.skip
+                    else
+                      json.field(field) { pull.read_raw(json) }
+                    end
+                  end
                 end
               end
             else

@@ -203,6 +203,30 @@ module ACP
         end
       end
 
+      # A v2 candidate with the original prompt blocks, including extra fields.
+      alias PromptSuggestion = Protocol::PromptSuggestionOf(JSON::Any)
+
+      # Replaces the suggestions for the next user prompt.
+      struct PromptSuggestionsUpdate
+        include JSON::Serializable
+
+        # Discriminator for this session update.
+        @[JSON::Field(key: "sessionUpdate")]
+        getter session_update : String = "prompt_suggestions_update"
+
+        # Suggestions in Agent priority order. An empty list withdraws them.
+        @[JSON::Field(converter: ::ACP::Protocol::PromptSuggestionList(::ACP::Protocol::V2::PromptSuggestion))]
+        getter suggestions : Array(PromptSuggestion)
+
+        # Extension metadata scoped to the replacement.
+        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+        getter meta : Hash(String, JSON::Any)?
+
+        # Creates a replacement list for a v2 session.
+        def initialize(@suggestions : Array(PromptSuggestion), @meta : Hash(String, JSON::Any)? = nil)
+        end
+      end
+
       # An open v2 session update. The raw payload remains available for
       # unknown variants and for fields beyond the typed projection.
       struct SessionUpdate
@@ -260,6 +284,8 @@ module ACP
             AvailableCommandsUpdate.from_json(to_json)
           when "config_option_update"
             ConfigOptionUpdate.from_json(to_json)
+          when "prompt_suggestions_update"
+            PromptSuggestionsUpdate.from_json(WireFrame.encode(self))
           end
         rescue JSON::ParseException
           nil

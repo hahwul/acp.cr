@@ -1,0 +1,165 @@
+require "set"
+require "./content_block"
+require "./optional_metadata"
+
+module ACP
+  module Protocol
+    # :nodoc:
+    module OptionalSuggestionCapability(T)
+      def self.from_json(pull : JSON::PullParser) : T?
+        return T.from_json(WireFrame.read_raw(pull)) if pull.kind.begin_object?
+
+        pull.skip
+        nil
+      rescue JSON::ParseException
+        nil
+      end
+
+      def self.to_json(value : T, json : JSON::Builder) : Nil
+        value.to_json(json)
+      end
+    end
+
+    # Presence advertises support for an additional suggestion content type.
+    struct PromptSuggestionContentCapabilities
+      include JSON::Serializable
+
+      # Extension metadata for this content type.
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+      getter meta : Hash(String, JSON::Any)?
+
+      # Creates a content type support marker.
+      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      end
+    end
+
+    # Presence advertises support for suggestions containing images.
+    alias PromptSuggestionsImageCapabilities = PromptSuggestionContentCapabilities
+
+    # Presence advertises support for suggestions containing audio.
+    alias PromptSuggestionsAudioCapabilities = PromptSuggestionContentCapabilities
+
+    # Presence advertises support for suggestions containing embedded resources.
+    alias PromptSuggestionsEmbeddedContextCapabilities = PromptSuggestionContentCapabilities
+
+    # Advertises which prompt suggestions the client can present.
+    struct PromptSuggestionsCapabilities
+      include JSON::Serializable
+
+      # Presence allows suggestions with image content.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsImageCapabilities))]
+      getter image : PromptSuggestionsImageCapabilities?
+
+      # Presence allows suggestions with audio content.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsAudioCapabilities))]
+      getter audio : PromptSuggestionsAudioCapabilities?
+
+      # Presence allows suggestions with embedded resources.
+      @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::OptionalSuggestionCapability(::ACP::Protocol::PromptSuggestionsEmbeddedContextCapabilities))]
+      getter embedded_context : PromptSuggestionsEmbeddedContextCapabilities?
+
+      # Extension metadata for the suggestion capability.
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+      getter meta : Hash(String, JSON::Any)?
+
+      # Advertises baseline text and resource links plus any supplied options.
+      def initialize(
+        @image : PromptSuggestionsImageCapabilities? = nil,
+        @audio : PromptSuggestionsAudioCapabilities? = nil,
+        @embedded_context : PromptSuggestionsEmbeddedContextCapabilities? = nil,
+        @meta : Hash(String, JSON::Any)? = nil,
+      )
+      end
+
+      # :nodoc:
+      def content_types(*, image : Bool, audio : Bool, embedded_context : Bool) : Set(String)
+        allowed = Set{"text", "resource_link"}
+        allowed.add("image") if @image && image
+        allowed.add("audio") if @audio && audio
+        allowed.add("resource") if @embedded_context && embedded_context
+        allowed
+      end
+    end
+
+    # :nodoc:
+    struct PromptSuggestionOf(Block)
+      include JSON::Serializable
+
+      # Ordered content blocks ready to use in a prompt after user acceptance.
+      getter prompt : Array(Block)
+
+      # Extension metadata specific to this suggestion.
+      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
+      getter meta : Hash(String, JSON::Any)?
+
+      # Creates a suggestion from its complete prompt.
+      def initialize(@prompt : Array(Block), @meta : Hash(String, JSON::Any)? = nil)
+      end
+
+      # :nodoc:
+      def usable? : Bool
+        has_content = false
+        @prompt.each do |value|
+          block = parse_block(value)
+          case block
+          when TextContentBlock
+            has_content ||= !block.text.blank?
+          when ResourceContentBlock
+            return false unless block.uri && (block.text || block.blob)
+            has_content = true
+          else
+            has_content = true
+          end
+        end
+        has_content
+      rescue JSON::Error
+        false
+      end
+
+      # :nodoc:
+      def allowed?(types : Set(String)) : Bool
+        @prompt.all? { |block| types.includes?(block_type(block)) }
+      end
+
+      private def parse_block(block : ContentBlock) : ContentBlock
+        block
+      end
+
+      private def parse_block(block : JSON::Any) : ContentBlock
+        ContentBlock.from_json(WireFrame.encode(block))
+      end
+
+      private def block_type(block : ContentBlock) : String
+        block.type
+      end
+
+      private def block_type(block : JSON::Any) : String
+        block["type"].as_s
+      end
+    end
+
+    # A v1 candidate for the next user prompt.
+    alias PromptSuggestion = PromptSuggestionOf(ContentBlock)
+
+    # :nodoc:
+    module PromptSuggestionList(T)
+      def self.from_json(pull : JSON::PullParser) : Array(T)
+        candidates = [] of T
+        pull.read_array do
+          raw = WireFrame.read_raw(pull)
+          begin
+            suggestion = T.from_json(raw)
+            candidates << suggestion if suggestion.usable?
+          rescue JSON::Error
+            # Keep the remaining suggestions when one cannot be used.
+          end
+        end
+        candidates
+      end
+
+      def self.to_json(values : Array(T), json : JSON::Builder) : Nil
+        values.to_json(json)
+      end
+    end
+  end
+end
