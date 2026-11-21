@@ -765,6 +765,9 @@ module ACP
       PROVIDERS_DISABLE = "providers/disable"
       PROVIDER_METHODS  = {PROVIDERS_LIST, PROVIDERS_SET, PROVIDERS_DISABLE}
 
+      # Request-scoped MCP notification sent to the Agent.
+      MCP_MESSAGE = "mcp/message"
+
       # Session management.
       SESSION_NEW               = "session/new"
       SESSION_LOAD              = "session/load"
@@ -797,7 +800,7 @@ module ACP
       # Returns true if the given method name is a known agent method.
       def self.known?(method : String) : Bool
         method == INITIALIZE || method == AUTHENTICATE || method == LOGOUT || method == AUTH_STATUS ||
-          PROVIDER_METHODS.includes?(method) || session_method?(method)
+          method == MCP_MESSAGE || PROVIDER_METHODS.includes?(method) || session_method?(method)
       end
 
       # Returns true if the given method name is a session method.
@@ -860,6 +863,7 @@ module ACP
       # Permission request method.
       SESSION_REQUEST_PERMISSION = "session/request_permission"
       AUTH_STATUS_UPDATE         = "auth/status_update"
+      MCP_MESSAGE                = AgentMethod::MCP_MESSAGE
 
       # Elicitation request and its completion notification.
       ELICITATION_CREATE   = "elicitation/create"
@@ -871,7 +875,7 @@ module ACP
         when FS_READ_TEXT_FILE, FS_WRITE_TEXT_FILE,
              TERMINAL_CREATE, TERMINAL_OUTPUT, TERMINAL_RELEASE,
              TERMINAL_WAIT_FOR_EXIT, TERMINAL_KILL,
-             SESSION_REQUEST_PERMISSION, AUTH_STATUS_UPDATE,
+             SESSION_REQUEST_PERMISSION, AUTH_STATUS_UPDATE, MCP_MESSAGE,
              ELICITATION_CREATE, ELICITATION_COMPLETE
           true
         else

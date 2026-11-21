@@ -34,8 +34,7 @@ module ACP
       end
     end
 
-    # A syntactically valid JSON frame that Crystal's JSON::Any cannot hold.
-    # The original text remains available for lossless typed decoding.
+    # A syntactically valid frame retained for lossless typed decoding.
     struct WireFrame
       # Serializes an already parsed payload at the wire parser's nesting limit.
       # :nodoc:
@@ -59,21 +58,21 @@ module ACP
       # Original JSON text, including exact numeric tokens.
       getter json : String
 
-      # Exact parameters when they cannot be represented as JSON::Any.
+      # Exact parameters when requested or outside the range of JSON::Any.
       getter params_json : String?
 
       # Whether the result or error is outside the range of JSON::Any.
       getter? wide_response = false
 
       # Checks the complete JSON syntax and extracts the raw params.
-      def initialize(@json : String)
+      def initialize(@json : String, *, @exact_params : Bool = false)
         pull = JSON::PullParser.new(@json)
         if pull.kind.begin_object?
           pull.read_object do |key|
             case key
             when "params"
               params = self.class.read_raw(pull)
-              @params_json = fits_json_any?(params) ? nil : params
+              @params_json = @exact_params || !fits_json_any?(params) ? params : nil
             when "result", "error"
               value = self.class.read_raw(pull)
               @wide_response ||= !fits_json_any?(value)
@@ -95,6 +94,13 @@ module ACP
         unless pull.kind.eof?
           raise JSON::ParseException.new("Unexpected content after JSON frame", *pull.location)
         end
+      end
+
+      # The ordinary decoder's view of a deliberately retained exact frame.
+      def representable : JSON::Any?
+        JSON.parse(@json) if @exact_params
+      rescue JSON::ParseException
+        nil
       end
 
       # :nodoc:
@@ -132,7 +138,7 @@ module ACP
       # or discriminators. Typed handlers must decode the original text.
       # :nodoc:
       def project_for_routing : JSON::Any
-        project(JSON::PullParser.new(@json))
+        representable || project(JSON::PullParser.new(@json))
       end
 
       private def project(pull : JSON::PullParser) : JSON::Any

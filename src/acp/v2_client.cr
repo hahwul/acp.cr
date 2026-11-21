@@ -170,16 +170,29 @@ module ACP
         @transport : Transport,
         @info : Wire::Implementation = Wire::Implementation.new("acp-crystal", ACP::VERSION),
         @capabilities : Wire::ClientCapabilities = Wire::ClientCapabilities.new,
+        *,
+        @mcp_request_limit : Int32 = 32,
       )
         session = Protocol::ClientSessionCapabilities.new(prompt_suggestions: @capabilities.session.try(&.prompt_suggestions))
         @connection = Connection.new(@transport,
-          client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation, session: session))
+          client_capabilities: Protocol::ClientCapabilities.new(elicitation: @capabilities.elicitation, session: session),
+          mcp_request_limit: @mcp_request_limit)
         @connection.enable_skill_commands if @capabilities.session.try(&.commands).try(&.skill)
         @connection.on_agent_request = ->handle_extension_request(String, JSON::Any)
       end
 
       # Default timeout in seconds for requests.
       delegate request_timeout, :"request_timeout=", to: @connection
+
+      # Registers a native MCP handler for use in this connection's sessions.
+      def register_mcp_server(name : String, *, meta : Hash(String, JSON::Any)? = nil, &handler : McpRequestHandler) : Wire::McpServerAcp
+        @connection.register_mcp_server(name, meta: meta, &handler)
+      end
+
+      # Retires a registration and signals cancellation to its active handlers.
+      def unregister_mcp_server(server_id : Wire::McpServerAcpId) : Bool
+        @connection.unregister_mcp_server(server_id)
+      end
 
       # Timeout in seconds for prompt insertion acknowledgements.
       delegate prompt_timeout, :"prompt_timeout=", to: @connection
@@ -653,7 +666,7 @@ module ACP
         raise AuthenticationError.new("Terminal authentication exited unsuccessfully") unless status.success?
         ready
 
-        replacement = Client.new(transport.reconnect, @info, @capabilities)
+        replacement = Client.new(transport.reconnect, @info, @capabilities, mcp_request_limit: @mcp_request_limit)
         replacement.request_timeout = request_timeout
         replacement.prompt_timeout = prompt_timeout
         replacement.on_update = on_update
