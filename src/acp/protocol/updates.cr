@@ -137,6 +137,7 @@ module ACP
         "notice"                    => NoticeUpdate,
         "compaction_update"         => CompactionUpdate,
         "compaction_summary_chunk"  => CompactionSummaryChunkUpdate,
+        "cursor_update"             => CursorUpdate,
         # ── Non-Standard / Backward Compatibility ──
         "agent_message_start" => AgentMessageStartUpdate,
         "agent_message_end"   => AgentMessageEndUpdate,
@@ -1086,3 +1087,4 @@ module ACP
 end
 
 require "./subagent_updates"
+require "./cursor_update"

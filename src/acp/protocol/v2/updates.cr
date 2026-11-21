@@ -1,5 +1,6 @@
 require "./initialization"
 require "../wire_frame"
+require "../cursor_update"
 require "./configuration"
 require "./session_updates"
 require "./tool_updates"
@@ -7,6 +8,18 @@ require "./tool_updates"
 module ACP
   module Protocol
     module V2
+      # Announces or patches a position in a session's transcript.
+      alias CursorUpdate = Protocol::CursorUpdate
+
+      # A position relative to a transcript entity.
+      alias CursorAnchor = Protocol::CursorAnchor
+
+      # The methods currently available at a transcript position.
+      alias CursorCapabilities = Protocol::CursorCapabilities
+
+      # Marker for forking at a transcript position.
+      alias CursorForkCapabilities = Protocol::CursorForkCapabilities
+
       # Identifies work that can continue independently of the foreground.
       struct BackgroundWork
         include JSON::Serializable
@@ -215,6 +228,8 @@ module ACP
             MessageChunkUpdate.from_json(to_json)
           when "replay_complete"
             ReplayCompleteUpdate.from_json(to_json)
+          when "cursor_update"
+            CursorUpdate.from_json(WireFrame.encode(self))
           when "tool_call_update"
             ToolCallUpdate.from_json(to_json)
           when "tool_call_content_chunk"

@@ -37,6 +37,15 @@ module ACP
     # A syntactically valid JSON frame that Crystal's JSON::Any cannot hold.
     # The original text remains available for lossless typed decoding.
     struct WireFrame
+      # Serializes an already parsed payload at the wire parser's nesting limit.
+      # :nodoc:
+      def self.encode(value) : String
+        JSON.build do |json|
+          json.max_nesting = 512
+          value.to_json(json)
+        end
+      end
+
       # Original JSON text, including exact numeric tokens.
       getter json : String
 

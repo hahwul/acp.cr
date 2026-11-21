@@ -36,6 +36,7 @@ require "./protocol/client_methods"
 require "./transport"
 require "./errors"
 require "./subagents"
+require "./cursors"
 
 module ACP
   # Logger for client-level diagnostics.
@@ -256,6 +257,9 @@ module ACP
     # Optional child sessions and their setup lifecycle. Guarded by @pending_mutex.
     @subagent_registry : SubagentRegistry?
 
+    # Session history positions and replays. Guarded by @pending_mutex.
+    @cursor_registry : CursorRegistry?
+
     @terminal_auth_running = Atomic(Bool).new(false)
 
     # An agent request whose handler hasn't answered yet. Compared by
@@ -327,6 +331,7 @@ module ACP
     )
       @client_info = client_info || Protocol::ClientInfo.new(client_name, client_version)
       @subagent_registry = SubagentRegistry.new(v2: v2_wire?) if v2_wire? || @client_capabilities.subagents
+      @cursor_registry = CursorRegistry.new(v2: v2_wire?) if v2_wire? || @client_capabilities.session.try(&.cursors)
       start_dispatcher
     end
 
@@ -864,6 +869,16 @@ module ACP
       @pending_mutex.synchronize { @subagent_registry.try(&.workspace(session_id)) }
     end
 
+    # Returns an announced history cursor scoped to one session.
+    def session_cursor(session_id : String, cursor_id : String) : SessionCursor?
+      @pending_mutex.synchronize { @cursor_registry.try(&.cursor(session_id, cursor_id)) }
+    end
+
+    # Returns the stored cursor snapshots for a session.
+    def session_cursors(session_id : String) : Array(SessionCursor)
+      @pending_mutex.synchronize { @cursor_registry.try(&.cursors(session_id)) || [] of SessionCursor }
+    end
+
     # Changes the mode for the active session.
     #
     # - `mode_id` — the mode ID to switch to.
@@ -1173,7 +1188,13 @@ module ACP
 
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
-        @subagent_registry.try(&.request_sent(id_str, method, params))
+        start_cursor_replay(id_str, method, params)
+        begin
+          @subagent_registry.try(&.request_sent(id_str, method, params))
+        rescue ex
+          @cursor_registry.try(&.finish_replay(id_str))
+          raise ex
+        end
         @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, on_result)
         @initialize_request = id_str if method == Protocol::AgentMethod::INITIALIZE
       end
@@ -1183,6 +1204,7 @@ module ACP
         @pending_mutex.synchronize do
           @pending.delete(id_str)
           @subagent_registry.try(&.request_finished(id_str))
+          @cursor_registry.try(&.finish_replay(id_str))
         end
         raise ex
       end
@@ -1277,6 +1299,7 @@ module ACP
         @pending.clear
         @plan_ids.clear
         @subagent_registry.try(&.clear)
+        @cursor_registry.try(&.clear)
       end
     end
 
@@ -1313,6 +1336,8 @@ module ACP
           id = request_id.to_s
           pending = @pending.delete(id)
           @subagent_registry.try(&.request_finished(id)) if pending
+          # The Agent may still send history after a local timeout. Keep
+          # staging cursors until the wire replay or response ends.
           pending
         end
         return channel.receive unless removed
@@ -1485,6 +1510,7 @@ module ACP
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
       channel = @pending_mutex.synchronize do
+        @cursor_registry.try(&.finish_replay(id_str, wire_frame ? nil : msg))
         if request = @pending.delete(id_str)
           if @initialize_request == id_str
             @initialize_request = nil
@@ -1888,7 +1914,40 @@ module ACP
       @pending_mutex.synchronize do
         return false if @disconnected
 
-        @subagent_registry.not_nil!.observe_v2_update(session_id, update, update_json)
+        return false unless @subagent_registry.not_nil!.observe_v2_update(session_id, update, update_json)
+
+        case update["sessionUpdate"]?.try(&.as_s?)
+        when "subagent_update"
+          if child_id = update["sessionId"]?.try(&.as_s?)
+            @cursor_registry.try(&.include_child(session_id, child_id))
+          end
+        when "replay_complete"
+          @cursor_registry.try(&.replay_complete(session_id))
+        end
+        true
+      end
+    end
+
+    # Records cursor state before notifying an application handler.
+    protected def observe_cursor_update(session_id : String, update : Protocol::CursorUpdate) : Nil
+      @pending_mutex.synchronize do
+        @cursor_registry.try(&.observe(session_id, update)) unless @disconnected
+      end
+    end
+
+    # Runs under the pending-request mutex.
+    private def start_cursor_replay(request_id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
+      return unless (registry = @cursor_registry) && params && (session_id = params["sessionId"]?.try(&.as_s?))
+
+      if v2_wire?
+        return unless method == Protocol::AgentMethod::SESSION_RESUME
+        return unless replay_type = params["replayFrom"]?.try(&.as_h?).try(&.["type"]?).try(&.as_s?)
+
+        registry.start_replay(request_id, session_id, full: replay_type == "start")
+      else
+        return unless method == Protocol::AgentMethod::SESSION_LOAD
+
+        registry.start_replay(request_id, session_id, full: true)
       end
     end
 
@@ -1951,6 +2010,7 @@ module ACP
       raw_params = raw_h.dup
       plan_operation = false
       child_state_update = false
+      cursor_update = false
       if update = raw_params["update"]?
         update_h = update.as_h?
         unless update_h
@@ -1967,10 +2027,13 @@ module ACP
         kind = update_h["sessionUpdate"]?.try(&.as_s?)
         plan_operation = kind == "plan_update" || kind == "plan_removed"
         child_state_update = kind == "subagent_update" || kind == "config_option_update" || kind == "config_options_update"
+        cursor_update = kind == "cursor_update"
       end
 
+      return if cursor_update && !@cursor_registry
+
       handler = @on_update
-      unless handler || (plan_operation && @client_capabilities.plan) || (child_state_update && @subagent_registry)
+      unless handler || cursor_update || (plan_operation && @client_capabilities.plan) || (child_state_update && @subagent_registry)
         # No typed handler registered. `session/update` is still a
         # notification, so hand it to the generic notification handler rather
         # than dropping it — a client that only registers `on_notification`
@@ -1985,7 +2048,8 @@ module ACP
       # parse the update, re-delivering the same notification to
       # `on_notification` a second time.
       update_params = begin
-        Protocol::SessionUpdateParams.from_json(params_json || raw_params.to_json)
+        json = params_json || (cursor_update ? Protocol::WireFrame.encode(raw_params) : raw_params.to_json)
+        Protocol::SessionUpdateParams.from_json(json)
       rescue ex : JSON::ParseException
         ClientLog.warn { "Failed to parse session/update: #{ex.message}" }
         # Try the raw notification handler as fallback.
@@ -1998,6 +2062,9 @@ module ACP
       end
       if registry = @subagent_registry
         update_params = observe_subagent_update(registry, update_params) || return
+      end
+      if cursor = update_params.update.as?(Protocol::CursorUpdate)
+        observe_cursor_update(update_params.session_id, cursor)
       end
       unless handler
         deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params) unless params_json
@@ -2044,6 +2111,7 @@ module ACP
         when Protocol::SubagentUpdate
           return unless registry.announce(sid, update)
 
+          @cursor_registry.try(&.include_child(sid, update.session_id))
           state = update.state
           if state && state.state == "idle" && state.stop_reason == "cancelled" && registry.current_updates?(update.session_id)
             claim_session_inputs([update.session_id], elicitations: true)

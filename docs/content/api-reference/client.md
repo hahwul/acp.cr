@@ -400,6 +400,30 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+## Session cursors (draft)
+
+On v1, opt in with
+`ClientSessionCapabilities.new(cursors: SessionCursorsCapabilities.new)`
+in the client's session capabilities. On v2, cursor updates are available
+automatically. They arrive through `on_update` as `Protocol::CursorUpdate`
+in v1 and through `update.typed` in v2.
+
+Use `client.session_cursor(session_id, cursor_id)` or
+`client.session_cursors(session_id)` to read the current snapshots.
+Their IDs are opaque and session-scoped. Each snapshot keeps the first
+reported anchor and the latest capabilities. Use `anchor.known_position?`
+and the transcript's entity IDs to decide where to display a cursor.
+
+Full replays rebuild the stored cursors, including announced child sessions.
+In v1, new snapshots become available when `session/load` succeeds. In v2,
+each session's `replay_complete` publishes its snapshots and starts applying
+live cursor updates. Until those boundaries, lookups return the previous
+snapshots. Use `raw_meta_field` for exact metadata values outside the range
+of `JSON::Any`.
+Full replays can supply updated entity IDs for existing cursor anchors.
+Closing a session or resuming without replay preserves its cursors.
+[ACP Session Cursors Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-cursors.mdx)
+
 ## Typed Client Method Handlers
 
 | Handler | Params Type | Result Type | Description |

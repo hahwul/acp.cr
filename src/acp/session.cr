@@ -254,6 +254,16 @@ module ACP
       @client.session_status(@id, meta: meta)
     end
 
+    # Looks up an Agent-announced cursor in this session.
+    def cursor(cursor_id : String) : SessionCursor?
+      @client.session_cursor(@id, cursor_id)
+    end
+
+    # Returns the Agent-announced cursors in this session.
+    def cursors : Array(SessionCursor)
+      @client.session_cursors(@id)
+    end
+
     # Sets the Agent's title for this session, including after a local close.
     def set_title(title : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SetSessionTitleResult
       @client.session_set_title(@id, title, meta: meta)

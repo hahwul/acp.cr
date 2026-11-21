@@ -6700,6 +6700,282 @@ describe "ACP draft session archive" do
   end
 end
 
+describe "ACP draft session cursors" do
+  it "decodes all known anchor types and keeps unknown positions open" do
+    {
+      "user_message"    => "messageId",
+      "agent_message"   => "messageId",
+      "agent_thought"   => "messageId",
+      "session_message" => "messageId",
+      "tool_call"       => "toolCallId",
+      "compaction"      => "compactionId",
+    }.each do |kind, key|
+      anchor = ACP::Protocol::CursorAnchor.from_json(%({"type":#{kind.to_json},#{key.to_json}:"entity","position":"after"}))
+      anchor.entity_id.should eq("entity")
+      anchor.known_position?.should be_true
+      expect_raises(JSON::ParseException) do
+        ACP::Protocol::CursorAnchor.from_json(%({"type":#{kind.to_json},#{key.to_json}:true,"position":"after"}))
+      end
+    end
+    future = ACP::Protocol::CursorAnchor.from_json(%({"type":"_future","position":{},"quantity":18446744073709551615}))
+    future.known_position?.should be_false
+    future.raw_field("quantity").should eq("18446744073709551615")
+    side = ACP::Protocol::CursorAnchor.from_json(%({"type":"tool_call","toolCallId":"t","position":"_future"}))
+    side.entity_id.should eq("t")
+    side.position.should eq("_future")
+    side.known_position?.should be_false
+  end
+
+  it "distinguishes omitted, null, malformed, and replacement fields" do
+    malformed = ACP::Protocol::CursorUpdate.from_json(%({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":true,"_meta":[]}))
+    malformed.capabilities_present?.should be_false
+    malformed.meta_present?.should be_false
+    invalid_fork = ACP::Protocol::CursorUpdate.from_json(%({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":true}}))
+    invalid_fork.capabilities_present?.should be_true
+    invalid_fork.capabilities.not_nil!.fork.should be_nil
+    clear = ACP::Protocol::CursorUpdate.new("c")
+    clear.capabilities = nil
+    clear.meta = nil
+    wire = JSON.parse(clear.to_json)
+    wire["capabilities"].raw.should be_nil
+    wire["_meta"].raw.should be_nil
+    parsed = ACP::Protocol::SessionUpdate.from_json(clear.to_json).as(ACP::Protocol::CursorUpdate)
+    parsed.capabilities_present?.should be_true
+    parsed.meta_present?.should be_true
+  end
+
+  it "advertises v1 cursor support and tracks patches in session order" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    capabilities = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(cursors: ACP::Protocol::SessionCursorsCapabilities.new))
+    client = ACP::Client.new(transport, client_capabilities: capabilities)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)["params"]["clientCapabilities"]["session"]["cursors"].should eq(JSON.parse("{}"))
+
+    seen = Channel(ACP::SessionCursor?).new(1)
+    client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+      update = note.update.as(ACP::Protocol::CursorUpdate)
+      seen.send(client.session_cursor(note.session_id, update.cursor_id))
+      nil
+    end
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"agent_message","messageId":"a","position":"after"},"capabilities":{"fork":{}},"_meta":{"one":1}}))
+    report = take_v2_frame(seen).not_nil!
+    report.fork?.should be_true
+    report.anchor.not_nil!.entity_id.should eq("a")
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"tool_call","toolCallId":"b","position":"before"},"_meta":{"two":2}}))
+    report = take_v2_frame(seen).not_nil!
+    report.anchor.not_nil!.entity_id.should eq("a")
+    report.fork?.should be_true
+    report.meta.not_nil!.keys.should eq(["two"])
+    report.anchor.not_nil!.json_unmapped["messageId"] = JSON::Any.new("modified locally")
+    client.session_cursor("s", "c").not_nil!.anchor.not_nil!.entity_id.should eq("a")
+    client.session_cursor("other", "c").should be_nil
+
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":null}))
+    take_v2_frame(seen).not_nil!.fork?.should be_false
+    ACP::Session.new(client, "s").cursors.map(&.cursor_id).should eq(["c"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "ignores unadvertised v1 cursor updates" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    client = ACP::Client.new(transport)
+    client.initialize_connection
+    updates = Channel(String).new(2)
+    client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+      updates.send(note.update.session_update)
+      nil
+    end
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":{}}}))
+    transport.update("s", %({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"after"}}))
+    take_v2_frame(updates).should eq("agent_message_chunk")
+    client.session_cursors("s").should be_empty
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps v2 cursor capability and top-level metadata patches distinct" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    seen = Channel(ACP::SessionCursor?).new(1)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      update = note.update.typed.as(ACP::Protocol::V2::CursorUpdate)
+      seen.send(client.session_cursor(note.session_id, update.cursor_id))
+      nil
+    end
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"_future","position":"_later"},"capabilities":{"fork":{}},"_meta":{"keep":1,"drop":2,"nested":{"old":true}}}))
+    take_v2_frame(seen).not_nil!.fork?.should be_true
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{},"_meta":{"drop":null,"nested":{"new":true}}}))
+    report = take_v2_frame(seen).not_nil!
+    report.anchor.not_nil!.known_position?.should be_false
+    report.fork?.should be_false
+    report.meta.should eq(JSON.parse(%({"keep":1,"nested":{"new":true}})).as_h)
+  ensure
+    client.try(&.close)
+  end
+
+  it "preserves future capabilities and exact metadata beside a deletion over v2 stdio" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    client = ACP::V2::Client.new(ACP::StdioTransport.new(reader, writer))
+    client.request_timeout = 2.0
+    seen = Channel(ACP::SessionCursor).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      update = note.update.typed.as(ACP::Protocol::V2::CursorUpdate)
+      seen.send(client.session_cursor(note.session_id, update.cursor_id).not_nil!)
+      nil
+    end
+    spawn do
+      if line = outgoing.gets
+        id = JSON.parse(line)["id"]
+        feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+      end
+    end
+    client.initialize_connection
+    nested = "[" * 120 + "true" + "]" * 120
+    feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"_future":{"count":18446744073709551615},"_nested":#{nested}},"_meta":{"drop":true,"keep":1}}}})
+    first = take_v2_frame(seen)
+    first.capabilities.not_nil!.raw_field("_future").should eq(%({"count":18446744073709551615}))
+    value = first.capabilities.not_nil!.json_unmapped["_nested"]
+    120.times { value = value[0] }
+    value.as_bool.should be_true
+
+    feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"cursor_update","cursorId":"c","_meta":{"drop":null,"counter":18446744073709551615}}}})
+    second = take_v2_frame(seen)
+    second.meta.should eq({"keep" => JSON::Any.new(1_i64)})
+    second.raw_meta_field("counter").should eq("18446744073709551615")
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "publishes post-marker live v2 changes even when resume fails" do
+    transport = V2TestTransport.new
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    announcement = %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"user_message","messageId":"old","position":"before"},"capabilities":{"fork":{}},"_meta":{"previous":true}})
+    transport.update("s", announcement)
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work"))
+    client.session_cursor("s", "c").not_nil!.anchor.not_nil!.entity_id.should eq("old")
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Attach failed"})
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        # The first frame may have been sent before the Agent saw the request.
+        transport.update("s", announcement)
+        transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"user_message","messageId":"replayed","position":"before"},"capabilities":{"fork":{}}}))
+        transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","anchor":{"type":"user_message","messageId":"conflict","position":"before"}}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":null}))
+      end
+      nil
+    end
+    params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    expect_raises(ACP::JsonRpcError) { client.session_resume(params) }
+    cursor = client.session_cursor("s", "c").not_nil!
+    cursor.anchor.not_nil!.entity_id.should eq("replayed")
+    cursor.meta.not_nil!["previous"].should eq(true)
+    cursor.fork?.should be_false
+  ensure
+    client.try(&.close)
+  end
+
+  it "isolates a timed-out v2 replay until the Agent answers" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+    observed = Channel(String).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(note.update.session_update)
+      nil
+    end
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":{}}}))
+    take_v2_frame(observed)
+
+    client.request_timeout = 0.02
+    params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.new("_partial"))
+    expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+    request = take_v2_frame(transport.outgoing)
+    take_v2_frame(transport.outgoing)["method"].should eq("$/cancel_request")
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"c","capabilities":null}))
+    take_v2_frame(observed)
+    client.session_cursor("s", "c").not_nil!.fork?.should be_true
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"].to_json},"error":{"code":-32800,"message":"Cancelled"}}))
+    transport.update("s", %({"sessionUpdate":"notice","message":"Cancelled"}))
+    take_v2_frame(observed)
+    transport.replies["session/resume"] = %("result":{})
+    client.request_timeout = 2.0
+    client.session_resume(params)
+    client.session_cursor("s", "c").not_nil!.fork?.should be_true
+  ensure
+    client.try(&.close)
+  end
+
+  it "preserves cursors on v1 resume and failed load, and rebuilds on successful load" do
+    transport = V2TestTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["session/resume"] = %("result":{})
+    transport.replies["session/load"] = %("error":{"code":-32603,"message":"Replay failed"})
+    caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(cursors: ACP::Protocol::SessionCursorsCapabilities.new))
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.initialize_connection
+    old_cursor = %({"sessionUpdate":"cursor_update","cursorId":"old","anchor":{"type":"tool_call","toolCallId":"old-tool","position":"after"}})
+    new_cursor = %({"sessionUpdate":"cursor_update","cursorId":"new","anchor":{"type":"tool_call","toolCallId":"new-tool","position":"after"}})
+    transport.update("s", old_cursor)
+    client.session_resume("s", "/work")
+    client.session_cursors("s").map(&.cursor_id).should eq(["old"])
+    transport.before_reply = ->(method : String) do
+      transport.update("s", new_cursor) if method == "session/load"
+      nil
+    end
+    expect_raises(ACP::JsonRpcError) { client.session_load("s", "/work") }
+    client.session_cursors("s").map(&.cursor_id).should eq(["old"])
+    transport.replies["session/load"] = %("result":{})
+    client.session_load("s", "/work")
+    client.session_cursors("s").map(&.cursor_id).should eq(["new"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "rebuilds v2 full replay cursors for the root and announced children" do
+    transport = V2TestTransport.new
+    transport.replies["session/resume"] = %("result":{})
+    transport.replies["session/close"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.initialize_connection
+    transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+    transport.update("root", %({"sessionUpdate":"cursor_update","cursorId":"keep","anchor":{"type":"user_message","messageId":"old","position":"after"}}))
+    transport.update("root", %({"sessionUpdate":"cursor_update","cursorId":"removed"}))
+    transport.update("child", %({"sessionUpdate":"cursor_update","cursorId":"child-old"}))
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work"))
+    client.session_cursors("root").size.should eq(2)
+    client.session_close("root")
+    client.session_cursors("root").size.should eq(2)
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+        transport.update("root", %({"sessionUpdate":"cursor_update","cursorId":"keep","anchor":{"type":"user_message","messageId":"new","position":"after"}}))
+        transport.update("child", %({"sessionUpdate":"replay_complete"}))
+        transport.update("root", %({"sessionUpdate":"replay_complete"}))
+      end
+      nil
+    end
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    client.session_cursors("root").map(&.cursor_id).should eq(["keep"])
+    client.session_cursor("root", "keep").not_nil!.anchor.not_nil!.entity_id.should eq("new")
+    client.session_cursors("child").should be_empty
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP version negotiation" do
   it "keeps the first transport and returns the v2 client when v2 is selected" do
     transport = V2TestTransport.new
