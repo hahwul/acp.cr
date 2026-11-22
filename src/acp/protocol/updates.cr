@@ -40,6 +40,7 @@ require "./content_block"
 require "./optional_capability"
 require "./patch_fields"
 require "./prompt_suggestions"
+require "./raw_json"
 require "./session_options"
 require "./tool_call_content"
 require "./tool_call_content_helper"
@@ -333,10 +334,43 @@ module ACP
 
     # ─── Tool Call ─────────────────────────────────────────────────────
 
+    # :nodoc:
+    module ToolCallRawPayloads
+      macro payload_field(name, wire_name)
+        @[JSON::Field(key: {{wire_name}})]
+        @{{name.id}}_wire : PreservedJson?
+
+        # The tool payload as JSON::Any when its values are representable.
+        def {{name.id}} : JSON::Any?
+          @{{name.id}}_wire.try(&.value)
+        end
+
+        # Replaces the tool payload. Assign nil to omit this field.
+        def {{name.id}}=(value : JSON::Any?) : JSON::Any?
+          @{{name.id}}_wire = value.try { |supplied| PreservedJson.new(supplied) }
+          value
+        end
+
+        # Exact JSON for the tool payload, including values outside the range of JSON::Any.
+        # Editing an array through the JSON::Any view serializes that array at JSON::Any precision.
+        def {{name.id}}_raw : RawJson?
+          @{{name.id}}_wire.try(&.raw)
+        end
+
+        protected def {{name.id}}_comparison
+          @{{name.id}}_wire.try { |payload| payload.value || payload.raw }
+        end
+      end
+
+      payload_field raw_input, "rawInput"
+      payload_field raw_output, "rawOutput"
+    end
+
     # Notification that a new tool call has been initiated by the language model.
     # See: https://agentclientprotocol.com/protocol/tool-calls#creating
     struct ToolCallUpdate < SessionUpdate
       include JSON::Serializable
+      include ToolCallRawPayloads
 
       # Unique identifier for this tool call within the session (required).
       @[JSON::Field(key: "toolCallId")]
@@ -359,14 +393,6 @@ module ACP
       # File locations affected by this tool call.
       property locations : Array(JSON::Any)?
 
-      # Raw input parameters sent to the tool.
-      @[JSON::Field(key: "rawInput")]
-      property raw_input : JSON::Any?
-
-      # Raw output returned by the tool.
-      @[JSON::Field(key: "rawOutput")]
-      property raw_output : JSON::Any?
-
       # The name of the tool being invoked (non-standard, backward compat).
       @[JSON::Field(key: "toolName")]
       property tool_name : String?
@@ -385,14 +411,19 @@ module ACP
         @status : String? = "pending",
         @content : Array(JSON::Any)? = nil,
         @locations : Array(JSON::Any)? = nil,
-        @raw_input : JSON::Any? = nil,
-        @raw_output : JSON::Any? = nil,
+        raw_input : JSON::Any? = nil,
+        raw_output : JSON::Any? = nil,
         @tool_name : String? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
         @name : String? = nil,
       )
         @session_update = "tool_call"
+        self.raw_input = raw_input
+        self.raw_output = raw_output
       end
+
+      def_equals_and_hash @session_update, @tool_call_id, @title, @kind, @status, @content, @locations,
+        raw_input_comparison, raw_output_comparison, @tool_name, @name, @meta
 
       include ToolCallContentHelper
     end
@@ -408,6 +439,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/tool-calls#updating
     struct ToolCallStatusUpdate < SessionUpdate
       include JSON::Serializable
+      include ToolCallRawPayloads
 
       # The ID of the tool call being updated (required).
       @[JSON::Field(key: "toolCallId")]
@@ -428,14 +460,6 @@ module ACP
       # Replace the locations collection.
       property locations : Array(JSON::Any)?
 
-      # Update the raw input.
-      @[JSON::Field(key: "rawInput")]
-      property raw_input : JSON::Any?
-
-      # Update the raw output.
-      @[JSON::Field(key: "rawOutput")]
-      property raw_output : JSON::Any?
-
       # Update the tool name.
       property name : String?
 
@@ -450,13 +474,18 @@ module ACP
         @kind : String? = nil,
         @content : Array(JSON::Any)? = nil,
         @locations : Array(JSON::Any)? = nil,
-        @raw_input : JSON::Any? = nil,
-        @raw_output : JSON::Any? = nil,
+        raw_input : JSON::Any? = nil,
+        raw_output : JSON::Any? = nil,
         @meta : Hash(String, JSON::Any)? = nil,
         @name : String? = nil,
       )
         @session_update = "tool_call_update"
+        self.raw_input = raw_input
+        self.raw_output = raw_output
       end
+
+      def_equals_and_hash @session_update, @tool_call_id, @status, @title, @kind, @content, @locations,
+        raw_input_comparison, raw_output_comparison, @name, @meta
 
       include ToolCallContentHelper
     end
