@@ -1013,6 +1013,79 @@ describe "ACP::Protocol::SessionInfoUpdate field presence" do
     update.updated_at = nil
     update.updated_at_present?.should be_true
   end
+
+  it "round-trips explicit clears separately from omitted fields" do
+    type = ACP::Protocol::SessionInfoUpdate
+    clear = type.from_json(%({"sessionUpdate":"session_info_update","title":null}))
+    fields = JSON.parse(clear.to_json).as_h
+    fields.has_key?("title").should be_true
+    fields["title"].raw.should be_nil
+    fields.has_key?("updatedAt").should be_false
+    type.from_json(clear.to_json).should eq(clear)
+    type.new.should_not eq(clear)
+
+    update = type.new(title: "")
+    update.updated_at = nil
+    fields = JSON.parse(update.to_json).as_h
+    fields["title"].should eq("")
+    fields["updatedAt"].raw.should be_nil
+    type.from_json(update.to_json).should eq(update)
+  end
+
+  it "preserves valid fields when other supplied fields are malformed or repeated" do
+    type = ACP::Protocol::SessionInfoUpdate
+    update = type.from_json(%({"sessionUpdate":"session_info_update","title":null,"updatedAt":false,"_meta":false}))
+    update.title_present?.should be_true
+    update.title.should be_nil
+    update.updated_at_present?.should be_false
+    update.meta.should be_nil
+
+    date = "2026-11-22T09:00:00Z"
+    [%("title":false), %("title":"old","title":null)].each do |fields|
+      update = type.from_json(%({"sessionUpdate":"session_info_update",#{fields},"updatedAt":#{date.to_json}}))
+      update.title_present?.should be_false
+      update.updated_at_present?.should be_true
+      update.updated_at.should eq(date)
+      JSON.parse(update.to_json).as_h.has_key?("title").should be_false
+    end
+  end
+
+  it "delivers a partial patch with exact metadata through the typed stdio callback" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work")
+
+      updates = Channel(ACP::Protocol::SessionInfoUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        if patch = note.update.as?(ACP::Protocol::SessionInfoUpdate)
+          updates.send(patch)
+        end
+        nil
+      end
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":1.23000000000000000001})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"type":"session_info_update","title":null,"updatedAt":false,"_meta":#{metadata}}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when update = updates.receive
+        update.title_present?.should be_true
+        update.updated_at_present?.should be_false
+        update.meta_raw.not_nil!.json.should eq(metadata)
+        wire = ACP::Protocol::RawJson.from_json(update.to_json)
+        wire.field("title").not_nil!.null?.should be_true
+        wire.field("updatedAt").should be_nil
+        wire.field("_meta").not_nil!.json.should eq(metadata)
+      else
+        fail "session info patch did not reach the typed callback"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
 end
 
 # ─── R23: a blocked agent-request handler must not stall the dispatcher ──

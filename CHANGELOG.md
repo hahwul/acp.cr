@@ -18,6 +18,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve explicit clears, usable fields, and exact metadata in ACP v1 session information updates.
 - Preserve ACP v1 usage counts when optional costs are malformed and retain exact cost and extension metadata.
 - Keep usable ACP v1 configuration choices when sibling values or optional descriptions and categories are malformed.
 - Preserve usable ACP v1 slash commands when an advertised entry is malformed and retain exact metadata in command notifications.
