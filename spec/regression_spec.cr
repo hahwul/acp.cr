@@ -8316,6 +8316,8 @@ describe "ACP v1 form submission validation" do
         valid.merge({"instant" => "2026-01-01T12:34:56+12:60"}),
         valid.merge({"instant" => "2026-01-01T12:34:56+24:00"}),
         valid.merge({"instant" => "2026-01-01T24:00:01Z"}),
+        valid.merge({"instant" => "2025-W53-1T12:00Z"}),
+        valid.merge({"instant" => "2026-366T12:00Z"}),
         valid.merge({"choices" => ["no"]}),
       }.each_with_index do |content, id|
         result = ACP::Protocol::CreateElicitationResult.accept(content)
@@ -8327,7 +8329,10 @@ describe "ACP v1 form submission validation" do
       result = ACP::Protocol::CreateElicitationResult.accept(valid)
       feed.puts form_elicitation_frame(100, schema)
       JSON.parse(outgoing.gets.not_nil!)["result"]["content"].should eq(JSON.parse(valid.to_json))
-      {"2026-01-01T12:34:56", "2026-01-01T12:34:56+01", "2026-01-01T24:00:00Z"}.each_with_index do |timestamp, id|
+      {
+        "2026-01-01T12:34:56", "2026-01-01T12:34:56+01", "2026-01-01T24:00:00Z",
+        "2026-W53-7T12:00Z", "2024-366T12:00Z", "2026-01-01T12.123456789012345Z",
+      }.each_with_index do |timestamp, id|
         content = valid.merge({"instant" => timestamp})
         result = ACP::Protocol::CreateElicitationResult.accept(content)
         feed.puts form_elicitation_frame(id + 102, schema)

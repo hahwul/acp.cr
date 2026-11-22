@@ -75,23 +75,27 @@ module ACP
 
       private def self.iso8601?(value : String) : Bool
         date, separator, time = value.partition('T')
-        return false if separator.empty?
-        return false unless date.matches?(/\A[0-9]{4}(?:-[0-9]{2}-[0-9]{2}|[0-9]{4}|-?[0-9]{3}|-W[0-9]{2}-[1-7]|W[0-9]{2}[1-7])\z/)
+        return false if separator.empty? || !iso8601_date?(date)
 
         match = /\A((?:[01][0-9]|2[0-4])(?:(?::[0-5][0-9]){1,2}|(?:[0-5][0-9]){1,2})?(?:[.,][0-9]+)?)(?:[Zz]|[+-](?:[01][0-9]|2[0-3])(?::?[0-5][0-9])?)?\z/.match(time)
         return false unless match
         clock = match[1]
-        if clock.starts_with?("24")
-          remainder = clock.byte_slice(2)
-          return false unless remainder.matches?(/\A[0:.,]*\z/)
-          clock = "00" + remainder
-        end
+        !clock.starts_with?("24") || clock.byte_slice(2).matches?(/\A[0:.,]*\z/)
+      end
 
-        # Validate the calendar and clock with a placeholder zone. The match
-        # above already checks the optional ISO offset, including hour-only offsets.
-        Time.parse_iso8601("#{date}T#{clock}Z")
-        true
-      rescue Time::Format::Error | ArgumentError
+      private def self.iso8601_date?(date : String) : Bool
+        if match = /\A([0-9]{4})(-?)([0-9]{2})\2([0-9]{2})\z/.match(date)
+          return !calendar_date("#{match[1]}-#{match[3]}-#{match[4]}").nil?
+        end
+        if match = /\A([0-9]{4})-?([0-9]{3})\z/.match(date)
+          days = Time.leap_year?(match[1].to_i) ? 366 : 365
+          return 1 <= match[2].to_i <= days
+        end
+        if match = /\A([0-9]{4})(-?)W([0-9]{2})\2[1-7]\z/.match(date)
+          # December 28 always belongs to the final ISO week of its year.
+          _, last_week = Time.utc(match[1].to_i, 12, 28).calendar_week
+          return 1 <= match[3].to_i <= last_week
+        end
         false
       end
 
