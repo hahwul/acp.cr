@@ -579,7 +579,8 @@ module ACP
       resource = method && (Protocol::ClientMethod.fs_method?(method) || Protocol::ClientMethod.terminal_method?(method))
       exact_params = resource || session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE,
         Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, Protocol::ProtocolMethod::CANCEL_REQUEST,
-        Protocol::ClientMethod::ELICITATION_CREATE, Protocol::ClientMethod::ELICITATION_COMPLETE)
+        Protocol::ClientMethod::ELICITATION_CREATE, Protocol::ClientMethod::ELICITATION_COMPLETE,
+        Protocol::ClientMethod::AUTH_STATUS_UPDATE)
       result = envelope.try(&.["result"]?).try(&.as_h?)
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
@@ -591,9 +592,10 @@ module ACP
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
       has_id = envelope.try(&.has_key?("id"))
       response = has_id && !envelope.try(&.has_key?("method"))
+      auth_status_result = response && result.try(&.["state"]?).try(&.as_s?)
       structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
       initialize_result = response && result.try(&.has_key?("protocolVersion"))
-      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || structured_error || initialize_result ||
+      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || auth_status_result || structured_error || initialize_result ||
          (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?) ||
          (has_id && method && !Protocol::WireFrame.repeated_members(line, "id").empty?)
         Protocol::WireFrame.new(line, exact_params: true)

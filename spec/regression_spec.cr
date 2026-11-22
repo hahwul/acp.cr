@@ -1938,6 +1938,88 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact authentication status snapshots" do
+  wide = "18446744073709551615"
+  decimal = "0.123456789012345678901"
+  {"wide integer" => wide, "precise decimal" => decimal}.each do |kind, number|
+    {1, 2}.each do |version|
+      it "preserves a #{kind} in a v#{version} status response and notification" do
+        with_wide_stdio do |transport, feed, outgoing|
+          client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+          client.request_timeout = 2.0
+          updates = Channel(ACP::Protocol::AuthStatusUpdateParams).new(1)
+          client.on_auth_status_update = ->(status : ACP::Protocol::AuthStatusUpdateParams) do
+            updates.send(status)
+            nil
+          end
+
+          capability = %({"auth":{"status":{}}})
+          initialization = if version == 1
+                             %({"protocolVersion":1,"agentCapabilities":#{capability}})
+                           else
+                             %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":#{capability}})
+                           end
+          answer_identity_request(feed, outgoing, initialization)
+          client.initialize_connection
+
+          metadata = %({"example.test/value":#{number}})
+          accounts = %([{"label":"Workspace","description":42,"active":true,"_meta":#{metadata}},{"label":false},#{number}])
+          feed.puts %({"jsonrpc":"2.0","method":"auth/status_update","params":{"state":"_future","accounts":#{accounts},"_meta":#{metadata}}})
+          requests = Channel(ACP::Protocol::RawJson).new(1)
+          spawn do
+            request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+            requests.send(request)
+            feed.puts %({"jsonrpc":"2.0","id":#{request.field("id").not_nil!.json},"result":{"state":"authenticated","accounts":#{accounts}}})
+          end
+          result = client.auth_status(ACP::Protocol::AuthStatusParams.from_json(%({"_meta":#{metadata}})))
+          request = next_permission_event(requests)
+          request.field("method").not_nil!.as_s?.should eq("auth/status")
+          request.field("params").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+          result.state.should eq("authenticated")
+          result.accounts.map(&.label).should eq(["Workspace"])
+          account = result.accounts.first
+          account.description.should be_nil
+          account.active.should be_true
+          account.meta_raw.not_nil!.json.should eq(metadata)
+          result.raw.field("accounts").not_nil!.json.should eq(accounts)
+
+          update = next_permission_event(updates)
+          update.raw_state.should eq("_future")
+          update.state.should eq("unknown")
+          update.accounts.map(&.label).should eq(["Workspace"])
+          update.meta_raw.not_nil!.json.should eq(metadata)
+          update.accounts.first.meta_raw.not_nil!.json.should eq(metadata)
+        ensure
+          client.try(&.close)
+        end
+      end
+    end
+  end
+
+  it "retains precise account metadata when an editable account is moved and updated" do
+    snapshot = ACP::Protocol::AuthStatusResult.from_json(%({"state":"authenticated","accounts":[null,{"label":"First","_meta":{"example.test/value":#{decimal}}},{"label":"Second"}]}))
+    entries = snapshot.json_unmapped["accounts"].as_a
+    first = entries.delete_at(1)
+    first.as_h["label"] = JSON::Any.new("Renamed")
+    entries << first
+    snapshot.accounts.map(&.label).should eq(["Second", "Renamed"])
+    snapshot.accounts.last.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq(decimal)
+    snapshot.raw.field("accounts").not_nil!.elements?.not_nil!.first.null?.should be_true
+
+    snapshot.json_unmapped["accounts"] = JSON::Any.new(entries.reverse)
+    snapshot.accounts.map(&.label).should eq(["Renamed", "Second"])
+    snapshot.accounts.first.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq(decimal)
+  end
+
+  it "requires a string state while tolerating a malformed accounts field" do
+    type = ACP::Protocol::AuthStatusResult
+    type.from_json(%({"state":"unauthenticated","accounts":#{wide}})).accounts.should be_empty
+    [%({"accounts":[]}), %({"state":null}), %({"state":#{wide}}), %({"state":"unauthenticated","state":"authenticated"})].each do |wire|
+      expect_raises(JSON::ParseException) { type.from_json(wire) }
+    end
+  end
+end
+
 describe "ACP exact negotiated capability metadata" do
   it "keeps v1 metadata on the client and agent capability trees" do
     with_wide_stdio do |transport, feed, outgoing|
