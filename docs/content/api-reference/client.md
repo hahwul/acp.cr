@@ -840,6 +840,14 @@ attachment's terminal bindings. The application owns terminal processes and
 their cleanup, including cleanup when a creation reply cannot be delivered.
 [ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#releasing-terminals)
 
+The client applies the original `terminal/create` output byte limit to typed
+and generic `terminal/output` replies. It replaces invalid UTF-8 bytes with
+replacement characters, then keeps the newest complete characters that fit.
+If bytes are dropped to meet the limit, the reply sets `truncated` to true.
+The application controls its terminal capture buffer and can enforce the same
+limit while collecting output.
+[ACP v1 Terminal Output Limit](https://agentclientprotocol.com/protocol/v1/terminals#executing-commands)
+
 | Handler | Params Type | Result Type | Description |
 |---------|-------------|-------------|-------------|
 | `on_read_text_file` | `ReadTextFileParams` | `ReadTextFileResult` | Handle `fs/read_text_file` |
