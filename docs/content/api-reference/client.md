@@ -784,6 +784,15 @@ Closing a session or resuming without replay preserves its cursors.
 
 ## Typed Client Method Handlers
 
+For ACP v1, advertise file reads, file writes, and terminal support before
+initialization. The client handles `fs/read_text_file` and
+`fs/write_text_file` according to their separate capability flags.
+`clientCapabilities.terminal` enables the terminal methods as a group.
+Requests outside the advertisement return `-32601` before reaching either
+the typed handler or `on_agent_request`.
+[ACP v1 File System](https://agentclientprotocol.com/protocol/v1/file-system#checking-support)
+[ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#checking-support)
+
 | Handler | Params Type | Result Type | Description |
 |---------|-------------|-------------|-------------|
 | `on_read_text_file` | `ReadTextFileParams` | `ReadTextFileResult` | Handle `fs/read_text_file` |
