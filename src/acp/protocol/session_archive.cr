@@ -1,4 +1,5 @@
 require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -58,13 +59,11 @@ module ACP
     # :nodoc:
     abstract struct ArchiveResult
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a successful result with optional metadata.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

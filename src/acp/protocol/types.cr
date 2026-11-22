@@ -19,6 +19,7 @@ require "./content_block"
 require "./updates"
 require "./usage"
 require "./rfc3339_timestamp"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -726,6 +727,7 @@ module ACP
     # Options a v1 Agent expects to use for a proposed session.
     struct SessionOptionsResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # Available modes and the current mode, when reported.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
@@ -735,12 +737,9 @@ module ACP
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       getter config_options : Array(ConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates an options preview.
-      def initialize(@modes : SessionModeState? = nil, @config_options : Array(ConfigOption)? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@modes : SessionModeState? = nil, @config_options : Array(ConfigOption)? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       private def after_initialize : Nil
@@ -1172,12 +1171,11 @@ module ACP
     # Result of the `session/close` method (an empty object on success).
     struct SessionCloseResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a successful close result with optional metadata.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
@@ -1203,12 +1201,11 @@ module ACP
     # Result of the `session/delete` method (an empty object on success).
     struct SessionDeleteResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a successful delete result with optional metadata.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

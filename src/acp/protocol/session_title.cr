@@ -1,4 +1,5 @@
 require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -53,16 +54,14 @@ module ACP
     # The title stored by the Agent after any normalization.
     struct SetSessionTitleResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # The stored title to display.
+      # The stored plain-text title to display.
       property title : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a result with the title stored by the Agent.
-      def initialize(@title : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@title : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
   end
