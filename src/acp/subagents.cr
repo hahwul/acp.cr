@@ -58,7 +58,7 @@ module ACP
       property state_revision : UInt64?
       property write_order : UInt64?
       property? retired = false
-      property state : Protocol::RawJson?
+      getter state : Protocol::RawJson?
 
       def initialize(@request_id : String, @method : String, @session_id : String?, @workspace : SessionWorkspace?,
                      @replay_markers : Set(String)?)
@@ -73,7 +73,8 @@ module ACP
       end
 
       def observe_state(snapshot : Protocol::RawJson, *, retained : Bool) : Nil
-        @state = snapshot.json.bytesize > MAX_EARLY_STATE_SIZE && retained ? nil : snapshot
+        # Record an observation even when the late-resume cache cannot hold it.
+        @state = retained && snapshot.json.bytesize > MAX_EARLY_STATE_SIZE ? UNKNOWN_STATE : snapshot
       end
     end
 
@@ -302,9 +303,7 @@ module ACP
       if @v2 && (setup = @setups[id]?) && !setup.retired? && setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
         @setups.delete(id)
         @setup_by_session.delete(sid)
-        if (snapshot = setup.state) && snapshot.json.bytesize > MAX_EARLY_STATE_SIZE
-          setup.state = nil
-        end
+        setup.state.try { |snapshot| setup.observe_state(snapshot, retained: true) }
         @late_resumes[id] = setup
         if @late_resumes.size > MAX_LATE_RESUMES
           evicted_id, evicted = @late_resumes.shift
@@ -325,18 +324,22 @@ module ACP
       return unless (setup = @late_resumes.delete(id)) && (sid = setup.session_id)
       return {sid, nil} if child?(sid)
 
+      order = setup.write_order.not_nil!
+      pending = @setup_by_session[sid]?
+      pending = nil unless pending.try(&.written?)
+      newer = pending || late_resume(sid)
+      newer = nil if newer && newer.write_order.not_nil! <= order
+
       if response["jsonrpc"]?.try(&.as_s?) == "2.0"
         result = Protocol::WireFrame.result_json(response, frame)
         if result && attach_result(setup.method, result)
-          finish_resume(sid, setup, &discard_setup)
+          newer_state = newer.state || late_resume(sid, state_after: order).try(&.state) if newer
+          finish_resume(sid, setup, newer_state: newer_state, &discard_setup)
           return {sid, result}
         end
       end
 
-      pending = @setup_by_session[sid]?
-      pending = nil unless pending.try(&.written?)
-      newer = pending || late_resume(sid)
-      unless newer && newer.write_order.not_nil! > setup.write_order.not_nil!
+      unless newer
         active = @root_states.has_key?(sid)
         clear_descendant_runtime(sid, include_root_entities: !active)
         @unconfirmed_roots.add(sid) unless rejected && active
@@ -344,7 +347,7 @@ module ACP
       {sid, nil}
     end
 
-    private def finish_resume(session_id : String, setup : SetupRequest, &discard_setup : String -> Nil) : Nil
+    private def finish_resume(session_id : String, setup : SetupRequest, *, newer_state : Protocol::RawJson? = nil, &discard_setup : String -> Nil) : Nil
       @closed_roots.delete(session_id)
       if workspace = setup.workspace
         @workspace[session_id] = workspace
@@ -353,7 +356,9 @@ module ACP
       end
       order = setup.write_order.not_nil!
       if @v2
-        attach_root_state(session_id, setup.state || root_state(session_id) || UNKNOWN_STATE, order)
+        # An attached root already holds the latest live update. A detached
+        # root can have received that update during a newer pending resume.
+        attach_root_state(session_id, root_state(session_id) || newer_state || setup.state || UNKNOWN_STATE, order)
         discard_late_resumes(session_id, before: order, &discard_setup)
         @unconfirmed_roots.delete(session_id)
       else
@@ -361,10 +366,13 @@ module ACP
       end
     end
 
-    private def late_resume(session_id : String) : SetupRequest?
+    private def late_resume(session_id : String, *, state_after : UInt64? = nil) : SetupRequest?
       latest = nil
       @late_resumes.each_value do |setup|
-        latest = setup if setup.session_id == session_id
+        next unless setup.session_id == session_id
+        next if state_after && (!setup.state || setup.write_order.not_nil! <= state_after)
+
+        latest = setup
       end
       latest
     end
