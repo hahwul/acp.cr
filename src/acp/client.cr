@@ -35,6 +35,7 @@ require "uri"
 require "./protocol/types"
 require "./protocol/session_fork"
 require "./protocol/client_methods"
+require "./protocol/v2/elicitation"
 require "./transport"
 require "./mcp_provider"
 require "./errors"
@@ -2541,7 +2542,11 @@ module ACP
       method = Protocol::ClientMethod::ELICITATION_CREATE
       return JSON.parse(Protocol::CreateElicitationResult.cancel.to_json) if entry.cancellation.try(&.closed?)
 
+      v2_form = v2_wire? && params.try(&.as_h?).try(&.["mode"]?).try(&.as_s?) == "form"
       unless handler = @on_create_elicitation
+        if v2_form
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Client cannot render an elicitation form")
+        end
         return handle_unknown_agent_request(method, params, (params_json unless raw_notification_representable?(params_json)))
       end
       callback = ->(input : Protocol::CreateElicitationParams) do
@@ -2552,7 +2557,11 @@ module ACP
           handler.call(input)
         end
       end
-      handle_typed_client_method(params, callback, Protocol::CreateElicitationParams, method, params_json)
+      if v2_form
+        handle_typed_client_method(params, callback, Protocol::V2::FormElicitationRequest, method, params_json)
+      else
+        handle_typed_client_method(params, callback, Protocol::CreateElicitationParams, method, params_json)
+      end
     end
 
     private class ElicitationReplyClaimed < Exception
