@@ -1592,11 +1592,10 @@ module ACP
         end
       end
 
-      # Returns the selected option ID, or nil if cancelled.
+      # Returns the option ID for a selected outcome.
       def selected_option_id : String?
-        if h = @outcome.as_h?
-          return if h["outcome"]?.try(&.as_s?) == "cancelled"
-          h["optionId"]?.try(&.as_s?)
+        if (decision = @outcome.as_h?) && decision["outcome"]?.try(&.as_s?) == "selected"
+          decision["optionId"]?.try(&.as_s?)
         end
       end
 

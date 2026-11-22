@@ -971,7 +971,7 @@ describe "ACP::Client#session_cancel with a pending permission request" do
       JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
     end
 
-    transport.inject_raw(%({"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"other","toolCall":{"toolCallId":"t"},"options":[]}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"other","toolCall":{"toolCallId":"t"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}))
     entered.receive
 
     client.session_cancel("s1")
@@ -1200,7 +1200,7 @@ describe "ACP::Client agent request with a null id" do
     client.on_agent_request = ->(_m : String, _p : JSON::Any) { JSON.parse(ACP::Protocol::RequestPermissionResult.selected("ok").to_json) }
 
     2.times do
-      transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[]}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":null,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[{"optionId":"ok","name":"OK","kind":"allow_once"}]}}))
     end
     2.times { next_answer(transport)["result"]["outcome"]["optionId"].as_s.should eq("ok") }
     client.close
@@ -6974,12 +6974,13 @@ private class PendingMcpReplyTransport < ChoiceStateTransport
   end
 end
 
-private class PausedMcpInvalidRequestStdio < ACP::StdioTransport
+private class PausedStdioError < ACP::StdioTransport
+  property paused_code = ACP::JsonRpcError::INVALID_REQUEST
   getter replying = Channel(Nil).new(1)
   getter release = Channel(Nil).new(1)
 
   def send(message : Hash(String, JSON::Any)) : Nil
-    if message["error"]?.try(&.["code"]?) == JSON::Any.new(ACP::JsonRpcError::INVALID_REQUEST.to_i64)
+    if message["error"]?.try(&.["code"]?) == JSON::Any.new(@paused_code.to_i64)
       @replying.send(nil)
       @release.receive?
     end
@@ -7126,7 +7127,7 @@ describe "ACP cancellation request identities" do
     reader, feed = IO.pipe
     outgoing, writer = IO.pipe
     outgoing.read_timeout = 2.seconds
-    transport = PausedMcpInvalidRequestStdio.new(reader, writer)
+    transport = PausedStdioError.new(reader, writer)
     client = ACP::V2::Client.new(transport)
     checkpoint = Channel(Nil).new(1)
     client.on_notification = ->(method : String, _params : JSON::Any?) do
@@ -7233,5 +7234,185 @@ describe "ACP cancellation request identities" do
         end
       end
     end
+  end
+end
+
+describe "Permission result validation" do
+  it "checks v1 selections against the original options before a raw handler can change them" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.on_agent_request = ->(_method : String, params : JSON::Any) do
+        selected = params["toolCall"]["title"].as_s
+        params["options"][0].as_h["optionId"] = JSON::Any.new(selected)
+        JSON.parse(ACP::Protocol::RequestPermissionResult.selected(selected).to_json)
+      end
+      options = %([{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}])
+      {"forged", "deny"}.each_with_index do |selected, id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":#{selected.to_json}},"options":#{options}}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        if selected == "deny"
+          reply["result"]["outcome"]["optionId"].as_s.should eq("deny")
+        else
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "checks v2 selections against the original options and forwards future outcomes" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.on_request_permission = ->(params : ACP::Protocol::V2::RequestPermissionParams) do
+        if params.title == "forged"
+          params.options << ACP::Protocol::PermissionOption.new("forged", "Forged")
+          ACP::Protocol::V2::RequestPermissionResult.selected("forged")
+        else
+          ACP::Protocol::V2::RequestPermissionResult.new(JSON.parse(params.title))
+        end
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      options = %([{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}])
+      {
+        "forged"                                                               => false,
+        %({"outcome":"selected"})                                              => false,
+        %({"outcome":"selected","optionId":3})                                 => false,
+        %("cancelled")                                                         => false,
+        %({"outcome":"selected","optionId":"allow","_meta":{"source":"user"}}) => true,
+        %({"outcome":"selected","optionId":"deny"})                            => true,
+        %({"outcome":"cancelled","_meta":{"reason":"dismissed"}})              => true,
+        %({"outcome":"_deferred","extension":{"value":42}})                    => true,
+        %({"outcome":"future","extension":true})                               => true,
+      }.each_with_index do |(title, valid), id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":{"sessionId":"s","title":#{title.to_json},"options":#{options}}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(id)
+        if valid
+          reply["result"]["outcome"].should eq(JSON.parse(title))
+        else
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps custom and future v2 outcomes opaque to the selection helper" do
+    {"_deferred", "future"}.each do |kind|
+      result = ACP::Protocol::V2::RequestPermissionResult.from_json(%({"outcome":{"outcome":#{kind.to_json},"optionId":"allow"}}))
+      result.selected_option_id.should be_nil
+      result.cancelled?.should be_false
+    end
+  end
+
+  it "rejects conflicting v1 legacy selection IDs and normalizes legacy cancellation" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.on_agent_request = ->(_method : String, params : JSON::Any) do
+        params["toolCall"]["reply"]
+      end
+      options = %([{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}])
+      {
+        %({"outcome":{"selected":"allow","optionId":"deny"}})                            => nil,
+        %({"outcome":{"selected":"allow","optionId":42}})                                => nil,
+        %({"outcome":{"selected":"deny","optionId":"deny","_meta":{"source":"legacy"}}}) => %({"outcome":{"outcome":"selected","optionId":"deny","_meta":{"source":"legacy"}}}),
+        %({"outcome":"cancelled","_meta":{"reason":"dismissed"}})                        => %({"outcome":{"outcome":"cancelled"},"_meta":{"reason":"dismissed"}}),
+      }.each_with_index do |(result, expected), id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","reply":#{result}},"options":#{options}}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        if expected
+          reply["result"].should eq(JSON.parse(expected))
+        else
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  {1, 2}.each do |version|
+    it "rejects ambiguous v#{version} offers before invoking the handler" do
+      with_wide_stdio do |transport, feed, outgoing|
+        calls = 0
+        if version == 2
+          v2 = ACP::V2::Client.new(transport)
+          v2.on_request_permission = ->(_params : ACP::Protocol::V2::RequestPermissionParams) do
+            calls += 1
+            ACP::Protocol::V2::RequestPermissionResult.selected("allow")
+          end
+          initialize_wide_v2(v2, feed, outgoing)
+          client = v2
+        else
+          v1 = ACP::Client.new(transport)
+          v1.on_agent_request = ->(_method : String, _params : JSON::Any) do
+            calls += 1
+            JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+          end
+          client = v1
+        end
+
+        fields = version == 2 ? %("sessionId":"s","title":"Review") : %("sessionId":"s","toolCall":{"toolCallId":"t"})
+        allow = %({"optionId":"allow","name":"Allow","kind":"allow_once"})
+        ambiguous = %({"optionId":"deny","optionId":"allow","name":"Review","kind":"reject_once"})
+        {
+          %("params":{#{fields},"options":[]},"params":{#{fields},"options":[#{allow}]}),
+          %("params":{#{fields},"options":[],"options":[#{allow}]}),
+          %("params":{#{fields},"options":[#{ambiguous}]}),
+          %("params":{#{fields},"options":[{"optionId":"allow","name":"Allow","kind":"reject_once","kind":"allow_once"}]}),
+          %("params":{#{fields},"options":[{"optionId":"allow","name":"Deny","name":"Allow","kind":"allow_once"}]}),
+        }.each_with_index do |params, id|
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission",#{params}})
+          reply = JSON.parse(outgoing.gets.not_nil!)
+          reply["id"].as_i.should eq(id)
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        end
+        if version == 2
+          feed.puts %({"jsonrpc":"2.0","id":"malformed","method":"session/request_permission","params":[]})
+          reply = JSON.parse(outgoing.gets.not_nil!)
+          reply["id"].as_s.should eq("malformed")
+          reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        end
+        calls.should eq(0)
+
+        feed.puts %({"jsonrpc":"2.0","id":"valid","method":"session/request_permission","params":{#{fields},"options":[#{allow}]}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["result"]["outcome"]["optionId"].as_s.should eq("allow")
+        calls.should eq(1)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "keeps dispatch running while an ambiguous permission reply waits for output" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedStdioError.new(reader, writer)
+    transport.paused_code = ACP::JsonRpcError::INVALID_PARAMS
+    client = ACP::Client.new(transport)
+    checkpoint = Channel(Nil).new(1)
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      checkpoint.send(nil) if method == "_checkpoint"
+      nil
+    end
+    feed.puts %({"jsonrpc":"2.0","id":"ambiguous","method":"session/request_permission","params":{"options":[],"options":[]}})
+    next_permission_event(transport.replying)
+
+    feed.puts %({"jsonrpc":"2.0","method":"_checkpoint"})
+    next_permission_event(checkpoint)
+
+    transport.release.send(nil)
+    reply = JSON.parse(outgoing.gets.not_nil!)
+    reply["id"].as_s.should eq("ambiguous")
+    reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+  ensure
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
   end
 end
