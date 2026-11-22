@@ -2005,6 +2005,10 @@ describe "ACP exact authentication status snapshots" do
     snapshot.accounts.map(&.label).should eq(["Second", "Renamed"])
     snapshot.accounts.last.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq(decimal)
     snapshot.raw.field("accounts").not_nil!.elements?.not_nil!.first.null?.should be_true
+
+    snapshot.json_unmapped["accounts"] = JSON::Any.new(entries.reverse)
+    snapshot.accounts.map(&.label).should eq(["Renamed", "Second"])
+    snapshot.accounts.first.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq(decimal)
   end
 
   it "requires a string state while tolerating a malformed accounts field" do

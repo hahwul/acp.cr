@@ -489,6 +489,13 @@ module ACP
         WireFrame.encode(value) unless value.as_h? || value.as_a?
       end
 
+      # Applies retained item sources to a replacement array of the same items.
+      def raw_with_array(view : ArrayView) : RawJson
+        return raw if @value.try(&.as_a?).try(&.same?(view))
+
+        RawJson.new(JSON::PullParser.new(encode_blocks(view)))
+      end
+
       def raw : RawJson
         if value = @value
           rendered = RawJson.new(value)

@@ -117,8 +117,8 @@ module ACP
       end
 
       protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
-        if key == "accounts" && (accounts = @accounts_wire) && (view = accounts.value.try(&.as_a?)) && value.as_a?.try(&.same?(view))
-          return accounts.raw.json
+        if key == "accounts" && (accounts = @accounts_wire) && (view = value.as_a?)
+          return accounts.raw_with_array(view).json
         end
 
         super
