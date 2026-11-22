@@ -137,8 +137,32 @@ module ACP
         WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
         # :nodoc:
+        struct RetainedCost
+          getter cost : Protocol::Cost
+
+          def initialize(@cost : Protocol::Cost, @source : RawJson? = nil)
+            @original_meta = @cost.meta_raw
+          end
+
+          def_equals_and_hash @cost
+
+          def raw : RawJson
+            return RawJson.new(JSON::PullParser.new(WireFrame.encode(@cost))) unless source = @source
+
+            meta = @cost.meta_raw
+            return source if meta.try(&.json) == @original_meta.try(&.json)
+
+            meta ? source.with_field("_meta", meta) : source.without_field("_meta")
+          end
+
+          def to_json(builder : JSON::Builder) : Nil
+            raw.to_json(builder)
+          end
+        end
+
+        # :nodoc:
         module OptionalCost
-          def self.from_json(pull : JSON::PullParser) : Protocol::Cost?
+          def self.from_json(pull : JSON::PullParser) : RetainedCost?
             wire = RawJson.new(RawJson.patch_parser(pull, required: {"amount", "currency"}, optional: {"_meta"}))
             return unless token = wire.field("amount")
 
@@ -146,8 +170,10 @@ module ACP
             return unless kind.int? || kind.float?
             return unless (amount = token.json.to_f64?) && amount.finite?
 
-            # JSON's integer decoder is narrower than the Float64 cost field.
-            Protocol::Cost.from_json(wire.with_field("amount", RawJson.new(JSON::Any.new(amount))).json)
+            # Normalize only the typed projection. Forward the Agent's exact amount.
+            cost = Protocol::Cost.from_json(wire.with_field("amount", RawJson.new(JSON::Any.new(amount))).json)
+            wire = wire.without_field("_meta") if wire.field("_meta") && !cost.meta_raw
+            RetainedCost.new(cost, wire)
           rescue JSON::ParseException
             nil
           end
@@ -163,11 +189,35 @@ module ACP
         # Total context capacity in tokens.
         property size : UInt64
 
-        # Cumulative cost and key-level metadata patches.
-        PatchFields.tolerant({
-          cost: {Protocol::Cost, "cost", OptionalCost},
-        })
+        @[JSON::Field(key: "cost", presence: true, emit_null: true, ignore_serialize: !cost_present?)]
+        @cost_wire : PatchFields::Decoded(RetainedCost, OptionalCost)?
+
+        @[JSON::Field(ignore: true)]
+        @cost_wire_present = false
+
         include LosslessMetadataPatch
+
+        # Cumulative cost as a typed Float64 projection.
+        def cost : Protocol::Cost?
+          @cost_wire.try(&.value).try(&.cost)
+        end
+
+        # Replaces the cost, or explicitly clears it when assigned nil.
+        def cost=(value : Protocol::Cost?) : Protocol::Cost?
+          @cost_wire_present = true
+          @cost_wire = value.try { |cost| PatchFields::Decoded(RetainedCost, OptionalCost).new(RetainedCost.new(cost)) }
+          value
+        end
+
+        # Whether the patch supplies a usable cost or explicitly clears it.
+        def cost_present? : Bool
+          @cost_wire_present && (!@cost_wire || !cost.nil?)
+        end
+
+        # Exact cumulative cost, including its original numeric precision.
+        def cost_raw : RawJson?
+          @cost_wire.try(&.value).try(&.raw)
+        end
 
         # Creates a usage update for the reported token counts.
         def initialize(@used : UInt64, @size : UInt64)

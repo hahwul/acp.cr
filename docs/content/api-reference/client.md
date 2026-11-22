@@ -201,6 +201,39 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Session info and usage
+
+Use a `SessionDetailsStore` per connection to retain the session info and
+context-window usage reported through `on_update`.
+
+```crystal
+details = ACP::V2::SessionDetailsStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  details.observe(update)
+  nil
+end
+
+info = details.session_info(session_id)
+usage = details.session_usage(session_id)
+```
+
+Both lookups return `nil` until their first usable update. Session info
+patches the title, RFC 3339 activity time, and metadata. Usage updates
+replace the token counts and patch the cumulative cost and usage metadata.
+`cost_raw` preserves the Agent's exact JSON amount. `cost` provides a
+`Float64` projection. A parent's reported cost already includes its
+descendants' cost.
+
+The store defaults to 128 sessions and 64 KiB of retained detail data per
+session. Adjust `session_limit:` and `session_byte_limit:`, or pass `nil`
+to remove a limit. The store keeps the latest token counts and applies
+cost and usage metadata that fit. It preserves explicit clears when a
+different usage field exceeds the budget.
+
+When the Agent sends current details on resume, it sends them after any
+requested replay. Use `forget_session` when you stop retaining details
+for a session. [ACP v2 session info](https://agentclientprotocol.com/protocol/v2/session-list#updating-session-metadata) · [ACP v2 usage](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-usage-updates) · [Current-state synchronization](https://agentclientprotocol.com/protocol/v2/session-setup#current-state-synchronization)
+
 ### Session compaction
 
 Feed each connection's v2 session updates to a `CompactionStore` in
