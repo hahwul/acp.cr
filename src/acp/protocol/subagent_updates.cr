@@ -99,6 +99,19 @@ module ACP
       end
     end
 
+    # :nodoc:
+    module OptionalSessionMessageContent
+      def self.from_json(pull : JSON::PullParser) : Array(ContentBlock)?
+        had_items = false
+        blocks = OptionalContentList(ContentBlock).from_json(pull) do |item|
+          had_items = true
+          OptionalContentValue(ContentBlock).from_json(item)
+        end
+        # Only an explicitly empty list should clear the stored content.
+        blocks unless had_items && blocks.try(&.empty?)
+      end
+    end
+
     # Creates or patches a view of an inter-session message in a transcript.
     # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-directed-messages
     struct SessionMessageUpdate < SessionUpdate
@@ -108,23 +121,35 @@ module ACP
 
       # Only present fields replace stored values. A null or empty content
       # list clears the message. Linked IDs refer to views in other transcripts.
-      PatchFields.define({
-        sender_session_id:    {String, "senderSessionId"},
-        recipient_session_id: {String, "recipientSessionId"},
-        sender_message_id:    {String, "senderMessageId"},
-        recipient_message_id: {String, "recipientMessageId"},
-        content:              {Array(ContentBlock), "content"},
-        meta:                 {Hash(String, JSON::Any), "_meta"},
+      PatchFields.tolerant({
+        sender_session_id:    {String, "senderSessionId", OptionalCapabilityString},
+        recipient_session_id: {String, "recipientSessionId", OptionalCapabilityString},
+        sender_message_id:    {String, "senderMessageId", OptionalCapabilityString},
+        recipient_message_id: {String, "recipientMessageId", OptionalCapabilityString},
+        content:              {Array(ContentBlock), "content", OptionalSessionMessageContent},
       })
+      include LosslessMetadataField
 
       # Builds a message update. Assign only the fields it should patch.
       def initialize(@message_id : String)
         @session_update = "session_message"
       end
+
+      # Reads an unambiguous message ID and omits conflicting optional updates.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"sessionUpdate", "messageId"},
+          optional: {"senderSessionId", "recipientSessionId", "senderMessageId", "recipientMessageId", "content", "_meta"}))
+      end
+
+      def_equals_and_hash @session_update, @message_id, sender_session_id, sender_session_id_present?,
+        recipient_session_id, recipient_session_id_present?, sender_message_id, sender_message_id_present?,
+        recipient_message_id, recipient_message_id_present?, content, content_present?, metadata_comparison, meta_present?
     end
 
     # Appends a content block to an inter-session message in a transcript.
     struct SessionMessageChunkUpdate < SessionUpdate
+      include LosslessMetadata
+
       # ID of the message in the enclosing session's transcript.
       @[JSON::Field(key: "messageId")]
       getter message_id : String
@@ -132,14 +157,18 @@ module ACP
       # A single content block to append.
       property content : ContentBlock
 
-      # Extension metadata scoped to the chunk.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Builds a content chunk for the message.
-      def initialize(@message_id : String, @content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@message_id : String, @content : ContentBlock, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "session_message_chunk"
+        self.meta = meta
       end
+
+      # Reads one unambiguous content block and its optional metadata.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"sessionUpdate", "messageId", "content"}, optional: {"_meta"}))
+      end
+
+      def_equals_and_hash @session_update, @message_id, @content, metadata_comparison
     end
   end
 end
