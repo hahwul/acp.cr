@@ -124,6 +124,7 @@ module ACP
     getter agent_info : Protocol::AgentInfo?
 
     @v1_initialize_result : Protocol::InitializeResult?
+    @v1_initialize_meta : Protocol::RawJson?
 
     # Authentication methods the agent supports as editable JSON::Any.
     def auth_methods : Array(JSON::Any)?
@@ -523,16 +524,20 @@ module ACP
     #
     # Raises `VersionMismatchError` if the agent's protocol version
     # is incompatible. Raises `JsonRpcError` if the agent returns an error.
-    def initialize_connection : Protocol::InitializeResult
+    def initialize_connection(*, meta : Hash(String, JSON::Any) | Protocol::RawJson | Nil = nil) : Protocol::InitializeResult
       ensure_state(ClientState::Created, "initialize")
 
       params = Protocol::InitializeParams.new(
         protocol_version: ACP::PROTOCOL_VERSION,
         client_capabilities: @client_capabilities,
-        client_info: @client_info
+        client_info: @client_info,
+        meta: meta.as?(Hash(String, JSON::Any))
       )
+      params.meta_raw = meta if meta.is_a?(Protocol::RawJson)
+      initialize_meta = params.meta_raw
 
-      result = send_typed_request(Protocol::AgentMethod::INITIALIZE, params, Protocol::InitializeResult, exact_response: true)
+      response = send_initialization_offer(params)
+      result = decode_typed_response(Protocol::AgentMethod::INITIALIZE, response, Protocol::InitializeResult)
 
       # The handshake is a negotiation: the agent returns the version it will
       # use, which may be lower than we requested. Accept any version we still
@@ -554,6 +559,7 @@ module ACP
       @v1_boolean_config_supported = !!params.client_capabilities.session.try(&.config_options).try(&.boolean)
       @agent_info = result.agent_info
       @v1_initialize_result = result
+      @v1_initialize_meta = initialize_meta
       @state = ClientState::Initialized
 
       ClientLog.info do
@@ -664,7 +670,7 @@ module ACP
       replacement.on_elicitation_complete = @on_elicitation_complete
 
       begin
-        replacement.initialize_connection
+        replacement.initialize_connection(meta: @v1_initialize_meta)
         ensure_terminal_auth_state
         close
       rescue ex
@@ -1558,6 +1564,16 @@ module ACP
       decode_typed_response(method, response, type)
     end
 
+    private def send_initialization_offer(params : JSON::Serializable, *, on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
+      method = Protocol::AgentMethod::INITIALIZE
+      raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
+      projection = raw.to_json_any?
+      wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
+      routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
+      builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_view) }
+      send_and_await_response(method, builder, exact_response: true, wire_params: wire_params, on_response: on_response)
+    end
+
     # Core implementation for sending a JSON-RPC request and awaiting
     # its response. Both `send_request` and `send_request_raw` delegate
     # to this method, differing only in how they build the message.
@@ -1613,7 +1629,7 @@ module ACP
             end
           end
         end
-        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true)
+        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: method == Protocol::AgentMethod::INITIALIZE)
       end
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
@@ -1663,13 +1679,19 @@ module ACP
       end
       begin
         if v2_wire? && initialize
-          @transport.send_checked(message) do
+          preflight = -> do
             @pending_mutex.synchronize do
               raise ConnectionClosedError.new if @disconnected
 
               @pending[id_str] = @pending[id_str].copy_with(armed: true)
               @v2_initialize_armed = true
             end
+            nil
+          end
+          if wire_frame
+            @transport.send_wire(wire_frame, &preflight)
+          else
+            @transport.send_checked(message, &preflight)
           end
         elsif wire_frame || fork_cursor || arm_at_write || before_send || mcp_servers
           preflight = -> do

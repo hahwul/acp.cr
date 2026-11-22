@@ -130,6 +130,8 @@ module ACP
     # Params for the `initialize` method (Client → Agent).
     struct InitializeParams
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The ACP protocol version the client supports.
       @[JSON::Field(key: "protocolVersion")]
@@ -144,16 +146,17 @@ module ACP
       @[JSON::Field(key: "clientInfo")]
       property client_info : ClientInfo?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @protocol_version : UInt16,
         @client_capabilities : ClientCapabilities,
         @client_info : ClientInfo? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
+      end
+
+      protected def comparison_value
+        {@protocol_version, @client_capabilities, @client_info, comparable_json(meta_raw)}
       end
     end
 

@@ -40,6 +40,13 @@ message's ID. Foreground completion arrives in an idle `state_update`.
 Keep `on_update` callbacks short because they run on the dispatcher fiber.
 [ACP v2 prompt acceptance](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#2-prompt-accepted)
 
+For `initialize_connection` in either protocol version, pass `meta:` as a
+`Hash(String, JSON::Any)` or a `Protocol::RawJson` object. Use `meta_raw` on
+the implementation info to supply exact `_meta` values there as well. Stdio
+preserves the original numbers on the wire. When repeating the v2 handshake,
+omitting `meta:` reuses the last successful offer and `meta: nil` clears it.
+[ACP v2 Initialization](https://agentclientprotocol.com/protocol/v2/initialization)
+
 Session creation and fork responses in both versions, and v2 prompt
 acknowledgements, expose exact extension metadata via `meta_raw`. An
 ambiguous returned ID or repeated JSON-RPC `result` raises `ProtocolError`.

@@ -1938,6 +1938,117 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact initialization offers" do
+  it "retains ordinary metadata passed to the v1 and v2 offer constructors" do
+    metadata = {"example.test/offer" => JSON::Any.new(true)}
+    v1 = ACP::Protocol::InitializeParams.new(1_u16, ACP::Protocol::ClientCapabilities.new, meta: metadata)
+    v2 = ACP::Protocol::V2::InitializeParams.new(ACP::Protocol::V2::Implementation.new("client", "1"), meta: metadata)
+    v1.meta.should eq(metadata)
+    v2.meta.should eq(metadata)
+  end
+
+  it "compares v2 offers with exact capability values independently of metadata key order" do
+    terminal = ACP::Protocol::V2::Capability.from_json(%({"example.test/count":18446744073709551615}))
+    caps = ACP::Protocol::V2::ClientCapabilities.new(auth: ACP::Protocol::V2::ClientAuthCapabilities.new(terminal: terminal))
+    info = ACP::Protocol::V2::Implementation.new("client", "1")
+    metadata = {"example.test/first" => JSON::Any.new(true), "example.test/second" => JSON::Any.new(false)}
+    reversed = metadata.to_a.reverse.to_h
+    first = ACP::Protocol::V2::InitializeParams.new(info, capabilities: caps, meta: metadata)
+    second = ACP::Protocol::V2::InitializeParams.new(info, capabilities: caps, meta: reversed)
+    first.should eq(second)
+    first.hash.should eq(second.hash)
+  end
+
+  {1, 2}.each do |version|
+    it "sends exact v#{version} implementation metadata over stdio" do
+      with_wide_stdio do |transport, feed, outgoing|
+        metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+        info = ACP::Protocol::ClientInfo.from_json(%({"name":"editor","version":"1","_meta":#{metadata}}))
+        received = Channel(ACP::Protocol::RawJson).new(1)
+        spawn do
+          message = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          received.send(message)
+          id = message.field("id").not_nil!.json
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"protocolVersion":#{version},"info":{"name":"agent","version":"1"}}})
+        end
+        if version == 1
+          v1 = ACP::Client.new(transport, client_info: info)
+          v1.request_timeout = 2.0
+          v1.initialize_connection
+        else
+          v2 = ACP::V2::Client.new(transport, info)
+          v2.request_timeout = 2.0
+          v2.initialize_connection
+        end
+        params = next_permission_event(received).field("params").not_nil!
+        implementation = params.field(version == 1 ? "clientInfo" : "info").not_nil!
+        implementation.field("_meta").try(&.json).should eq(metadata)
+      ensure
+        v1.try(&.close)
+        v2.try(&.close)
+      end
+    end
+  end
+  it "inherits exact v2 offer metadata until the caller clears it" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      metadata = ACP::Protocol::RawJson.from_json(%({"example.test/ratio":0.123456789012345678901}))
+      offers = Channel(ACP::Protocol::RawJson).new(3)
+      spawn do
+        3.times do
+          message = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          offers.send(message.field("params").not_nil!)
+          id = message.field("id").not_nil!.json
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}}})
+        end
+      end
+      client.initialize_connection(meta: metadata)
+      client.initialize_connection
+      client.initialize_connection(meta: nil)
+      next_permission_event(offers).field("_meta").should eq(metadata)
+      next_permission_event(offers).field("_meta").should eq(metadata)
+      next_permission_event(offers).field("_meta").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "reports when a transport cannot preserve an exact offer and can initialize again" do
+    transport = SignalingTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    metadata = ACP::Protocol::RawJson.from_json(%({"example.test/ratio":0.123456789012345678901}))
+    expect_raises(ACP::ProtocolError, /cannot preserve/) { client.initialize_connection(meta: metadata) }
+    client.initialization_result.should be_nil
+    transport.sent_messages.should be_empty
+
+    spawn do
+      offer = next_answer(transport)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{offer["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}}}))
+    end
+    client.initialize_connection.protocol_version.should eq(2_u16)
+  ensure
+    client.try(&.close)
+  end
+  it "keeps the v2 connection ready when an exact offer exceeds the local line limit" do
+    with_wide_stdio(exact_frames: true, max_line_bytes: 512) do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      initialize_wide_v2(client, feed, outgoing)
+      prior = client.initialization_result
+      metadata = ACP::Protocol::RawJson.from_json(%({"example.test/ratio":0.123456789012345678901,"example.test/padding":#{("x" * 512).to_json}}))
+      expect_raises(ACP::FrameTooLargeError) { client.initialize_connection(meta: metadata) }
+      client.initialization_result.should eq(prior)
+      client.closed?.should be_false
+      initialize_wide_v2(client, feed, outgoing)
+      client.initialization_result.not_nil!.protocol_version.should eq(2_u16)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
 describe "ACP v1 exact authentication offers" do
   it "keeps authentication descriptors with exact metadata available after initialization" do
     with_wide_stdio do |transport, feed, outgoing|
@@ -2456,11 +2567,11 @@ describe "ACP stdio messages with wide integers" do
   end
 end
 
-private def with_wide_stdio(*, exact_frames : Bool = false, &)
+private def with_wide_stdio(*, exact_frames : Bool = false, max_line_bytes : Int32 = ACP::StdioTransport::DEFAULT_MAX_LINE_BYTES, &)
   reader, feed = IO.pipe
   outgoing, writer = IO.pipe
   outgoing.read_timeout = 2.seconds
-  transport = ACP::StdioTransport.new(reader, writer, exact_frames: exact_frames)
+  transport = ACP::StdioTransport.new(reader, writer, exact_frames: exact_frames, max_line_bytes: max_line_bytes)
   yield transport, feed, outgoing
 ensure
   transport.try(&.close)
