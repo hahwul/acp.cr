@@ -799,7 +799,7 @@ module ACP
     # Creates and attaches a session with typed setup parameters.
     def session_new(params : Protocol::SessionNewParams) : Protocol::SessionNewResult
       ensure_state(ClientState::Initialized, Protocol::AgentMethod::SESSION_NEW)
-      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
+      validate_session_setup(params)
       result = attach_session(Protocol::AgentMethod::SESSION_NEW, params, Protocol::SessionNewResult)
 
       ClientLog.info { "Session created: #{result.session_id}" }
@@ -837,7 +837,7 @@ module ACP
       unless @agent_capabilities.try(&.load_session?)
         raise InvalidStateError.new("The Agent did not advertise loadSession")
       end
-      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
+      validate_session_setup(params)
       session_id = params.session_id
       result = attach_session(Protocol::AgentMethod::SESSION_LOAD, params, Protocol::SessionLoadResult, session_id)
 
@@ -909,8 +909,7 @@ module ACP
       unless caps && caps.fork
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.fork")
       end
-      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt,
-        params.mcp_servers, params.config_options)
+      validate_session_setup(params)
 
       attach_session(method, params, Protocol::SessionForkResult)
     end
@@ -963,11 +962,10 @@ module ACP
       end
     end
 
-    private def validate_session_setup(
-      cwd : String, directories : Array(String)?, prompt : Protocol::SystemPrompt?,
-      servers : Array(JSON::Any)?, config_options : Array(Protocol::InitialSessionConfigOption)?,
-    ) : Nil
-      unless Protocol.absolute_workspace?(cwd, directories)
+    private def validate_session_setup(params : Protocol::SessionNewParams | Protocol::SessionLoadParams |
+                                                Protocol::SessionResumeParams | Protocol::SessionForkParams) : Nil
+      directories = params.additional_directories
+      unless Protocol.absolute_workspace?(params.cwd, directories)
         raise ArgumentError.new("ACP session directories must be absolute")
       end
 
@@ -975,7 +973,7 @@ module ACP
       if directories && !caps.try(&.additional_directories?)
         raise InvalidStateError.new("The Agent did not advertise additionalDirectories")
       end
-      if prompt
+      if prompt = params.system_prompt
         support = caps.try(&.system_prompt) || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
         unless support.supports_mode?(prompt.mode, @on_system_prompt_mode)
           raise InvalidStateError.new("The Agent did not advertise systemPrompt #{prompt.mode.inspect}")
@@ -984,8 +982,15 @@ module ACP
           raise ArgumentError.new("ACP system prompts require one or more text content blocks")
         end
       end
-      validate_initial_config_options(config_options) if config_options
-      validate_session_mcp_servers(servers) if servers
+      if config_options = params.config_options
+        validate_initial_config_options(config_options)
+      end
+      if servers = params.mcp_servers_raw
+        # Wide numbers in opaque extension fields must not hide invalid
+        # transport, command or name fields from the legacy shape checks.
+        routing_view = servers.to_json_any? || Protocol::WireFrame.new(servers.json).project_for_routing
+        validate_session_mcp_servers(routing_view.as_a)
+      end
     end
 
     private def validate_session_mcp_servers(servers : Array(JSON::Any)) : Nil
@@ -1101,7 +1106,7 @@ module ACP
       unless @agent_capabilities.try(&.session_capabilities).try(&.resume?)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.resume")
       end
-      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
+      validate_session_setup(params)
       session_id = params.session_id
       result = attach_session(Protocol::AgentMethod::SESSION_RESUME, params, Protocol::SessionResumeResult, session_id)
 

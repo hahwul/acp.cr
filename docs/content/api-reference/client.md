@@ -605,6 +605,11 @@ Use `meta_raw` on setup parameters, system prompts, and initial configuration
 options for exact JSON numbers. V2 initial configuration options also expose
 `value_raw` for custom values.
 
+MCP declarations, HTTP headers, and environment variables also expose
+`meta_raw`. Use `mcp_servers_raw` on v1 setup parameters to read or replace
+the exact server list. The existing `mcp_servers` accessor provides an
+editable `JSON::Any` view.
+
 ### ACP v1 request validation
 
 The client checks the Agent's advertised capabilities before calling

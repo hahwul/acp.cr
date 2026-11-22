@@ -339,18 +339,90 @@ module ACP
     # ─── Session/New Method ───────────────────────────────────────────
     # See: https://agentclientprotocol.com/protocol/session-setup#creating-a-session
 
+    # :nodoc:
+    struct McpServerList(T)
+      getter servers : Array(T)
+      @wire : PreservedJson?
+
+      def initialize(@servers : Array(T), @wire : PreservedJson? = nil)
+      end
+
+      def self.new(pull : JSON::PullParser) : self
+        {% if T == JSON::Any %}
+          location = pull.location
+          source = RawJson.new(pull)
+          elements = source.elements?
+          unless elements
+            raise JSON::ParseException.new("MCP servers must be an array", *location)
+          end
+
+          wire = PreservedJson.new(source, project_array_objects: true, project_nested_objects: true)
+          servers = wire.value.not_nil!.as_a
+          unless servers.size == elements.size
+            raise JSON::ParseException.new("MCP server entry cannot be represented as an object", *location)
+          end
+          new(servers, wire)
+        {% else %}
+          new(Array(T).new(pull))
+        {% end %}
+      end
+
+      def raw : RawJson
+        @wire.try(&.raw) || RawJson.new(JSON::PullParser.new(WireFrame.encode(@servers)))
+      end
+
+      def to_json(builder : JSON::Builder) : Nil
+        if wire = @wire
+          wire.to_json(builder)
+        else
+          @servers.to_json(builder)
+        end
+      end
+
+      def_equals_and_hash comparison_value
+
+      protected def comparison_value
+        wire = raw
+        wire.to_json_any? || wire
+      end
+    end
+
+    # :nodoc:
+    module V1McpServers
+      @[JSON::Field(key: "mcpServers")]
+      @mcp_servers_wire : McpServerList(JSON::Any) = McpServerList(JSON::Any).new([] of JSON::Any)
+
+      # MCP server entries available as JSON::Any.
+      def mcp_servers : Array(JSON::Any)
+        @mcp_servers_wire.servers
+      end
+
+      # Replaces the MCP server list.
+      def mcp_servers=(servers : Array(JSON::Any)) : Array(JSON::Any)
+        @mcp_servers_wire = McpServerList(JSON::Any).new(servers)
+        servers
+      end
+
+      # MCP server declarations including exact extension values.
+      def mcp_servers_raw : RawJson
+        @mcp_servers_wire.raw
+      end
+
+      # Replaces the MCP server list with exact declarations.
+      def mcp_servers_raw=(servers : RawJson) : RawJson
+        @mcp_servers_wire = McpServerList(JSON::Any).new(JSON::PullParser.new(servers.json))
+        servers
+      end
+    end
+
     # Params for the `session/new` method (Client → Agent).
     struct SessionNewParams
       include JSON::Serializable
       include LosslessMetadata
+      include V1McpServers
 
       # The current working directory (absolute path).
       property cwd : String
-
-      # List of MCP servers the agent should connect to.
-      # See: https://agentclientprotocol.com/protocol/session-setup#mcp-servers
-      @[JSON::Field(key: "mcpServers")]
-      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
       # Extra absolute workspace roots. Only send when the agent advertises
       # `sessionCapabilities.additionalDirectories`; nil omits the field.
@@ -368,12 +440,13 @@ module ACP
 
       def initialize(
         @cwd : String,
-        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.mcp_servers = mcp_servers
         self.meta = meta
       end
 
@@ -381,14 +454,13 @@ module ACP
       def self.new(cwd : String, mcp_servers : Array(McpServer), meta : Hash(String, JSON::Any)? = nil,
                    additional_directories : Array(String)? = nil, system_prompt : SystemPrompt? = nil,
                    config_options : Array(InitialSessionConfigOption)? = nil)
-        json_servers = mcp_servers.map { |server| JSON.parse(server.to_json) }
-        inst = allocate
-        inst.initialize(cwd: cwd, mcp_servers: json_servers, meta: meta,
+        inst = new(cwd: cwd, meta: meta,
           additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+        inst.mcp_servers_raw = RawJson.new(JSON::PullParser.new(WireFrame.encode(mcp_servers)))
         inst
       end
 
-      def_equals_and_hash @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
+      def_equals_and_hash @cwd, @mcp_servers_wire, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # ─── Session Mode Types ───────────────────────────────────────────
@@ -1015,6 +1087,7 @@ module ACP
     struct SessionLoadParams
       include JSON::Serializable
       include LosslessMetadata
+      include V1McpServers
 
       # The session ID to load/resume (required).
       @[JSON::Field(key: "sessionId")]
@@ -1022,10 +1095,6 @@ module ACP
 
       # The current working directory (absolute path) (required).
       property cwd : String
-
-      # List of MCP servers the agent should connect to (required).
-      @[JSON::Field(key: "mcpServers")]
-      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
       # The full intended list of extra absolute workspace roots. Only send
       # when the agent advertises `sessionCapabilities.additionalDirectories`.
@@ -1044,16 +1113,17 @@ module ACP
       def initialize(
         @session_id : String,
         @cwd : String,
-        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.mcp_servers = mcp_servers
         self.meta = meta
       end
 
-      def_equals_and_hash @session_id, @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
+      def_equals_and_hash @session_id, @cwd, @mcp_servers_wire, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # Result of the `session/load` method. Contains mode/config state
@@ -1095,6 +1165,7 @@ module ACP
     struct SessionResumeParams
       include JSON::Serializable
       include LosslessMetadata
+      include V1McpServers
 
       # The session ID to resume (required).
       @[JSON::Field(key: "sessionId")]
@@ -1102,10 +1173,6 @@ module ACP
 
       # The current working directory (absolute path) (required).
       property cwd : String
-
-      # List of MCP servers the agent should connect to (required).
-      @[JSON::Field(key: "mcpServers")]
-      property mcp_servers : Array(JSON::Any) = [] of JSON::Any
 
       # The full intended list of extra absolute workspace roots. Only send
       # when the agent advertises `sessionCapabilities.additionalDirectories`.
@@ -1124,16 +1191,17 @@ module ACP
       def initialize(
         @session_id : String,
         @cwd : String,
-        @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
+        mcp_servers : Array(JSON::Any) = [] of JSON::Any,
         meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.mcp_servers = mcp_servers
         self.meta = meta
       end
 
-      def_equals_and_hash @session_id, @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
+      def_equals_and_hash @session_id, @cwd, @mcp_servers_wire, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # Result of the `session/resume` method.

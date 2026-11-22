@@ -1938,6 +1938,177 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact MCP server declarations" do
+  it "parses v1 and v2 declarations with exact metadata" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    declaration = %({"type":"stdio","name":"example","command":"/fixture/example","args":[],"env":[],"_meta":#{metadata}})
+    {ACP::Protocol::McpServerStdio, ACP::Protocol::V2::McpServer}.each do |type|
+      server = type.from_json(declaration)
+      ACP::Protocol::RawJson.from_json(server.to_json).field("_meta").not_nil!.json.should eq(metadata)
+    end
+  end
+
+  it "rejects ambiguous or unsupported declarations in the exact v1 typed parser" do
+    type = ACP::Protocol::McpServerParser
+    fields = %("name":"local","command":"/fixture/server","args":[],"env":[])
+    expect_raises(JSON::ParseException, /Duplicate JSON member/) do
+      type.from_json(%({"type":"stdio","type":"stdio",#{fields}}))
+    end
+    [%("_example.test/future"), "true"].each do |transport_type|
+      wire = %({"type":#{transport_type},#{fields}})
+      expect_raises(JSON::ParseException, /Unsupported MCP server transport type/) { type.from_json(wire) }
+      type.from_json_any(JSON.parse(wire)).should be_a(ACP::Protocol::McpServerStdio)
+    end
+  end
+
+  it "preserves and validates v1 declarations on create, load, resume, and fork" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      caps = %({"loadSession":true,"mcpCapabilities":{"http":true,"sse":true},"sessionCapabilities":{"resume":{},"fork":{}}})
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":#{caps}}))
+      client.initialize_connection
+
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      env = %([{"name":"MODE","value":"old","_meta":#{metadata}}])
+      header = %([{"name":"X-Example","value":"value","_meta":#{metadata}}])
+      stdio = ACP::Protocol::McpServerParser.from_json(%({"name":"local","command":"/fixture/server","args":[],"env":#{env},"_meta":#{metadata}}))
+      http = ACP::Protocol::McpServerParser.from_json(%({"type":"http","name":"http","url":"https://example.test/mcp","headers":#{header},"_meta":#{metadata}}))
+      sse = ACP::Protocol::McpServerParser.from_json(%({"type":"sse","name":"sse","url":"https://example.test/events","headers":#{header},"_meta":#{metadata}}))
+      params = ACP::Protocol::SessionNewParams.new("/work", [stdio, http, sse])
+      params.mcp_servers.first["env"][0].as_h["value"] = JSON::Any.new("new")
+      expected = params.mcp_servers_raw
+
+      invalid = ACP::Protocol::SessionNewParams.from_json(%({"cwd":"/work","mcpServers":[{"type":18446744073709551615,"name":"local","command":"/fixture/server","args":[],"env":[]}]}))
+      expect_raises(ArgumentError, /transport type must be a string/) { client.session_new(invalid) }
+
+      created = capture_request_params(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new(params).session_id.should eq("root")
+      loaded = capture_request_params(feed, outgoing, "{}")
+      client.session_load(ACP::Protocol::SessionLoadParams.from_json(%({"sessionId":"saved","cwd":"/work","mcpServers":#{expected.json}})))
+      resumed = capture_request_params(feed, outgoing, "{}")
+      client.session_resume(ACP::Protocol::SessionResumeParams.from_json(%({"sessionId":"root","cwd":"/work","mcpServers":#{expected.json}})))
+      fork_params = ACP::Protocol::SessionForkParams.new("root", "/work")
+      fork_params.mcp_servers_raw = expected
+      forked = capture_request_params(feed, outgoing, %({"sessionId":"fork"}))
+      client.session_fork(fork_params).session_id.should eq("fork")
+
+      {created, loaded, resumed, forked}.each do |channel|
+        servers = next_permission_event(channel).field("mcpServers").not_nil!
+        servers.json.should eq(expected.json)
+        local = servers.elements?.not_nil!.first
+        local.field("type").should be_nil
+        local.field("_meta").not_nil!.json.should eq(metadata)
+        variable = local.field("env").not_nil!.elements?.not_nil!.first
+        variable.field("value").not_nil!.as_s?.should eq("new")
+        variable.field("_meta").not_nil!.json.should eq(metadata)
+        servers.elements?.not_nil![1..].each do |remote|
+          remote.field("headers").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.json.should eq(metadata)
+        end
+      end
+      ACP::Protocol::SessionNewParams.from_json(%({"cwd":"/work","mcpServers":null})).mcp_servers.should be_empty
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "validates v1 declarations after resolving a custom system prompt mode" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"systemPrompt":{}}}}}))
+    end
+    client.initialize_connection
+    server = JSON.parse(%({"name":"local","command":"/fixture/server","args":[],"env":[]}))
+    client.on_system_prompt_mode = ->(_mode : String, _caps : ACP::Protocol::SessionSystemPromptCapabilities) do
+      server.as_h["command"] = JSON::Any.new("relative-command")
+      true
+    end
+    content = [ACP::Protocol::TextContentBlock.new("Hello")] of ACP::Protocol::ContentBlock
+    prompt = ACP::Protocol::SystemPrompt.new("_example.test/mode", content)
+    expect_raises(ArgumentError, /commands must be absolute/) do
+      client.session_new("/work", [server], system_prompt: prompt)
+    end
+    transport.sent_messages.size.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "validates v2 declarations after resolving a custom system prompt mode" do
+    with_v2_request_client(%({"systemPrompt":{},"mcp":{"stdio":{}}})) do |client, transport|
+      server = ACP::Protocol::V2::McpServer.stdio(ACP::Protocol::McpServerStdio.new("local", "/fixture/server"))
+      client.on_system_prompt_mode = ->(_mode : String, _caps : ACP::Protocol::SessionSystemPromptCapabilities) do
+        server.json_unmapped["command"] = JSON::Any.new("relative-command")
+        true
+      end
+      content = [ACP::Protocol::TextContentBlock.new("Hello")] of ACP::Protocol::ContentBlock
+      prompt = ACP::Protocol::SystemPrompt.new("_example.test/mode", content)
+      setup = ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [server], system_prompt: prompt)
+      expect_raises(ArgumentError, /commands must be absolute/) { client.session_new(setup) }
+      transport.sent_messages.size.should eq(1)
+    end
+  end
+
+  it "sends exact v2 declarations and publishes the registered ACP server" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      offer = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"mcp":{"stdio":{},"http":{},"acp":{}},"fork":{}}}})
+      answer_identity_request(feed, outgoing, offer)
+      client.initialize_connection
+
+      ratio = "0.123456789012345678901"
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":#{ratio}})
+      local = ACP::Protocol::McpServerStdio.from_json(%({"name":"local","command":"/fixture/server","args":[],"env":[],"_meta":#{metadata}}))
+      header = ACP::Protocol::HttpHeader.from_json(%({"name":"X-Example","value":"old","_meta":#{metadata}}))
+      http = ACP::Protocol::V2::McpServer.http(ACP::Protocol::McpServerHttp.new("remote", "https://example.test/mcp", [header]))
+      http.json_unmapped["headers"][0].as_h["value"] = JSON::Any.new("new")
+      declaration = client.register_mcp_server("registered") do |_request|
+        ACP::Protocol::MessageMcpResponse.success(JSON::Any.new("registered"))
+      end
+      declaration.meta_raw = ACP::Protocol::RawJson.from_json(metadata)
+      acp = ACP::Protocol::V2::McpServer.acp(declaration)
+      custom = ACP::Protocol::V2::McpServer.from_json(%({"type":"_example.test/transport","name":"custom","settings":{"values":[#{ratio},"old"]}}))
+      custom.json_unmapped["settings"]["values"].as_a[1] = JSON::Any.new("new")
+      servers = [ACP::Protocol::V2::McpServer.stdio(local), http, custom, acp]
+
+      created = capture_request_params(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: servers)).session_id.should eq("root")
+      resumed = capture_request_params(feed, outgoing, "{}")
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", mcp_servers: servers))
+      forked = capture_request_params(feed, outgoing, %({"sessionId":"fork"}))
+      client.session_fork(ACP::Protocol::V2::SessionForkParams.new("root", "/work", mcp_servers: servers)).session_id.should eq("fork")
+
+      {created, resumed, forked}.each do |channel|
+        wire = next_permission_event(channel).field("mcpServers").not_nil!.elements?.not_nil!
+        wire.map { |server| server.field("type").not_nil!.as_s? }.should eq(["stdio", "http", "_example.test/transport", "acp"])
+        wire.first.field("_meta").not_nil!.json.should eq(metadata)
+        sent_header = wire[1].field("headers").not_nil!.elements?.not_nil!.first
+        sent_header.field("value").not_nil!.as_s?.should eq("new")
+        sent_header.field("_meta").not_nil!.json.should eq(metadata)
+        wire[2].field("settings").not_nil!.field("values").not_nil!.json.should eq(%([#{ratio},"new"]))
+        wire.last.field("serverId").not_nil!.as_s?.should eq(declaration.server_id)
+        wire.last.field("_meta").not_nil!.json.should eq(metadata)
+      end
+
+      feed.puts %({"jsonrpc":"2.0","id":"list","method":"mcp/message","params":{"serverId":#{declaration.server_id.to_json},"requestId":"list","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":#{ACP::MCP_PROTOCOL_VERSION.to_json},"io.modelcontextprotocol/clientCapabilities":{}}}}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq("list")
+      reply["result"]["result"].should eq("registered")
+
+      http.json_unmapped.delete("headers").should_not be_nil
+      stripped = capture_request_params(feed, outgoing, %({"sessionId":"without-headers"}))
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [http]))
+      sent = next_permission_event(stripped).field("mcpServers").not_nil!.elements?.not_nil!.first
+      sent.field("headers").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
 describe "ACP exact session setup requests" do
   it "decodes extension metadata on every v1 and v2 session setup parameter type" do
     metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})

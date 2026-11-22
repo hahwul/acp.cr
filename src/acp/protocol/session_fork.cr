@@ -22,9 +22,8 @@ module ACP
       @[JSON::Field(key: "additionalDirectories")]
       getter additional_directories : Array(String)?
 
-      # MCP servers to connect to for the fork.
       @[JSON::Field(key: "mcpServers")]
-      getter mcp_servers : Array(Mcp)?
+      @mcp_servers_wire : McpServerList(Mcp)?
 
       # System-level instructions for the fork.
       @[JSON::Field(key: "systemPrompt")]
@@ -41,15 +40,32 @@ module ACP
         *,
         @cursor_id : String? = nil,
         @additional_directories : Array(String)? = nil,
-        @mcp_servers : Array(Mcp)? = nil,
+        mcp_servers : Array(Mcp)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(Option)? = nil,
         meta : Hash(String, JSON::Any)? = nil,
       )
+        @mcp_servers_wire = mcp_servers.try { |servers| McpServerList(Mcp).new(servers) }
         self.meta = meta
       end
 
-      def_equals_and_hash @session_id, @cwd, @cursor_id, @additional_directories, @mcp_servers, @system_prompt, @config_options, metadata_comparison
+      # MCP servers to connect to for the fork.
+      def mcp_servers : Array(Mcp)?
+        @mcp_servers_wire.try(&.servers)
+      end
+
+      # MCP server declarations including exact extension values.
+      def mcp_servers_raw : RawJson?
+        @mcp_servers_wire.try(&.raw)
+      end
+
+      # Replaces the MCP server list with exact declarations.
+      def mcp_servers_raw=(servers : RawJson?) : RawJson?
+        @mcp_servers_wire = servers.try { |wire| McpServerList(Mcp).new(JSON::PullParser.new(wire.json)) }
+        servers
+      end
+
+      def_equals_and_hash @session_id, @cwd, @cursor_id, @additional_directories, @mcp_servers_wire, @system_prompt, @config_options, metadata_comparison
     end
 
     # Parameters for creating a v1 session from an existing session.

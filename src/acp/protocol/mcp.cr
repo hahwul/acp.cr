@@ -16,6 +16,7 @@ module ACP
     # ACP declaration of a server hosted on the existing connection.
     struct McpServerAcp
       include JSON::Serializable
+      include LosslessMetadata
 
       # MCP transport discriminator.
       getter type : String = "acp"
@@ -27,18 +28,17 @@ module ACP
       @[JSON::Field(key: "serverId")]
       getter server_id : McpServerAcpId
 
-      # ACP extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Builds a declaration from a registered server ID.
-      def initialize(@name : String, @server_id : McpServerAcpId, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@name : String, @server_id : McpServerAcpId, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # Returns the declaration in the v1 session setup format.
       def to_json_any : JSON::Any
         JSON.parse(WireFrame.encode(self))
       end
+
+      def_equals_and_hash @type, @name, @server_id, metadata_comparison
     end
 
     # Exact JSON used by MCP-over-ACP.
