@@ -1987,15 +1987,7 @@ module ACP
         if obj["id"].raw.nil? && obj["method"].as_s == Protocol::AgentMethod::SESSION_UPDATE
           handle_notification(msg, wire_frame)
         else
-          params_json = wire_frame.try(&.params_json)
-          if wire_frame && obj["method"].as_s == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-            if v2_wire?
-              params_json ||= Protocol::WireFrame.field(wire_frame.json, "params")
-            elsif wire_frame.representable
-              params_json = nil
-            end
-          end
-          return handle_agent_request(msg, params_json)
+          return handle_agent_request(msg, wire_frame)
         end
       when Protocol::MessageKind::Response
         handle_response(msg, wire_frame)
@@ -2270,7 +2262,7 @@ module ACP
     #   3. Method-not-found error
     #
     # Returns true when a handler fiber was started (it records the outcome).
-    private def handle_agent_request(msg : JSON::Any, params_json : String? = nil) : Bool
+    private def handle_agent_request(msg : JSON::Any, wire_frame : Protocol::WireFrame?) : Bool
       # A nil `id` here is either `"id": null` — a valid, if discouraged,
       # request ID that we echo back — or a value we cannot represent
       # (fractional, out of range, bool, container). Echoing a coerced ID
@@ -2292,6 +2284,16 @@ module ACP
         return false
       end
 
+      params_json = wire_frame.try(&.params_json)
+      if wire_frame && method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+        exact_params = params_json || Protocol::WireFrame.field(wire_frame.json, "params")
+        if ambiguous_permission_request?(wire_frame, exact_params)
+          rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous permission request fields")
+        end
+        # v1 handlers take a JSON::Any projection. v2 decodes the exact fields.
+        params_json = v2_wire? ? exact_params : (params_json unless wire_frame.representable)
+      end
+
       ClientLog.debug { "Agent request: method=#{method_name} id=#{id}" }
 
       # Track the request before handing it off, so a `session_cancel` or
@@ -2299,15 +2301,15 @@ module ACP
       # A null-id request isn't tracked: every such request would share the
       # one `nil` key, and all but one would go unanswered.
       entry = nil
-      unless id.nil?
+      if id && !rejection
         session_id = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
         entry = InFlightRequest.new(method_name, session_id)
         @pending_mutex.synchronize { @in_flight[id] = entry }
       end
 
-      prepared = prepare_agent_request(id, method_name, params, params_json)
+      prepared = prepare_agent_request(id, method_name, params, params_json) unless rejection
       spawn(name: "acp-agent-request") do
-        reply = prepared ? prepared.call : route_agent_request(method_name, params, params_json)
+        reply = rejection || (prepared ? prepared.call : route_agent_request(method_name, params, params_json))
         if claim_agent_request(id, entry)
           case reply
           in Protocol::JsonRpcErrorObject then respond_to_agent_error(id, reply.code, reply.message, reply.data)
@@ -2327,6 +2329,25 @@ module ACP
         end
       end
       true
+    end
+
+    # Check the exact offer before JSON::Any or typed decoding can collapse duplicates.
+    private def ambiguous_permission_request?(frame : Protocol::WireFrame, params_json : String?) : Bool
+      return true unless Protocol::WireFrame.repeated_members(frame.json, "method", "params").empty?
+      return false unless params_json
+
+      repeated = if v2_wire?
+                   Protocol::WireFrame.repeated_members(params_json, "sessionId", "title", "subject", "options")
+                 else
+                   Protocol::WireFrame.repeated_members(params_json, "sessionId", "toolCall", "options")
+                 end
+      return true unless repeated.empty?
+      raw = Protocol::RawJson.new(JSON::PullParser.new(params_json))
+      return false unless options = raw.field("options").try(&.elements?)
+
+      options.any? do |option|
+        !Protocol::WireFrame.repeated_members(option.json, "optionId", "name", "kind").empty?
+      end
     end
 
     # The answer to an agent request: a result, or a JSON-RPC error.
@@ -2460,8 +2481,11 @@ module ACP
     private def handle_permission_request(params : JSON::Any?, params_json : String?) : AgentReply
       if handler = @on_agent_request
         return unrepresentable_request_params if params_json
+        options = params.try(&.as_h?).try(&.["options"]?).try(&.as_a?)
+        offered_ids = options.try(&.compact_map { |option| option.as_h?.try(&.["optionId"]?).try(&.as_s?) }) || [] of String
         begin
-          handler.call("session/request_permission", params || JSON::Any.new(nil))
+          reply = handler.call(Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, params || JSON::Any.new(nil))
+          validate_permission_reply(normalize_v1_permission_reply(reply), offered_ids)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
           handler_error_reply(ex, "Permission handler error: #{ex.message}")
@@ -2481,11 +2505,49 @@ module ACP
       end
     end
 
-    # The `cancelled` outcome for a `session/request_permission` request.
+    # Adapt the legacy raw callback shapes to the v1 wire result.
+    private def normalize_v1_permission_reply(reply : JSON::Any) : JSON::Any
+      return reply unless (fields = reply.as_h?) && (outcome = fields["outcome"]?)
+
+      if outcome.as_s? == "cancelled"
+        return JSON::Any.new(fields.merge({"outcome" => cancelled_permission["outcome"]}))
+      end
+      if (decision = outcome.as_h?) && !decision.has_key?("outcome") && (id = decision["selected"]?.try(&.as_s?))
+        if (canonical_id = decision["optionId"]?) && canonical_id.as_s? != id
+          return reply
+        end
+
+        selected = decision.dup
+        selected.delete("selected")
+        selected["outcome"] = JSON::Any.new("selected")
+        selected["optionId"] = JSON::Any.new(id)
+        return JSON::Any.new(fields.merge({"outcome" => JSON::Any.new(selected)}))
+      end
+      reply
+    end
+
+    # Match selected IDs against the options as received, before calling app code.
+    private def validate_permission_reply(reply : JSON::Any, offered_ids : Array(String), *, allow_future : Bool = false) : AgentReply
+      if outcome = reply.as_h?.try(&.["outcome"]?).try(&.as_h?)
+        case kind = outcome["outcome"]?.try(&.as_s?)
+        when "selected"
+          id = outcome["optionId"]?.try(&.as_s?)
+          return reply if id && offered_ids.count(id) == 1
+        when "cancelled"
+          return reply
+        else
+          return reply if allow_future && kind
+        end
+      end
+
+      Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Permission handler returned an invalid outcome or option ID")
+    end
+
     private def unrepresentable_request_params : Protocol::JsonRpcErrorObject
       Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Request parameters cannot be represented as JSON::Any")
     end
 
+    # The `cancelled` outcome for a `session/request_permission` request.
     private def cancelled_permission : JSON::Any
       JSON.parse(Protocol::RequestPermissionResult.cancelled.to_json)
     end

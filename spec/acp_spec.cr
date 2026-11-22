@@ -3087,7 +3087,7 @@ describe ACP::Client do
       # Check that the client sent a response
       response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-1" }
       response.should_not be_nil
-      response.as(JSON::Any)["result"]["outcome"]["selected"].as_s.should eq("allow_once")
+      response.as(JSON::Any)["result"]["outcome"].should eq(JSON.parse(%({"outcome":"selected","optionId":"allow_once"})))
 
       transport.close
     end
@@ -4034,8 +4034,8 @@ describe "Full ACP flow simulation" do
               "sessionId": "perm-sess",
               "toolCall": {"toolCallId": "tc-write-1", "toolName": "fs.write_text_file", "title": "Write to output.txt"},
               "options": [
-                {"id": "allow_once", "label": "Allow Once"},
-                {"id": "deny", "label": "Deny"}
+                {"optionId": "allow_once", "name": "Allow Once", "kind": "allow_once"},
+                {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
               ]
             }
             }
@@ -4062,7 +4062,7 @@ describe "Full ACP flow simulation" do
     # Verify the permission response was sent back
     perm_response = transport.sent_messages.find { |msg| msg["id"]?.try(&.as_s?) == "perm-req-1" }
     perm_response.should_not be_nil
-    perm_response.as(JSON::Any)["result"]["outcome"]["selected"].as_s.should eq("allow_once")
+    perm_response.as(JSON::Any)["result"]["outcome"].should eq(JSON.parse(%({"outcome":"selected","optionId":"allow_once"})))
 
     client.close
   end
@@ -6986,7 +6986,7 @@ describe "ACP draft session archive" do
     client.initialize_connection
     take_v2_frame(transport.outgoing)
     {"kept", "archived"}.each do |sid|
-      transport.inject_raw(%({"jsonrpc":"2.0","id":#{sid.to_json},"method":"session/request_permission","params":{"sessionId":#{sid.to_json}}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{sid.to_json},"method":"session/request_permission","params":{"sessionId":#{sid.to_json},"toolCall":{"toolCallId":"t"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}))
       take_v2_frame(entered).should eq(sid)
     end
 

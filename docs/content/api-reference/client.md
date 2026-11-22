@@ -94,6 +94,13 @@ available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
 current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 
+Return `RequestPermissionResult.selected(option_id)` for an option from the
+request or `RequestPermissionResult.cancelled` when no option was chosen.
+An invalid result or selection returns JSON-RPC `-32603` to the Agent.
+Over stdio, repeated permission option fields return `-32602` before the
+callback runs. Custom and future ACP v2 outcome objects pass through unchanged.
+[ACP v2 Permissions](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable
@@ -538,6 +545,14 @@ Sends a custom extension notification (no response expected).
 | `on_agent_request` | `AgentRequestHandler?` | Handle agent-initiated requests |
 | `on_notification` | `NotificationHandler?` | Handle non-update notifications |
 | `on_disconnect` | `(-> Nil)?` | Called on connection loss |
+
+For `session/request_permission`, return the JSON form of
+`Protocol::RequestPermissionResult.selected(option_id)` or
+`Protocol::RequestPermissionResult.cancelled`. Select an ID from the Agent's
+original options. Invalid results or selections return JSON-RPC `-32603`.
+Over stdio, repeated permission option fields return `-32602` before the
+callback runs.
+[ACP v1 Permissions](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission)
 
 ## Subagent Sessions
 

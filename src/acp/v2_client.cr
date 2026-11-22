@@ -309,7 +309,8 @@ module ACP
               return invalid_permission("The command's working directory must be absolute")
             end
           end
-          if input.options.empty? || input.options.map(&.option_id).uniq.size != input.options.size
+          offered_ids = input.options.map(&.option_id)
+          if offered_ids.empty? || offered_ids.uniq.size != offered_ids.size
             return invalid_permission("Permission requests require a non-empty list of unique option IDs")
           end
           if subject && subject.tool_call && (raw = subject.tool_call_raw)
@@ -321,7 +322,7 @@ module ACP
               deliver_update(Wire::SessionUpdateParams.new(input.session_id, update))
             end
           end
-          -> { handle_v2_permission(input) }
+          -> { handle_v2_permission(input, offered_ids) }
         rescue JSON::ParseException
           invalid_permission("Malformed ACP v2 permission request")
         end
@@ -330,9 +331,9 @@ module ACP
           -> { Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, message).as(AgentReply) }
         end
 
-        private def handle_v2_permission(input : Wire::RequestPermissionParams) : AgentReply
+        private def handle_v2_permission(input : Wire::RequestPermissionParams, offered_ids : Array(String)) : AgentReply
           result = @on_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
-          JSON.parse(result.to_json)
+          validate_permission_reply(JSON.parse(result.to_json), offered_ids, allow_future: true)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
           handler_error_reply(ex, "Permission handler error: #{ex.message}")
