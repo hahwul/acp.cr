@@ -339,11 +339,13 @@ module ACP
       getter method : String
       getter session_id : String?
       property url_elicitation : UrlElicitation?
+      property elicitation_parent_id : Int64?
+      getter cancellation : Channel(Nil)?
 
       # Set (under `@pending_mutex`) once the request's terminal reply is claimed.
       property? answered : Bool = false
 
-      def initialize(@method : String, @session_id : String?)
+      def initialize(@method : String, @session_id : String?, @cancellation : Channel(Nil)? = nil)
       end
     end
 
@@ -1534,7 +1536,7 @@ module ACP
       v2_retirement_session = closing_session if v2_wire?
       state_setup = v2_wire? && method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
       entity_cancel = @subagent_registry.try(&.entity_cancel?(method))
-      arm_at_write = changes_choice || state_setup || entity_cancel || !v2_retirement_session.nil?
+      arm_at_write = v2_wire? || changes_choice || entity_cancel
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         check_v2_request_order(initialize) if v2_wire?
@@ -1564,6 +1566,7 @@ module ACP
             @pending_mutex.synchronize do
               raise ConnectionClosedError.new if @disconnected
 
+              @pending[id_str] = @pending[id_str].copy_with(armed: true)
               @v2_initialize_armed = true
             end
           end
@@ -1601,8 +1604,8 @@ module ACP
           @transport.send(message)
         end
       rescue ex
-        @pending_mutex.synchronize do
-          @pending.delete(id_str)
+        cancelled = @pending_mutex.synchronize do
+          pending = @pending.delete(id_str)
           @session_choices.finish_attachment(id_str)
           @session_choices.finish_change(id_str)
           @initialize_request = nil if @initialize_request == id_str
@@ -1610,7 +1613,9 @@ module ACP
           @subagent_registry.try(&.request_finished(id_str))
           settle_early_plan_sessions if creating_session
           @cursor_registry.try(&.finish_replay(id_str))
+          claim_request_elicitations(id) if pending && v2_wire?
         end
+        queue_cancelled_elicitations(cancelled)
         raise ex
       end
 
@@ -1800,6 +1805,15 @@ module ACP
         @disconnected = true
         @pending.each_value { |request| request.response.close }
         @pending.clear
+        @in_flight.reject! do |_id, request|
+          if signal = request.cancellation
+            signal.close
+            request.answered = true
+            true
+          else
+            false
+          end
+        end
         @late_session_retirements.clear
         @url_elicitations.each_value { |elicitation| elicitation.completion = nil }
         @url_elicitations.clear
@@ -1844,10 +1858,12 @@ module ACP
         # Clean up the pending entry. If it is already gone, the response was
         # delivered (or the channel closed) after the timer fired: use that.
         initialization = false
+        cancelled = nil
         removed = @pending_mutex.synchronize do
           id = request_id.to_s
           pending = @pending.delete(id)
           if pending
+            cancelled = claim_request_elicitations(request_id) if v2_wire?
             @session_choices.expire_attachment(id)
             @session_choices.expire_change(id)
             if (session_id = pending.closing_session) && (order = pending.retirement_order)
@@ -1873,6 +1889,7 @@ module ACP
             ClientLog.debug { "Could not send $/cancel_request for id=#{request_id}: #{ex.message}" }
           end
         end
+        queue_cancelled_elicitations(cancelled)
         raise RequestTimeoutError.new(request_id, timeout_seconds)
       end
     end
@@ -2106,6 +2123,7 @@ module ACP
       # repeated response must not reach it — sending a second or third copy
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
+      cancelled_elicitations = nil
       wide_frame = wire_frame if wire_frame.try(&.wide_response?)
       error_frame = wire_frame if msg["error"]?
       response = malformed || error_frame || wide_frame || msg
@@ -2124,6 +2142,7 @@ module ACP
         end
         @suggestion_loads.delete(id_str)
         if request = @pending.delete(id_str)
+          cancelled_elicitations = claim_request_elicitations(id) if v2_wire?
           response = wire_frame if request.exact_response && wire_frame && !msg["error"]?
           if (grant = request.fork_cursor) && response_error_code(msg) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
@@ -2177,6 +2196,8 @@ module ACP
       elsif !observed_reply
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
       end
+    ensure
+      queue_cancelled_elicitations(cancelled_elicitations)
     end
 
     private def response_outcome_error(msg : JSON::Any, frame : Protocol::WireFrame?, repeated : Set(String)?) : ProtocolError?
@@ -2348,7 +2369,8 @@ module ACP
       reply_id = id
       unless rejection
         session_id = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
-        entry = InFlightRequest.new(method_name, session_id)
+        signal = Channel(Nil).new if v2_wire? && method_name == Protocol::ClientMethod::ELICITATION_CREATE
+        entry = InFlightRequest.new(method_name, session_id, signal)
       end
       if id && !track_agent_request(id, method_name, entry)
         rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_REQUEST, "Request ID is already outstanding")
@@ -2359,7 +2381,9 @@ module ACP
       prepared = entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
       spawn(name: "acp-agent-request") do
         reply = rejection || (prepared ? prepared.call : route_agent_request(method_name, params, params_json))
-        if claim_agent_request(id, entry)
+        if (elicitation = entry) && id && elicitation.elicitation_parent_id
+          send_request_elicitation_reply(id, elicitation, reply)
+        elsif claim_agent_request(id, entry)
           sent : AgentReply? = nil
           begin
             case reply
@@ -2426,7 +2450,7 @@ module ACP
       return unless method_name == Protocol::ClientMethod::ELICITATION_CREATE
 
       rejection = validate_elicitation_request(params, params_json, entry)
-      -> { rejection || run_elicitation_handler(params, params_json) }
+      -> { rejection || run_elicitation_handler(params, params_json, entry) }
     end
 
     # Runs the handler for an agent request and returns its answer; the
@@ -2467,50 +2491,98 @@ module ACP
       end
 
       fields = fields.not_nil!
+      parent_id = nil
       if v2_wire?
         session = fields["sessionId"]?
         request = fields["requestId"]?
-        valid_scope = if session
-                        !request && !session.as_s?.nil?
-                      elsif request
-                        !request.as_s?.nil? || !request.as_i64?.nil?
-                      else
-                        false
-                      end
+        if session
+          valid_scope = session.as_s? && !request
+        else
+          # This client issues integer IDs. A numeric string cannot name one.
+          parent_id = request.try(&.as_i64?)
+          valid_scope = parent_id && !fields.has_key?("toolCallId")
+        end
         unless valid_scope
-          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "ACP v2 elicitation requires exactly one sessionId or requestId")
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "ACP v2 elicitation requires a sessionId or a requestId without toolCallId")
         end
         if mode == "form" && !fields["requestedSchema"]?.try(&.as_h?)
           return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Missing ACP v2 form elicitation schema")
         end
       end
-      return unless mode == "url"
 
-      id = fields["elicitationId"]?.try(&.as_s?)
-      unless id && fields["url"]?.try(&.as_s?) && fields["message"]?.try(&.as_s?)
-        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation requires an elicitationId, url, and message")
-      end
-      @pending_mutex.synchronize do
-        if @url_elicitations.has_key?(id)
-          next Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation ID is already outstanding")
+      if mode == "url"
+        url_id = fields["elicitationId"]?.try(&.as_s?)
+        unless url_id && fields["url"]?.try(&.as_s?) && fields["message"]?.try(&.as_s?)
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation requires an elicitationId, url, and message")
         end
+      end
+      return unless parent_id || url_id
+
+      @pending_mutex.synchronize do
         if @disconnected || entry.answered?
           next Protocol::JsonRpcErrorObject.new(JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
         end
+        if parent_id && !@pending[parent_id.to_s]?.try(&.armed)
+          next Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Elicitation requestId does not match a pending Client request")
+        end
+        if url_id
+          if @url_elicitations.has_key?(url_id)
+            next Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation ID is already outstanding")
+          end
+          entry.url_elicitation = @url_elicitations[url_id] = UrlElicitation.new(url_id)
+        end
 
-        entry.url_elicitation = @url_elicitations[id] = UrlElicitation.new(id)
+        entry.elicitation_parent_id = parent_id
         nil
       end
     end
 
-    private def run_elicitation_handler(params : JSON::Any?, params_json : String?) : AgentReply
+    private def run_elicitation_handler(params : JSON::Any?, params_json : String?, entry : InFlightRequest) : AgentReply
       method = Protocol::ClientMethod::ELICITATION_CREATE
-      handler = @on_create_elicitation
-      unless handler
+      return JSON.parse(Protocol::CreateElicitationResult.cancel.to_json) if entry.cancellation.try(&.closed?)
+
+      unless handler = @on_create_elicitation
         return handle_unknown_agent_request(method, params, (params_json unless raw_notification_representable?(params_json)))
       end
+      callback = ->(input : Protocol::CreateElicitationParams) do
+        input.cancellation = entry.cancellation
+        if input.cancellation.try(&.closed?)
+          Protocol::CreateElicitationResult.cancel
+        else
+          handler.call(input)
+        end
+      end
+      handle_typed_client_method(params, callback, Protocol::CreateElicitationParams, method, params_json)
+    end
 
-      handle_typed_client_method(params, handler, Protocol::CreateElicitationParams, method, params_json)
+    private class ElicitationReplyClaimed < Exception
+    end
+
+    # A parent ending and its pending elicitation's reply compete at the
+    # writer boundary. A reply queued behind other traffic is still cancellable.
+    private def send_request_elicitation_reply(id : Protocol::RequestId, entry : InFlightRequest, reply : AgentReply) : Nil
+      claimed = false
+      sent : AgentReply? = nil
+      message = case reply
+                in Protocol::JsonRpcErrorObject then Protocol.build_error_response(id, reply.code, reply.message, reply.data)
+                in JSON::Any                    then Protocol.build_response_raw(id, reply)
+                end
+      @transport.send_checked(message) do
+        raise ConnectionClosedError.new if @v2_contract_unknown.get
+        raise ElicitationReplyClaimed.new unless claim_agent_request(id, entry)
+
+        claimed = true
+      end
+      sent = reply
+    rescue ElicitationReplyClaimed
+      # Another fiber owns the cancellation reply.
+    rescue ex
+      claimed ||= claim_agent_request(id, entry)
+      raise ex
+    ensure
+      if claimed && (completion = settle_elicitation_reply(id, entry, sent))
+        enqueue_elicitation_completion(completion)
+      end
     end
 
     # Commits only the reply that won against cancellation. Completion can
@@ -2520,6 +2592,7 @@ module ACP
 
       @pending_mutex.synchronize do
         @in_flight.delete(id) if id && @in_flight[id]?.try(&.same?(entry))
+        entry.cancellation.try(&.close) unless reply
         elicitation = entry.url_elicitation
         next unless elicitation && @url_elicitations[elicitation.id]?.try(&.same?(elicitation))
 
@@ -2697,10 +2770,26 @@ module ACP
       pending
     end
 
+    # Claims only elicitations attached to the retiring outbound request.
+    # The caller holds @pending_mutex.
+    private def claim_request_elicitations(parent_id : Int64) : Hash(Protocol::RequestId, InFlightRequest)
+      pending = @in_flight.select { |_id, entry| entry.elicitation_parent_id == parent_id && !entry.answered? }
+      pending.each { |id, entry| claim_cancelled_input(id, entry) }
+      pending
+    end
+
+    # A blocked cancel write must not delay other responses on the dispatcher.
+    private def queue_cancelled_elicitations(pending : Hash(Protocol::RequestId, InFlightRequest)?) : Nil
+      return unless pending && !pending.empty?
+
+      spawn(name: "acp-elicitation-cancel") { answer_cancelled_session_inputs(pending) }
+    end
+
     # Clears URL completion state immediately but keeps its RPC ID reserved
     # through the cancel reply. The caller holds @pending_mutex.
     private def claim_cancelled_input(id : Protocol::RequestId, req : InFlightRequest) : Nil
       req.answered = true
+      req.cancellation.try(&.close)
       abandon_url_elicitation(req)
       @in_flight.delete(id) unless req.method == Protocol::ClientMethod::ELICITATION_CREATE
     end

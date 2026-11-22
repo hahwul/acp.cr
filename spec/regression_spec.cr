@@ -7678,3 +7678,262 @@ describe "URL elicitation completion correlation" do
     outgoing.try(&.close)
   end
 end
+
+private class PausedRequestElicitationStdio < ACP::StdioTransport
+  getter queued = Channel(JSON::Any).new(1)
+  getter release = Channel(Nil).new(1)
+  property pause_method : String?
+  property? pause_accept : Bool = false
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    # Catch an outbound parent even before all v2 requests use send_checked.
+    pause_parent(message)
+    super
+  end
+
+  def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+    pause_parent(message)
+    if @pause_accept && message["result"]?.try(&.["action"]?.try(&.as_s?)) == "accept"
+      @queued.send(message["id"])
+      @release.receive?
+    end
+    super(message, &preflight)
+  end
+
+  private def pause_parent(message : Hash(String, JSON::Any)) : Nil
+    if (method = @pause_method) && message["method"]?.try(&.as_s?) == method
+      @queued.send(message["id"])
+      @release.receive?
+    end
+  end
+end
+
+private def request_elicitation_frame(id : String, scope : String) : String
+  %({"jsonrpc":"2.0","id":#{id.to_json},"method":"elicitation/create","params":{#{scope},"mode":"form","message":"Answer","requestedSchema":{"type":"object","properties":{}}}})
+end
+
+private def request_elicitation_client(transport : ACP::Transport) : ACP::V2::Client
+  elicitation = ACP::Protocol::ElicitationCapabilities.new(
+    form: ACP::Protocol::ElicitationFormCapabilities.new, url: ACP::Protocol::ElicitationUrlCapabilities.new)
+  caps = ACP::Protocol::V2::ClientCapabilities.new(elicitation: elicitation)
+  ACP::V2::Client.new(transport, capabilities: caps)
+end
+
+describe "ACP v2 request-scoped elicitations" do
+  it "validates the exact written parent ID and disallows tool-call scope" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedRequestElicitationStdio.new(reader, writer)
+    client = request_elicitation_client(transport)
+    calls = [] of ACP::Protocol::RequestId?
+    client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+      calls << params.request_id
+      ACP::Protocol::CreateElicitationResult.decline
+    end
+    initialize_wide_v2(client, feed, outgoing)
+
+    transport.pause_method = "initialize"
+    initialized = Channel(ACP::Protocol::V2::InitializeResult).new(1)
+    spawn { initialized.send(client.initialize_connection); nil }
+    repeated_init = next_permission_event(transport.queued)
+    feed.puts request_elicitation_frame("unwritten-initialize", %("requestId":#{repeated_init}))
+    JSON.parse(outgoing.gets.not_nil!)["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    transport.release.send(nil)
+    JSON.parse(outgoing.gets.not_nil!)["id"].should eq(repeated_init)
+    feed.puts %({"jsonrpc":"2.0","id":#{repeated_init},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}}})
+    next_permission_event(initialized).protocol_version.should eq(2)
+
+    transport.pause_method = "_parent"
+    result = Channel(JSON::Any).new(1)
+    spawn { result.send(client.ext_method("parent", JSON.parse("{}"))); nil }
+    parent_id = next_permission_event(transport.queued)
+
+    feed.puts request_elicitation_frame("unwritten", %("requestId":#{parent_id}))
+    JSON.parse(outgoing.gets.not_nil!)["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    transport.release.send(nil)
+    JSON.parse(outgoing.gets.not_nil!)["id"].should eq(parent_id)
+
+    {
+      %("requestId":#{parent_id.to_s.to_json}),
+      %("requestId":#{parent_id}.0),
+      %("requestId":#{parent_id},"toolCallId":"tool"),
+      %("requestId":#{parent_id},"toolCallId":null),
+      %("requestId":#{parent_id},"sessionId":null),
+      %("requestId":#{parent_id},"requestId":#{parent_id}),
+      %("requestId":99999),
+    }.each_with_index do |scope, index|
+      feed.puts request_elicitation_frame(index.to_s, scope)
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].as_s.should eq(index.to_s)
+      reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    end
+    calls.should be_empty
+    feed.puts request_elicitation_frame("valid", %("requestId":#{parent_id}))
+    JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("decline")
+    calls.should eq([parent_id.as_i64])
+
+    feed.puts %({"jsonrpc":"2.0","id":#{parent_id},"result":{}})
+    next_permission_event(result).should eq(JSON.parse("{}"))
+    feed.puts request_elicitation_frame("retired", %("requestId":#{parent_id}))
+    JSON.parse(outgoing.gets.not_nil!)["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    calls.size.should eq(1)
+  ensure
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "cancels only the elicitations of the parent that finished" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      entered = Channel(ACP::Protocol::CreateElicitationParams).new(2)
+      release = Channel(Nil).new(2)
+      replies = Channel(JSON::Any).new(2)
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        entered.send(params)
+        release.receive?
+        ACP::Protocol::CreateElicitationResult.decline
+      end
+      initialize_wide_v2(client, feed, outgoing)
+
+      spawn { replies.send(client.ext_method("first", JSON.parse("{}"))); nil }
+      first = JSON.parse(outgoing.gets.not_nil!)["id"]
+      spawn { replies.send(client.ext_method("second", JSON.parse("{}"))); nil }
+      second = JSON.parse(outgoing.gets.not_nil!)["id"]
+      feed.puts request_elicitation_frame("first", %("requestId":#{first}))
+      first_input = next_permission_event(entered)
+      feed.puts request_elicitation_frame("second", %("requestId":#{second}))
+      second_input = next_permission_event(entered)
+      first_input.request_id.should eq(first.as_i64)
+      second_input.request_id.should eq(second.as_i64)
+      first_signal = first_input.cancellation.not_nil!
+      second_signal = second_input.cancellation.not_nil!
+      first_signal.closed?.should be_false
+      second_signal.closed?.should be_false
+      JSON.parse(first_input.to_json).as_h.has_key?("cancellation").should be_false
+
+      feed.puts %({"jsonrpc":"2.0","id":#{first},"result":"done"})
+      next_permission_event(replies).as_s.should eq("done")
+      cancelled = JSON.parse(outgoing.gets.not_nil!)
+      cancelled["id"].as_s.should eq("first")
+      cancelled["result"]["action"].as_s.should eq("cancel")
+      first_signal.closed?.should be_true
+      second_signal.closed?.should be_false
+
+      feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"second"}})
+      cancelled = JSON.parse(outgoing.gets.not_nil!)
+      cancelled["id"].as_s.should eq("second")
+      cancelled["result"]["action"].as_s.should eq("cancel")
+      second_signal.closed?.should be_true
+      release.close
+      feed.puts %({"jsonrpc":"2.0","id":#{second},"result":"kept"})
+      next_permission_event(replies).as_s.should eq("kept")
+
+      spawn { replies.send(client.ext_method("barrier", JSON.parse("{}"))); nil }
+      barrier = JSON.parse(outgoing.gets.not_nil!)
+      barrier["method"].as_s.should eq("_barrier")
+      feed.puts %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":true})
+      next_permission_event(replies).as_bool.should be_true
+    ensure
+      release.try(&.close)
+      client.try(&.close)
+    end
+  end
+
+  it "drops an approval queued behind the writer after the parent receives its answer" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedRequestElicitationStdio.new(reader, writer)
+    transport.pause_accept = true
+    client = request_elicitation_client(transport)
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { ACP::Protocol::CreateElicitationResult.accept }
+    initialize_wide_v2(client, feed, outgoing)
+    result = Channel(JSON::Any).new(1)
+    spawn { result.send(client.ext_method("parent", JSON.parse("{}"))); nil }
+    parent = JSON.parse(outgoing.gets.not_nil!)["id"]
+    feed.puts request_elicitation_frame("child", %("requestId":#{parent}))
+    next_permission_event(transport.queued).as_s.should eq("child")
+    feed.puts %({"jsonrpc":"2.0","id":#{parent},"result":{}})
+    next_permission_event(result).should eq(JSON.parse("{}"))
+    cancelled = JSON.parse(outgoing.gets.not_nil!)
+    cancelled["id"].as_s.should eq("child")
+    cancelled["result"]["action"].as_s.should eq("cancel")
+    transport.release.send(nil)
+
+    spawn { result.send(client.ext_method("barrier", JSON.parse("{}"))); nil }
+    barrier = JSON.parse(outgoing.gets.not_nil!)
+    barrier["method"].as_s.should eq("_barrier")
+    feed.puts %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":true})
+    next_permission_event(result).as_bool.should be_true
+  ensure
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "retires a timed-out parent's URL input and allows its elicitation ID to be reused" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      entered = Channel(ACP::Protocol::CreateElicitationParams).new(2)
+      timed_out = Channel(ACP::RequestTimeoutError).new(1)
+      result = Channel(JSON::Any).new(1)
+      completions = Channel(String).new(2)
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        entered.send(params)
+        if params.message == "Wait"
+          params.cancellation.not_nil!.receive?
+        end
+        ACP::Protocol::CreateElicitationResult.accept
+      end
+      client.on_elicitation_complete = ->(params : ACP::Protocol::CompleteElicitationParams) do
+        completions.send(params.elicitation_id)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      spawn do
+        client.ext_method("timeout", JSON.parse("{}"), timeout: 0.5)
+      rescue ex : ACP::RequestTimeoutError
+        timed_out.send(ex)
+      end
+      parent = JSON.parse(outgoing.gets.not_nil!)["id"]
+      url = ->(id : String, message : String, parent_id : JSON::Any) do
+        %({"jsonrpc":"2.0","id":#{id.to_json},"method":"elicitation/create","params":{"requestId":#{parent_id},"mode":"url","message":#{message.to_json},"url":"https://example.test/interaction","elicitationId":"opaque"}})
+      end
+      complete = %({"jsonrpc":"2.0","method":"elicitation/complete","params":{"elicitationId":"opaque"}})
+      feed.puts url.call("old", "Wait", parent)
+      old_input = next_permission_event(entered)
+      feed.puts complete
+      cancelled_parent = JSON.parse(outgoing.gets.not_nil!)
+      cancelled_parent["method"].as_s.should eq("$/cancel_request")
+      cancelled_parent["params"]["requestId"].should eq(parent)
+      next_permission_event(timed_out)
+      cancelled = JSON.parse(outgoing.gets.not_nil!)
+      cancelled["id"].as_s.should eq("old")
+      cancelled["result"]["action"].as_s.should eq("cancel")
+      old_input.cancellation.not_nil!.closed?.should be_true
+
+      spawn { result.send(client.ext_method("next", JSON.parse("{}"))); nil }
+      next_parent = JSON.parse(outgoing.gets.not_nil!)["id"]
+      feed.puts url.call("new", "Accept", next_parent)
+      next_permission_event(entered)
+      accepted = JSON.parse(outgoing.gets.not_nil!)
+      accepted["id"].as_s.should eq("new")
+      accepted["result"]["action"].as_s.should eq("accept")
+      feed.puts %({"jsonrpc":"2.0","id":#{next_parent},"result":true})
+      next_permission_event(result).as_bool.should be_true
+      feed.puts complete
+      next_permission_event(completions).should eq("opaque")
+      select
+      when completions.receive
+        fail "the retired interaction delivered its URL completion"
+      else
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+end

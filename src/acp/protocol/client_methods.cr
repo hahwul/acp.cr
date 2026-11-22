@@ -640,6 +640,11 @@ module ACP
       @[JSON::Field(key: "requestId")]
       property request_id : RequestId?
 
+      # Local signal supplied to ACP v2 callbacks. It closes if the input
+      # is cancelled, its originating request ends, or the connection closes.
+      @[JSON::Field(ignore: true)]
+      property cancellation : Channel(Nil)?
+
       # Form mode: the fields to collect (required for form mode).
       @[JSON::Field(key: "requestedSchema")]
       property requested_schema : ElicitationSchema?
