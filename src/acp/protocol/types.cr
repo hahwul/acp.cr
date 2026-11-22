@@ -1346,17 +1346,18 @@ module ACP
     # Params for the `session/cancel` notification (Client → Agent).
     struct SessionCancelParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session to cancel the current operation for (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a session cancellation notification.
+      def initialize(@session_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # ─── Session/SetMode Method ───────────────────────────────────────
