@@ -896,6 +896,14 @@ matching completion once. If no typed handler is set, the matching
 notification goes to `on_notification`.
 [ACP v1 URL Completion](https://agentclientprotocol.com/protocol/v1/elicitation#url-completion)
 
+For v1 compaction updates, advertise `session.compaction` in the client
+capabilities. Read `CompactionUpdate#summary_raw` for exact replacement
+content and `typed_summary` for usable blocks. The `summary_present?` flag
+distinguishes an omitted summary from an explicit clear. On a
+`CompactionSummaryChunkUpdate`, the exact appended block is in
+`content_raw`, and the chunk's own metadata is in `meta_raw`.
+[ACP v1 session compaction](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction)
+
 ## Subagent Sessions
 
 Set `subagents: ACP::Protocol::SubagentCapabilities.new` in the client

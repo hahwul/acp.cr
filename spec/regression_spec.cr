@@ -8601,6 +8601,103 @@ describe "ACP v1 exact inter-session messages" do
   end
 end
 
+describe "ACP v1 exact compaction summaries" do
+  it "delivers exact summary replacements and chunks in stdio receive order" do
+    with_wide_stdio do |transport, feed, outgoing|
+      capabilities = ACP::Protocol::ClientCapabilities.new(
+        session: ACP::Protocol::ClientSessionCapabilities.new(compaction: ACP::Protocol::CompactionCapabilities.new))
+      client = ACP::Client.new(transport, client_capabilities: capabilities)
+      events = Channel(ACP::Protocol::SessionUpdateParams).new(3)
+      client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+        events.send(params)
+        nil
+      end
+      answer_identity_request(feed, outgoing, %q({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %q({"sessionId":"s"}))
+      client.session_new("/work")
+
+      chunk_meta = %q({"example.test/offset":18446744073709551615})
+      details = %q({"example.test/count":18446744073709551615,"example.test/values":[0.123456789012345678901,"before"]})
+      block = %({"type":"text","text":"Replacement","_meta":#{details}})
+      summary = %([false,#{block},{"type":"text","text":"Second"}])
+      {
+        %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"text","text":"Earlier"},"_meta":#{chunk_meta}}),
+        %({"sessionUpdate":"compaction_update","compactionId":"c","status":"completed","summary":#{summary},"_meta":#{details}}),
+        %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":#{block.sub("Replacement", "Appended")},"_meta":#{chunk_meta}}),
+      }.each do |update|
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{update}}})
+      end
+
+      first = next_permission_event(events).update.as(ACP::Protocol::CompactionSummaryChunkUpdate)
+      first.text.should eq("Earlier")
+      first.meta_raw.try(&.json).should eq(chunk_meta)
+
+      replacement = next_permission_event(events).update.as(ACP::Protocol::CompactionUpdate)
+      replacement.compaction_id.should eq(first.compaction_id)
+      replacement.status.should eq("completed")
+      replacement.summary_present?.should be_true
+      wire = ACP::Protocol::RawJson.from_json(replacement.to_json)
+      wire.field("summary").try(&.json).should eq(summary)
+      wire.field("_meta").try(&.json).should eq(details)
+      replacement.summary_raw.try(&.json).should eq(summary)
+      replacement.meta_raw.try(&.json).should eq(details)
+      typed = replacement.typed_summary.not_nil!
+      typed.map { |entry| entry.as(ACP::Protocol::TextContentBlock).text }.should eq(["Replacement", "Second"])
+      typed.first.as(ACP::Protocol::TextContentBlock).meta_raw.try(&.json).should eq(details)
+      replacement.summary.not_nil![1]["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("after")
+      edited = ACP::Protocol::RawJson.from_json(replacement.to_json)
+      edited.field("summary").try(&.json).should eq(summary.sub("before", "after"))
+
+      last = next_permission_event(events).update.as(ACP::Protocol::CompactionSummaryChunkUpdate)
+      last.compaction_id.should eq(first.compaction_id)
+      last.content_block.as(ACP::Protocol::TextContentBlock).text.should eq("Appended")
+      last.content_block.as(ACP::Protocol::TextContentBlock).meta_raw.try(&.json).should eq(details)
+      last.meta_raw.try(&.json).should eq(chunk_meta)
+      last.content["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("after")
+      last.content_raw.field("_meta").try(&.json).should eq(details.sub("before", "after"))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "distinguishes malformed optional fields from explicit clears" do
+    base = %q("sessionUpdate":"compaction_update","compactionId":"c","status":"completed")
+    omitted = ACP::Protocol::CompactionUpdate.from_json(%({#{base}}))
+    malformed = ACP::Protocol::CompactionUpdate.from_json(%({#{base},"summary":[false,{"type":"text","text":false}],"error":false,"_meta":false}))
+    malformed.summary_present?.should be_false
+    malformed.error_present?.should be_false
+    malformed.meta_present?.should be_false
+    malformed.should eq(omitted)
+    empty = ACP::Protocol::CompactionUpdate.from_json(%({#{base},"summary":[]}))
+    empty.summary_present?.should be_true
+    empty.typed_summary.not_nil!.should be_empty
+    cleared = ACP::Protocol::CompactionUpdate.from_json(%({#{base},"summary":null,"error":null,"_meta":null}))
+    cleared.summary_present?.should be_true
+    cleared.error_present?.should be_true
+    cleared.meta_present?.should be_true
+    clear_wire = ACP::Protocol::RawJson.from_json(cleared.to_json)
+    {"summary", "error", "_meta"}.each do |key|
+      clear_wire.field(key).try(&.null?).should be_true
+    end
+
+    cleared.summary_raw = ACP::Protocol::RawJson.from_json(%q([{"type":"text","text":"Later","_meta":{"example.test/count":18446744073709551615}}]))
+    cleared.typed_summary.not_nil!.first.as(ACP::Protocol::TextContentBlock).text.should eq("Later")
+    cleared.summary_raw = nil
+    cleared.summary_present?.should be_true
+    cleared.summary_raw.should be_nil
+
+    [
+      %({#{base},"status":"completed"}),
+      %q({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":null}),
+      %q({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"text","text":false}}),
+      %q({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"text","text":"A"},"content":{"type":"text","text":"A"}}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::SessionUpdate.from_json(wire) }
+    end
+  end
+end
+
 describe "ACP v2 subagent patch decoding" do
   it "keeps valid fields when optional child fields are malformed" do
     wire = %({"sessionId":"child","title":"Retained","description":false,"capabilities":[],"state":{"state":false},"cwd":"/work/child","additionalDirectories":[]})
