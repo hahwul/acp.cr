@@ -603,7 +603,6 @@ module ACP
     end
 
     private def ambiguous_initialize_reply?(line : String) : Bool
-      return true unless Protocol::WireFrame.repeated_members(line, "jsonrpc").empty?
       if result = Protocol::WireFrame.field(line, "result")
         return !Protocol::WireFrame.repeated_members(result, "protocolVersion").empty?
       end

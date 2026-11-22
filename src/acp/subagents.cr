@@ -25,8 +25,8 @@ module ACP
     end
   end
 
-  # Client-owned state for exposed subagents. The client serializes calls
-  # into this registry with its pending-request mutex.
+  # Session workspaces and exposed subagent state. The client serializes
+  # calls into this registry with its pending-request mutex.
   private class SubagentRegistry
     private class Child
       getter parent_id : String
@@ -88,6 +88,7 @@ module ACP
 
     @children = {} of String => Child
     @workspace = {} of String => SessionWorkspace
+    @v1_attachments = {} of String => UInt64
     @root_states = {} of String => RootState
     @early_states = {} of String => EarlyState
     @state_revision = 0_u64
@@ -132,7 +133,8 @@ module ACP
         sid = child.parent_id
       end
 
-      root = @setup_by_session[sid]?.try(&.workspace) || @workspace[sid]?
+      root = @setup_by_session[sid]?.try(&.workspace) if @v2
+      root ||= @workspace[sid]?
       return unless root
 
       cwd ||= root.cwd
@@ -147,7 +149,7 @@ module ACP
     end
 
     def attachment_order(session_id : String) : UInt64?
-      @root_states[session_id]?.try(&.attachment_order)
+      @root_states[session_id]?.try(&.attachment_order) || @v1_attachments[session_id]?
     end
 
     # Returns the order for an attached session or an in-flight reattachment.
@@ -183,7 +185,7 @@ module ACP
       if setup = @setups[id]?
         setup.state_revision = @state_revision
         setup.write_order = order
-        if setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
+        if @v2 && setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
           # An already attached root can keep its current entities without replay.
           clear_descendant_runtime(sid, include_root_entities: !!setup.replay_markers || !@root_states.has_key?(sid))
         end
@@ -235,7 +237,7 @@ module ACP
     end
 
     private def reserved_root?(session_id : String) : Bool
-      @workspace.has_key?(session_id) || @closed_roots.includes?(session_id) ||
+      @workspace.has_key?(session_id) || @v1_attachments.has_key?(session_id) || @closed_roots.includes?(session_id) ||
         @setup_by_session.has_key?(session_id) || @unconfirmed_roots.includes?(session_id) || !late_resume(session_id).nil?
     end
 
@@ -257,14 +259,14 @@ module ACP
           raise InvalidStateError.new("A session setup is already pending for #{sid.inspect}")
         end
         clear_descendant_runtime(sid) unless @v2
-      when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
+      when Protocol::AgentMethod::SESSION_FORK
+        return unless sid
+      when Protocol::AgentMethod::SESSION_NEW
       else
         return
       end
 
-      cwd = params.try(&.["cwd"]?).try(&.as_s?)
-      dirs = params.try(&.["additionalDirectories"]?).try(&.as_a?).try(&.compact_map(&.as_s?))
-      workspace = SessionWorkspace.new(cwd, dirs || [] of String) if cwd
+      workspace = workspace_from_params(params)
       replay_markers = Set(String).new if @v2 && method == Protocol::AgentMethod::SESSION_RESUME && !params.try(&.["replayFrom"]?).try(&.raw).nil?
       setup = SetupRequest.new(method, sid, workspace, replay_markers)
       @setups[id] = setup
@@ -286,6 +288,9 @@ module ACP
           @unconfirmed_roots.add(evicted.session_id.not_nil!)
         end
       else
+        if !@v2 && (setup = @setups[id]?) && !setup.creates_session? && !setup.retired? && (sid = setup.session_id)
+          @workspace.delete(sid)
+        end
         request_finished(id)
       end
     end
@@ -319,12 +324,16 @@ module ACP
       @closed_roots.delete(session_id)
       if workspace = setup.workspace
         @workspace[session_id] = workspace
+      elsif !@v2
+        @workspace.delete(session_id)
       end
+      order = setup.write_order.not_nil!
       if @v2
-        order = setup.write_order.not_nil!
         attach_root_state(session_id, setup.state || root_state(session_id) || UNKNOWN_STATE, order)
         discard_late_resumes(session_id, before: order)
         @unconfirmed_roots.delete(session_id)
+      else
+        @v1_attachments[session_id] = order
       end
     end
 
@@ -334,6 +343,10 @@ module ACP
         latest = setup if setup.session_id == session_id
       end
       latest
+    end
+
+    def setup_pending?(request_id : String) : Bool
+      @setups.has_key?(request_id)
     end
 
     def retired_setup?(request_id : String) : Bool
@@ -360,10 +373,12 @@ module ACP
           clear_descendant_runtime(sid, include_root_entities: !@root_states.has_key?(sid))
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
-        if workspace && (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
+        if (created = create_result(Protocol::WireFrame.result_json(response, frame))) && created.session_id != sid
           new_id = created.session_id
-          @workspace[new_id] = workspace
-          if @v2
+          @workspace[new_id] = workspace if workspace
+          if !@v2
+            @v1_attachments[new_id] = setup.write_order.not_nil!
+          elsif workspace
             early = @early_states.delete(new_id)
             if early && (started = setup.state_revision) && early.revision > started
               initial = early.payload
@@ -409,10 +424,18 @@ module ACP
       descendants(session_id).push(session_id)
     end
 
-    def drop_runtime(session_id : String, *, preserve_after : UInt64? = nil) : Nil
+    def forget_runtime(session_id : String) : Nil
+      if !@v2 && (pending = @setup_by_session[session_id]?)
+        pending.retired = true
+      end
+      drop_runtime(session_id)
+    end
+
+    private def drop_runtime(session_id : String, *, preserve_after : UInt64? = nil) : Nil
       return if child?(session_id)
 
-      @closed_roots.add(session_id) if @workspace.delete(session_id) || @children.any? { |_, child| child.parent_id == session_id }
+      attached = @v1_attachments.delete(session_id)
+      @closed_roots.add(session_id) if @workspace.delete(session_id) || attached || @children.any? { |_, child| child.parent_id == session_id }
       @root_states.delete(session_id)
       @early_states.delete(session_id)
       @unconfirmed_roots.delete(session_id)
@@ -433,6 +456,7 @@ module ACP
     def clear : Nil
       @children.clear
       @workspace.clear
+      @v1_attachments.clear
       @root_states.clear
       @early_states.clear
       @setups.clear
@@ -613,6 +637,20 @@ module ACP
       @cancellable_entities.reject! do |entity, _order|
         (include_root_entities && entity[0] == session_id) || children.includes?(entity[0])
       end
+    end
+
+    private def workspace_from_params(params : Hash(String, JSON::Any)?) : SessionWorkspace?
+      return unless cwd = params.try(&.["cwd"]?).try(&.as_s?)
+
+      dirs = [] of String
+      if (value = params.try(&.["additionalDirectories"]?)) && !value.raw.nil?
+        return unless entries = value.as_a?
+        dirs = entries.compact_map(&.as_s?)
+        return unless dirs.size == entries.size
+      end
+      return unless Protocol.absolute_workspace?(cwd, dirs)
+
+      SessionWorkspace.new(cwd, dirs)
     end
 
     private def attach_result(method : String, result : String?)
