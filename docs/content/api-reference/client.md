@@ -35,9 +35,17 @@ ensure
 end
 ```
 
-The prompt response acknowledges insertion. Foreground completion arrives
-in an idle `state_update`. Keep `on_update` callbacks short because they run
-on the dispatcher fiber.
+The prompt response acknowledges insertion and carries the inserted user
+message's ID. Foreground completion arrives in an idle `state_update`.
+Keep `on_update` callbacks short because they run on the dispatcher fiber.
+[ACP v2 prompt acceptance](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#2-prompt-accepted)
+
+Session creation and fork responses in both versions, and v2 prompt
+acknowledgements, expose exact extension metadata via `meta_raw`. An
+ambiguous returned ID or repeated JSON-RPC `result` raises `ProtocolError`.
+New sessions must also have IDs distinct from existing sessions.
+[ACP v1 session setup](https://agentclientprotocol.com/protocol/v1/session-setup#creating-a-session)
+[ACP v2 session setup](https://agentclientprotocol.com/protocol/v2/session-setup#creating-a-session)
 
 ACP v2 prompts accept baseline text and resource links. Images, audio,
 embedded resources, and skill references require their respective grants.

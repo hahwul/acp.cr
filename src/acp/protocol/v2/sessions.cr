@@ -191,8 +191,6 @@ module ACP
 
       # A newly created v2 session and its initial configuration.
       struct SessionNewResult < SessionSetupResult
-        AdvertisementArray.guard_envelope "configOptions", "availableCommands"
-
         # Unique ID assigned by the Agent.
         @[JSON::Field(key: "sessionId")]
         property session_id : String
@@ -207,6 +205,11 @@ module ACP
           self.config_options = config_options
           self.available_commands = available_commands
           self.meta = meta
+        end
+
+        # Decodes a setup response with an unambiguous session ID and advertisements.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: {"sessionId", "configOptions", "availableCommands"}, optional: {"_meta"}))
         end
       end
 
@@ -450,17 +453,20 @@ module ACP
       # reason are delivered by subsequent session updates.
       struct SessionPromptResult
         include JSON::Serializable
+        include LosslessMetadata
 
         # ID of the inserted user message.
         @[JSON::Field(key: "messageId")]
         property message_id : String
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates an acknowledgement for an inserted prompt.
-        def initialize(@message_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@message_id : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
+        end
+
+        # Decodes an acknowledgement with an unambiguous user message ID.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: {"messageId"}, optional: {"_meta"}))
         end
       end
     end

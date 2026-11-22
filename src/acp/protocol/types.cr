@@ -753,6 +753,7 @@ module ACP
     # Result of the `session/new` method (Agent → Client).
     struct SessionNewResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The unique session identifier assigned by the agent (required).
       @[JSON::Field(key: "sessionId")]
@@ -768,16 +769,19 @@ module ACP
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a session setup response.
       def initialize(
         @session_id : String,
         @modes : SessionModeState? = nil,
         @config_options : Array(ConfigOption)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
+      end
+
+      # Decodes a setup response with an unambiguous session ID.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"sessionId"}, optional: {"_meta"}))
       end
     end
 
