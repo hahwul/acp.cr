@@ -2687,6 +2687,102 @@ private def capture_request_params(feed : IO, outgoing : IO, result : String) : 
   requests
 end
 
+describe "ACP exact provider configuration" do
+  {"v1", "v2"}.each do |version|
+    it "preserves request and response metadata over stdio on #{version}" do
+      with_wide_stdio do |transport, feed, outgoing|
+        if version == "v1"
+          client = ACP::Client.new(transport)
+          initialize = %({"protocolVersion":1,"agentCapabilities":{"providers":{}}})
+        else
+          client = ACP::V2::Client.new(transport)
+          initialize = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"providers":{}}})
+        end
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, initialize)
+        client.initialize_connection
+
+        metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901,"example.test/label":"fixture"})
+        list_params = ACP::Protocol::ListProvidersParams.from_json(%({"_meta":#{metadata}}))
+        current = %({"apiType":"openai","baseUrl":"https://llm.example.test","_meta":#{metadata}})
+        provider = %({"providerId":"model","supported":["openai"],"required":false,"current":#{current},"_meta":#{metadata}})
+        list_result = %({"providers":[#{provider}],"_meta":#{metadata}})
+        sent = capture_request_params(feed, outgoing, list_result)
+        list = ACP::Protocol::RawJson.from_json(client.providers_list(list_params).to_json)
+        next_permission_event(sent).field("_meta").try(&.json).should eq(metadata)
+        list.field("_meta").try(&.json).should eq(metadata)
+        entry = list.field("providers").not_nil!.elements?.not_nil!.first
+        entry.field("_meta").try(&.json).should eq(metadata)
+        entry.field("current").not_nil!.field("_meta").try(&.json).should eq(metadata)
+
+        set_params = ACP::Protocol::SetProviderParams.from_json(%({"providerId":"model","apiType":"openai","baseUrl":"https://llm.example.test","headers":{"X-Test":"fixture"},"_meta":#{metadata}}))
+        decimal_metadata = %({"example.test/ratio":0.123456789012345678901})
+        sent = capture_request_params(feed, outgoing, %({"_meta":#{decimal_metadata}}))
+        set_result = ACP::Protocol::RawJson.from_json(client.providers_set(set_params).to_json)
+        sent_set = next_permission_event(sent)
+        sent_set.field("_meta").try(&.json).should eq(metadata)
+        sent_set.field("headers").not_nil!.field("X-Test").try(&.as_s?).should eq("fixture")
+        set_result.field("_meta").try(&.json).should eq(decimal_metadata)
+
+        nested_metadata = %({"providers":[#{provider.gsub(metadata, decimal_metadata)}]})
+        answer_identity_request(feed, outgoing, nested_metadata)
+        nested = client.providers_list.providers.first
+        nested.meta_raw.not_nil!.json.should eq(decimal_metadata)
+        nested.current.not_nil!.meta_raw.not_nil!.json.should eq(decimal_metadata)
+
+        sent_disable = Channel(ACP::Protocol::RawJson).new(1)
+        spawn do
+          list_request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          feed.puts %({"jsonrpc":"2.0","id":#{list_request.field("id").not_nil!.json},"result":#{list_result}})
+          disable_request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          sent_disable.send(disable_request)
+          feed.puts %({"jsonrpc":"2.0","id":#{disable_request.field("id").not_nil!.json},"result":{"_meta":#{metadata}}})
+        end
+        disable_params = ACP::Protocol::DisableProviderParams.from_json(%({"providerId":"model","_meta":#{metadata}}))
+        disabled = ACP::Protocol::RawJson.from_json(client.providers_disable(disable_params).to_json)
+        disable = next_permission_event(sent_disable)
+        disable.field("method").try(&.as_s?).should eq("providers/disable")
+        disable.field("params").not_nil!.field("_meta").try(&.json).should eq(metadata)
+        disabled.field("_meta").try(&.json).should eq(metadata)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "redacts correlated exact provider replies without hiding other replies" do
+    reader, feed = IO.pipe
+    writer = IO::Memory.new
+    captured = IO::Memory.new
+    backend = Log::IOBackend.new(captured, dispatcher: Log::DispatchMode::Sync)
+    backend.formatter = Log::Formatter.new { |entry, io| io << entry.message << '\n' }
+    Log.setup { |config| config.bind "acp.transport", :debug, backend }
+    transport = ACP::StdioTransport.new(reader, writer)
+    secret = "fixture-exact-provider-credential"
+    metadata = %({"example.test/count":18446744073709551615})
+    params = %({"headers":{"Authorization":"#{secret}"},"_meta":#{metadata}})
+    sent = ACP::Protocol::WireFrame.new(%({"jsonrpc":"2.0","id":4,"method":"providers/set","params":#{params}}), exact_params: true)
+    rejected = ACP::Protocol::WireFrame.new(%({"jsonrpc":"2.0","id":5,"method":"providers/set","params":#{params}}), exact_params: true)
+    expect_raises(ArgumentError) { transport.send_wire(rejected) { raise ArgumentError.new("Request cancelled") } }
+    transport.send_wire(sent) { }
+    writer.to_s.should eq(sent.json + '\n')
+
+    feed.puts %({"jsonrpc":"2.0","id":5,"result":{"message":"ordinary-result"}})
+    feed.puts %({"jsonrpc":"2.0","id":4,"result":{"message":"#{secret}"}})
+    feed.puts %({"jsonrpc":"2.0","id":"4","error":{"code":-32602,"message":"Rejected","data":{"echo":"#{secret}"}}})
+    transport.receive(2.seconds).not_nil!["id"].should eq(5)
+    transport.receive(2.seconds).not_nil!["result"]["message"].should eq(secret)
+    transport.receive(2.seconds).not_nil!["error"]["data"]["echo"].should eq(secret)
+    captured.to_s.should contain("ordinary-result")
+    captured.to_s.scan("[REDACTED response]").size.should eq(2)
+    captured.to_s.should_not contain(secret)
+  ensure
+    Log.setup(:none)
+    transport.try(&.close)
+    feed.try(&.close)
+  end
+end
+
 describe "ACP exact authentication replies" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "0.123456789012345678901"}.each do |kind, number|
     it "accepts a #{kind} in v1 login and logout results" do

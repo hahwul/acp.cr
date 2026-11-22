@@ -211,8 +211,12 @@ module ACP
       if @exact_frames && wire.bytesize > @max_line_bytes
         raise FrameTooLargeError.new("Outgoing ACP frame exceeds the relay line limit")
       end
+      provider_request_id = exact_provider_request_id(wire)
       Log.debug { ">>> [REDACTED exact frame]" }
-      write_line(wire + '\n', &preflight)
+      write_line(wire + '\n') do
+        preflight.call
+        track_provider_request(provider_request_id) if provider_request_id
+      end
     end
 
     private def write_message(message : Hash(String, JSON::Any), preflight : (-> Nil)? = nil) : Nil
@@ -228,7 +232,10 @@ module ACP
 
       write_line(frame) do
         preflight.try(&.call)
-        track_provider_request(message)
+        if provider_log_method?(message["method"]?.try(&.as_s?)) &&
+           (id = Protocol.extract_id(JSON::Any.new(message)))
+          track_provider_request(id)
+        end
       end
     end
 
@@ -388,11 +395,22 @@ module ACP
       "[REDACTED frame]"
     end
 
-    private def track_provider_request(message : Hash(String, JSON::Any)) : Nil
-      return unless (method = message["method"]?.try(&.as_s?)) &&
-                    (Protocol::AgentMethod::PROVIDER_METHODS.includes?(method) || method == Protocol::ProxyMethod::SUCCESSOR)
-      return unless id = Protocol.extract_id(JSON::Any.new(message))
+    private def provider_log_method?(method : String?) : Bool
+      Protocol::AgentMethod::PROVIDER_METHODS.includes?(method) || method == Protocol::ProxyMethod::SUCCESSOR
+    end
 
+    # Inspect only routing fields. The request parameters may be outside JSON::Any.
+    private def exact_provider_request_id(wire : String) : Protocol::RequestId?
+      method = Protocol::WireFrame.field(wire, "method")
+      return unless method && provider_log_method?(JSON.parse(method).as_s?)
+      return unless id = Protocol::WireFrame.field(wire, "id")
+
+      Protocol.extract_id(JSON.parse(%({"id":#{id}})))
+    rescue JSON::Error
+      nil
+    end
+
+    private def track_provider_request(id : Protocol::RequestId) : Nil
       @provider_log_mutex.synchronize do
         if ids = @provider_request_id_hashes
           ids.add(id.to_s.hash)
@@ -603,9 +621,12 @@ module ACP
       has_id = envelope.try(&.has_key?("id"))
       response = has_id && !envelope.try(&.has_key?("method"))
       auth_status_result = response && result.try(&.["state"]?).try(&.as_s?)
+      provider_list_result = response && result.try(&.has_key?("providers"))
       structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
       initialize_result = response && result.try(&.has_key?("protocolVersion"))
-      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || auth_status_result || structured_error || initialize_result ||
+      if exact_params || versioned_result || choices_result || state_result || turn_usage_result ||
+         session_list_result || identity_result || result_metadata || auth_status_result || provider_list_result ||
+         structured_error || initialize_result ||
          (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?) ||
          (has_id && method && !Protocol::WireFrame.repeated_members(line, "id").empty?)
         Protocol::WireFrame.new(line, exact_params: true)
