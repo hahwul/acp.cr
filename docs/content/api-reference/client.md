@@ -153,7 +153,10 @@ For v2 form elicitations, `requested_schema` contains the supported
 controls. An optional control of an unsupported type is omitted.
 A form with a missing or unsupported required control, or a malformed
 standard control, returns JSON-RPC `-32602` before the callback runs.
-Use `requested_schema_raw` for the original schema with exact values.
+Use `requested_schema_raw` for the original schema. In both versions,
+the typed schema, properties, and choices expose exact `meta_raw`.
+Numeric fields expose `minimum_raw`, `maximum_raw`, and `default_raw`
+alongside the ordinary numeric accessors.
 Render text fields with unrecognized `format` values as plain text.
 [ACP v2 Form Mode](https://agentclientprotocol.com/protocol/v2/elicitation#form-mode)
 
@@ -163,10 +166,10 @@ fields, types, choices, bounds, and the `email`, `uri`, `date`, and
 are local syntax checks. Leap seconds are checked for possible placement at
 the end of a UTC month. A callback that supplies invalid form content
 causes a JSON-RPC `-32603` reply to the Agent.
-For a declared custom field, use `CreateElicitationResult.accept_raw`
-with a `Protocol::RawJson` content object. Stdio sends those values with
-their exact JSON numbers. Custom transports can override `send_wire`
-to support exact frames.
+Use `CreateElicitationResult.accept_raw` with a `Protocol::RawJson` content
+object to submit exact numbers in either version or values for declared
+custom fields in v2. Stdio supports exact frames. Custom transports can
+override `send_wire` to add that support.
 [ACP v2 Elicitation Responses](https://agentclientprotocol.com/protocol/v2/elicitation#responses)
 
 ACP v1 form callbacks also validate submissions against the original schema.

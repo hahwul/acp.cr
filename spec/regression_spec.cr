@@ -11158,6 +11158,101 @@ private def form_elicitation_frame(id : Int32, schema : String, *, scope : Strin
   %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{#{scope},"mode":"form","message":"Choose","requestedSchema":#{wire.json}}})
 end
 
+describe "ACP exact typed form schemas" do
+  it "compares wide selection counts and keyed schema fields independent of insertion order" do
+    metadata = {"first" => JSON::Any.new(true), "second" => JSON::Any.new(false)}
+    reversed = {"second" => JSON::Any.new(false), "first" => JSON::Any.new(true)}
+    first = ACP::Protocol::ElicitationPropertySchema.new("array", min_items: UInt64::MAX, meta: metadata)
+    second = ACP::Protocol::ElicitationPropertySchema.new("array", min_items: UInt64::MAX, meta: reversed)
+    first.should eq(second)
+    first.hash.should eq(second.hash)
+
+    text = ACP::Protocol::ElicitationPropertySchema.new("string")
+    left = ACP::Protocol::ElicitationSchema.new({"array" => first, "text" => text})
+    right = ACP::Protocol::ElicitationSchema.new({"text" => text, "array" => second})
+    left.should eq(right)
+    left.hash.should eq(right.hash)
+  end
+
+  {1, 2}.each do |version|
+    it "keeps v#{version} schema metadata, numeric bounds, and defaults in stdio callbacks" do
+      with_wide_stdio do |transport, feed, outgoing|
+        caps = ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new)
+        if version == 2
+          v2 = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(elicitation: caps))
+          client = v2
+          initialize_wide_v2(v2, feed, outgoing)
+        else
+          v1 = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+          client = v1
+          answer_identity_request(feed, outgoing, %q({"protocolVersion":1}))
+          v1.initialize_connection
+        end
+
+        meta = %q({"example.test/count":18446744073709551615,"example.test/values":[0.123456789012345678901,"before"]})
+        minimum = "0.123456789012345678901"
+        maximum = "0.123456789012345678903"
+        default = "0.123456789012345678902"
+        choice = %({"const":"a","title":"Alpha","_meta":#{meta}})
+        schema = %({"type":"object","_meta":#{meta},"required":["amount"],"properties":{
+          "amount":{"type":"number","minimum":#{minimum},"maximum":#{maximum},"default":#{default},"_meta":#{meta}},
+          "wide":{"type":"number","maximum":18446744073709551615,"default":18446744073709551615},
+          "one":{"type":"string","oneOf":[#{choice}]},
+          "many":{"type":"array","items":{"anyOf":[#{choice}],"_meta":#{meta}}}
+        }})
+        observed = Channel(ACP::Protocol::CreateElicitationParams).new(1)
+        value = default
+        client.on_create_elicitation = ->(request : ACP::Protocol::CreateElicitationParams) do
+          observed.send(request)
+          ACP::Protocol::CreateElicitationResult.accept_raw(ACP::Protocol::RawJson.from_json(%({"amount":#{value}})))
+        end
+        feed.puts form_elicitation_frame(1, schema)
+        reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        reply.field("result").try(&.field("content")).try(&.field("amount")).try(&.json).should eq(default)
+
+        request = next_permission_event(observed)
+        request.requested_schema_raw.try(&.json).should eq(ACP::Protocol::RawJson.from_json(schema).json)
+        typed = request.requested_schema.not_nil!
+        wire = ACP::Protocol::RawJson.from_json(typed.to_json)
+        wire.field("_meta").try(&.json).should eq(meta)
+        fields = wire.field("properties").not_nil!
+        amount = fields.field("amount").not_nil!
+        amount.field("_meta").try(&.json).should eq(meta)
+        amount.field("minimum").try(&.json).should eq(minimum)
+        amount.field("maximum").try(&.json).should eq(maximum)
+        amount.field("default").try(&.json).should eq(default)
+        control = typed.properties["amount"]
+        control.minimum_raw.try(&.json).should eq(minimum)
+        control.maximum_raw.try(&.json).should eq(maximum)
+        control.default_raw.try(&.json).should eq(default)
+        wide = fields.field("wide").not_nil!
+        wide.field("maximum").try(&.json).should eq("18446744073709551615")
+        wide.field("default").try(&.json).should eq("18446744073709551615")
+        options = fields.field("one").not_nil!.field("oneOf").not_nil!.elements?.not_nil!
+        options.first.field("_meta").try(&.json).should eq(meta)
+        items = fields.field("many").not_nil!.field("items").not_nil!
+        items.field("_meta").try(&.json).should eq(meta)
+        items.field("anyOf").not_nil!.elements?.not_nil!.first.field("_meta").try(&.json).should eq(meta)
+        reparsed = ACP::Protocol::ElicitationSchema.from_json(typed.to_json)
+        reparsed.properties["wide"].default_raw.try(&.json).should eq("18446744073709551615")
+        reparsed.properties["wide"].maximum_raw.try(&.json).should eq("18446744073709551615")
+        reparsed.properties["wide"].maximum.should eq(18446744073709551615_u64.to_f64)
+
+        typed.meta.not_nil!["example.test/values"].as_a[1] = JSON::Any.new("after")
+        ACP::Protocol::RawJson.from_json(typed.to_json).field("_meta").try(&.json).should eq(meta.sub("before", "after"))
+        {"0.123456789012345678900", %q({"value":0.123456789012345678902})}.each_with_index do |invalid, index|
+          value = invalid
+          feed.puts form_elicitation_frame(2 + index, schema)
+          JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+          next_permission_event(observed).requested_schema.should_not be_nil
+        end
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+end
+
 describe "ACP v2 form elicitation schemas" do
   it "rejects forms with missing, malformed, or unrenderable fields before the handler" do
     with_wide_stdio do |transport, feed, outgoing|

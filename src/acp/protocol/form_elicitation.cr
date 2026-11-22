@@ -28,14 +28,14 @@ module ACP
 
         declared = form.field("properties").try(&.members?) || {} of String => RawJson
         values.each do |name, value|
-          definition = declared[name]? || invalid("Form submission includes an undeclared field")
+          invalid("Form submission includes an undeclared field") unless declared.has_key?(name)
           if field = decoded.properties[name]?
-            invalid("Submitted value does not match its form field") unless valid_submission?(field, definition, value, v2: v2)
+            invalid("Submitted value does not match its form field") unless valid_submission?(field, value, v2: v2)
           end
         end
       end
 
-      private def self.valid_submission?(field : ElicitationPropertySchema, definition : RawJson, value : RawJson, *, v2 : Bool) : Bool
+      private def self.valid_submission?(field : ElicitationPropertySchema, value : RawJson, *, v2 : Bool) : Bool
         case field.property_type
         when "string"
           text = value.as_s?
@@ -51,11 +51,12 @@ module ACP
           input = value.as_i64?
           !input.nil? && within_bounds?(input, field.minimum, field.maximum)
         when "number"
-          return false if number(value, "number").nil?
-          minimum = definition.field("minimum")
-          maximum = definition.field("maximum")
-          (minimum.nil? || minimum.null? || compare_numbers(value, minimum) >= 0) &&
-            (maximum.nil? || maximum.null? || compare_numbers(value, maximum) <= 0)
+          return false unless ElicitationNumber.project(value)
+
+          minimum = field.minimum_raw
+          maximum = field.maximum_raw
+          (minimum.nil? || compare_numbers(value, minimum) >= 0) &&
+            (maximum.nil? || compare_numbers(value, maximum) <= 0)
         when "boolean"
           value.json.in?("true", "false")
         when "array"
@@ -73,7 +74,7 @@ module ACP
       end
 
       private def self.v1_content_value?(value : RawJson) : Bool
-        return true if value.as_s? || value.json.in?("true", "false") || number(value, "number")
+        return true if value.as_s? || value.json.in?("true", "false") || ElicitationNumber.project(value)
 
         value.elements?.try(&.all? { |entry| !entry.as_s?.nil? }) == true
       end
@@ -118,8 +119,9 @@ module ACP
         if required && !required.all? { |name| properties.has_key?(name) }
           invalid("Form requires a missing or unsupported property")
         end
-        ElicitationSchema.new(properties, required, fields["title"]?.try(&.as_s?),
-          fields["description"]?.try(&.as_s?), metadata(fields["_meta"]?))
+        schema = ElicitationSchema.new(properties, required, fields["title"]?.try(&.as_s?),
+          fields["description"]?.try(&.as_s?))
+        with_metadata(schema, fields["_meta"]?)
       end
 
       private def self.property_schema(raw : RawJson, *, v2 : Bool) : ElicitationPropertySchema?
@@ -145,7 +147,7 @@ module ACP
                    property_fields(raw, Tuple.new)
                  end
         property = ElicitationPropertySchema.new(type, title: fields["title"]?.try(&.as_s?),
-          description: fields["description"]?.try(&.as_s?), meta: metadata(fields["_meta"]?))
+          description: fields["description"]?.try(&.as_s?))
         default = fields["default"]?
         case type
         when "string"
@@ -167,14 +169,15 @@ module ACP
           end
           property.default = default.try(&.as_s?).try { |value| JSON::Any.new(value) }
         when "number", "integer"
-          minimum = fields["minimum"]?
-          maximum = fields["maximum"]?
-          property.minimum = constraint(minimum, "minimum") { |value| number(value, type) }
-          property.maximum = constraint(maximum, "maximum") { |value| number(value, type) }
-          if minimum && maximum && !minimum.null? && !maximum.null? && compare_numbers(minimum, maximum) > 0
+          integer = type == "integer"
+          minimum = numeric_bound(fields["minimum"]?, "minimum", integer: integer)
+          maximum = numeric_bound(fields["maximum"]?, "maximum", integer: integer)
+          if minimum && maximum && compare_numbers(minimum, maximum) > 0
             invalid("Form numeric value has a minimum above its maximum")
           end
-          property.default = default.try { |value| number(value, type) }.try { |value| JSON::Any.new(value) }
+          property.minimum_raw = minimum
+          property.maximum_raw = maximum
+          property.default_raw = default if default && ElicitationNumber.project(default, integer: integer)
         when "boolean"
           case default.try(&.json)
           when "true"  then property.default = JSON::Any.new(true)
@@ -192,7 +195,7 @@ module ACP
         else
           property.default = default.try(&.to_json_any?)
         end
-        property
+        with_metadata(property, fields["_meta"]?)
       end
 
       private def self.property_fields(raw : RawJson, keys : Tuple) : Hash(String, RawJson)
@@ -202,7 +205,7 @@ module ACP
       private def self.select_items(raw : RawJson, *, v2 : Bool) : MultiSelectItems?
         source = raw.unambiguous_patch(required: {"type"}, optional: {"_meta"})
         fields = source.members? || invalid("Array form items must be an object")
-        meta = metadata(fields["_meta"]?)
+        meta = fields["_meta"]?
         discriminator = fields["type"]?
         type = discriminator.try(&.as_s?)
         if v2 && discriminator && !type
@@ -212,15 +215,15 @@ module ACP
           reject_repeated(source, "enum")
           options = strings(fields["enum"]?, "enum", nonempty: v2)
           if options
-            return MultiSelectItems.new(items_type: type, enum_values: options, meta: meta)
+            return with_metadata(MultiSelectItems.new(items_type: type, enum_values: options), meta)
           end
           invalid("String array items require enum") if v2
         elsif type
-          return v2 ? nil : MultiSelectItems.new(items_type: type, meta: meta)
+          return v2 ? nil : with_metadata(MultiSelectItems.new(items_type: type), meta)
         end
         reject_repeated(source, "anyOf")
         choices = titled_choices(fields["anyOf"]?, "anyOf", nonempty: v2) || invalid("Titled array items require anyOf")
-        MultiSelectItems.new(items_type: type, any_of: choices, meta: meta)
+        with_metadata(MultiSelectItems.new(items_type: type, any_of: choices), meta)
       end
 
       private def self.reject_repeated(source : RawJson, field : String) : Nil
@@ -246,7 +249,8 @@ module ACP
           title = fields.try(&.["title"]?).try(&.as_s?)
           invalid("Form #{name} requires a string const and title") unless fields && choice && title
 
-          EnumOption.new(choice, title, fields["description"]?.try(&.as_s?), metadata(fields["_meta"]?))
+          option = EnumOption.new(choice, title, fields["description"]?.try(&.as_s?))
+          with_metadata(option, fields["_meta"]?)
         end
       end
 
@@ -258,6 +262,10 @@ module ACP
         return if value.nil? || value.null?
 
         (yield value) || invalid("Invalid form #{name}")
+      end
+
+      private def self.numeric_bound(value : RawJson?, name : String, *, integer : Bool) : RawJson?
+        constraint(value, name) { |wire| wire if ElicitationNumber.project(wire, integer: integer) }
       end
 
       # Compare the decimal tokens without rounding them or expanding exponents.
@@ -288,17 +296,9 @@ module ACP
         value.json == "-0" ? "0" : value.json
       end
 
-      private def self.number(value : RawJson, type : String) : Int64 | Float64 | Nil
-        if integer = value.as_i64?
-          return integer
-        end
-        value.json.to_f64?.try { |number| number if number.finite? } if type == "number"
-      end
-
-      private def self.metadata(value : RawJson?) : Hash(String, JSON::Any)?
-        if value && value.object?
-          PreservedJson.new(value, project_object_members: true, project_nested_objects: true).value.try(&.as_h?)
-        end
+      private def self.with_metadata(value, metadata : RawJson?)
+        value.meta_raw = metadata if metadata.try(&.object?)
+        value
       end
 
       private def self.invalid(message : String) : NoReturn
