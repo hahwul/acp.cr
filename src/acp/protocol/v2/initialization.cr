@@ -334,6 +334,9 @@ module ACP
         include JSON::Serializable
         include LosslessUnmapped
 
+        @[JSON::Field(ignore: true)]
+        @metadata_wire : PreservedJson?
+
         # Wire discriminator. Known values are `agent` and `terminal`.
         @[JSON::Field(key: "type")]
         getter method_type : String
@@ -354,6 +357,39 @@ module ACP
         )
         end
 
+        # Reads a method with unambiguous identity and launch settings.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "type", "methodId", "name", "args", "env"))
+        end
+
+        protected def keep_exact_unmapped?(key : String) : Bool
+          key != "_meta"
+        end
+
+        protected def on_unknown_json_attribute(pull, key, key_location)
+          return super unless key == "_meta"
+
+          if pull.kind.begin_object?
+            wire = RawJson.new(pull)
+            metadata = PreservedMetadata.wrap(wire)
+            @metadata_wire = metadata.partial? ? nil : metadata
+            retain_unmapped_json(key, wire.json, projection: @metadata_wire.try(&.value))
+          else
+            @metadata_wire = nil
+            super
+          end
+        end
+
+        protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+          if key == "_meta" && (metadata = @metadata_wire) && (view = metadata.value.try(&.as_h?)) && value.as_h?.try(&.same?(view))
+            return metadata.raw.json
+          end
+
+          super
+        end
+
+        def_equals_and_hash @method_type, @method_id, @name, @json_unmapped, @raw_fields
+
         # Description intended for the user.
         def description : String?
           @json_unmapped["description"]?.try(&.as_s?)
@@ -362,6 +398,13 @@ module ACP
         # Extension metadata.
         def meta : Hash(String, JSON::Any)?
           @json_unmapped["_meta"]?.try(&.as_h?)
+        end
+
+        # Extension metadata with its exact JSON numbers and values.
+        def meta_raw : RawJson?
+          if json = exact_unmapped_json("_meta")
+            RawJson.from_json(json) if json.starts_with?('{')
+          end
         end
 
         # Whether the Agent performs this flow via auth/login.
@@ -378,7 +421,7 @@ module ACP
         def terminal_settings : TerminalAuthSettings?
           return unless terminal?
 
-          TerminalAuthSettings.from_json(@json_unmapped.to_json)
+          TerminalAuthSettings.from_json(WireFrame.encode(self))
         rescue JSON::ParseException
           nil
         end
@@ -440,6 +483,8 @@ module ACP
       # Successful initialize result encoded in the ACP v2 format.
       struct InitializeResult
         include JSON::Serializable
+        include LosslessMetadata
+        include WireValueEquality
 
         # Chosen protocol version.
         @[JSON::Field(key: "protocolVersion")]
@@ -456,9 +501,44 @@ module ACP
         @[JSON::Field(key: "authMethods", converter: ::ACP::Protocol::V2::OptionalAuthMethods)]
         property auth_methods : Array(AuthMethod) = [] of AuthMethod
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
+        @[JSON::Field(ignore: true)]
+        @ambiguous_auth_method_ids = Set(String).new
+
+        # Decodes methods independently while recording duplicate advertised IDs.
+        def self.new(pull : JSON::PullParser) : self
+          wire = RawJson.new(pull).unambiguous_patch(required: {"protocolVersion", "info"}, optional: {"authMethods"})
+          result = previous_def(JSON::PullParser.new(wire.json))
+          result.record_ambiguous_auth_methods(wire.field("authMethods").try(&.elements?))
+          result
+        end
+
+        # Whether the original offer contained multiple methods for this ID.
+        def ambiguous_auth_method?(method_id : String) : Bool
+          @ambiguous_auth_method_ids.includes?(method_id)
+        end
+
+        protected def record_ambiguous_auth_methods(methods : Array(RawJson)?) : Nil
+          return unless methods
+
+          seen = Set(String).new
+          methods.each do |method|
+            next unless method.object?
+
+            parser = JSON::PullParser.new(method.json)
+            parser.read_object do |key|
+              if key == "methodId" && parser.kind.string?
+                id = parser.read_string
+                @ambiguous_auth_method_ids.add(id) unless seen.add?(id)
+              else
+                parser.skip
+              end
+            end
+          end
+        end
+
+        protected def comparison_value
+          {@protocol_version, @info, @capabilities, @auth_methods, comparable_json(meta_raw), @ambiguous_auth_method_ids}
+        end
 
         # Creates a successful ACP v2 initialize result.
         def initialize(
@@ -466,8 +546,9 @@ module ACP
           @protocol_version : UInt16 = VERSION,
           @capabilities : AgentCapabilities = AgentCapabilities.new,
           @auth_methods : Array(AuthMethod) = [] of AuthMethod,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          self.meta = meta
         end
       end
 
