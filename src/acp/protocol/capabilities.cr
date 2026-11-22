@@ -812,6 +812,8 @@ module ACP
     # Environment variable to set when launching an MCP server.
     struct EnvVariable
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The name of the environment variable.
       property name : String
@@ -819,11 +821,8 @@ module ACP
       # The value of the environment variable.
       property value : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@name : String, @value : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@name : String, @value : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

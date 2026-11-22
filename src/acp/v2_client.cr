@@ -486,7 +486,7 @@ module ACP
       # Selects an advertised Agent-managed authentication flow.
       def auth_login(method_id : String) : Wire::AuthLoginResult
         @connection.with_request do
-          method = ready.auth_methods.find { |candidate| candidate.method_id == method_id }
+          method = advertised_auth_method(method_id)
           raise InvalidStateError.new("An advertised Agent auth method is required") unless method && method.agent?
 
           request(AgentMethod::AUTH_LOGIN, Wire::AuthLoginParams.new(method_id), Wire::AuthLoginResult)
@@ -986,8 +986,16 @@ module ACP
         raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless Protocol.standard_base64?(data)
       end
 
+      private def advertised_auth_method(method_id : String) : Wire::AuthMethod?
+        result = ready
+        return if result.ambiguous_auth_method?(method_id)
+
+        matching = result.auth_methods.select { |candidate| candidate.method_id == method_id }
+        matching.first if matching.size == 1
+      end
+
       private def terminal_auth_flow(method_id : String, approve : Wire::AuthMethod -> Bool) : Client
-        method = ready.auth_methods.find { |candidate| candidate.method_id == method_id }
+        method = advertised_auth_method(method_id)
         transport = @transport.as?(ProcessTransport)
         unless transport && capabilities.auth.try(&.terminal) && method && (settings = method.terminal_settings)
           raise InvalidStateError.new("Terminal authentication requires an advertised terminal method and process transport")

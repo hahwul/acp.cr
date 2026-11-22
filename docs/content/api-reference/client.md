@@ -91,6 +91,8 @@ The v2 client supports session creation, listing, resume and replay, prompts,
 configuration changes, close and delete. Register `on_request_permission`
 and `on_create_elicitation` to handle Agent requests. Authentication is
 available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
+Use `meta_raw` on the initialize result or an advertised authentication
+method to read exact extension values from the Agent.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
 current cancel capability. [ACP v2 Prompt Lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 

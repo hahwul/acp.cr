@@ -62,7 +62,7 @@ module ACP
         end
       end
 
-      private def retained_unmapped_json(key : String, value : JSON::Any) : String?
+      protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
         return unless entry = @exact_fields.try(&.[key]?)
         return entry[0] if WireFrame.encode(value) == entry[1]
 

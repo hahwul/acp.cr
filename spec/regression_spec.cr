@@ -1988,6 +1988,82 @@ describe "ACP v1 exact authentication offers" do
   end
 end
 
+describe "ACP v2 exact authentication offers" do
+  it "keeps precise authentication metadata through the stdio initialize response" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      future = %({"type":"future","methodId":"future","name":"Future flow","extension":{"count":18446744073709551615,"ratio":0.123456789012345678901}})
+      methods = %([{"type":"agent","methodId":"login","name":"Sign in","_meta":{"example.test/ratio":0.123456789012345678901}},#{future}])
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":#{methods},"_meta":#{metadata}}))
+      result = client.initialize_connection
+      result.auth_methods.map(&.method_id).should eq(["login", "future"])
+      wire = ACP::Protocol::RawJson.from_json(result.to_json)
+      wire.field("authMethods").not_nil!.json.should eq(methods)
+      wire.field("_meta").not_nil!.json.should eq(metadata)
+      result.meta_raw.not_nil!.json.should eq(metadata)
+      result.auth_methods.first.meta_raw.not_nil!.field("example.test/ratio").not_nil!.json.should eq("0.123456789012345678901")
+      expect_raises(ACP::InvalidStateError) { client.auth_login("future") }
+
+      login = Channel(JSON::Any).new(1)
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        login.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{}})
+      end
+      client.auth_login("login")
+      request = next_permission_event(login)
+      request["method"].should eq("auth/login")
+      request["params"]["methodId"].should eq("login")
+    ensure
+      client.try(&.close)
+    end
+  end
+  it "keeps terminal launch settings separate from opaque extension metadata" do
+    method_type = ACP::Protocol::V2::AuthMethod
+    meta = %({"example.test/count":18446744073709551615})
+    terminal = method_type.from_json(%({"type":"terminal","methodId":"terminal","name":"Local sign-in","args":["login"],"env":[{"name":"MODE","value":"interactive","_meta":#{meta}}],"_meta":#{meta}}))
+    settings = terminal.terminal_settings.not_nil!
+    settings.args.should eq(["login"])
+    settings.environment.should eq({"MODE" => "interactive"})
+    settings.env.first.meta_raw.not_nil!.json.should eq(meta)
+    terminal.meta_raw.not_nil!.json.should eq(meta)
+
+    fields = %({"type":"terminal","methodId":"terminal","name":"Local sign-in","args":[],"args":[]})
+    expect_raises(JSON::ParseException) { method_type.from_json(fields) }
+    malformed = method_type.from_json(%({"type":"terminal","methodId":"terminal","name":"Local sign-in","env":18446744073709551615}))
+    malformed.terminal_settings.should be_nil
+  end
+
+  it "retains exact metadata across edits and preserves order-independent comparisons" do
+    type = ACP::Protocol::V2::AuthMethod
+    method = type.from_json(%({"type":"agent","methodId":"login","name":"Sign in","_meta":{"example.test/list":[0.123456789012345678901,"before"]}}))
+    method.meta.not_nil!["example.test/list"].as_a[1] = JSON::Any.new("after")
+    method.meta_raw.not_nil!.field("example.test/list").not_nil!.json.should eq(%([0.123456789012345678901,"after"]))
+
+    fields = %({"type":"agent","methodId":"login","name":"Sign in","_meta":{"example.test/count":18446744073709551615}})
+    a = type.from_json(fields.sub(/}$/, %(,"description":"Login","extension":true})))
+    b = type.from_json(fields.sub(/}$/, %(,"extension":true,"description":"Login"})))
+    a.should eq(b)
+    a.hash.should eq(b.hash)
+  end
+
+  it "requires a unique advertised method ID when logging in" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      methods = %([{"type":"agent","methodId":"login"},{"type":"agent","methodId":"login","name":"Second"}])
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":#{methods}}))
+      result = client.initialize_connection
+      result.auth_methods.map(&.method_id).should eq(["login"])
+      expect_raises(ACP::InvalidStateError) { client.auth_login("login") }
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
 # Debug logs need to hide launch descriptors while keeping the actual
 # initialize response available to the application.
 describe "ACP terminal authentication logging" do
