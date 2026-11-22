@@ -7937,3 +7937,123 @@ describe "ACP v2 request-scoped elicitations" do
     end
   end
 end
+
+private def form_elicitation_frame(id : Int32, schema : String) : String
+  wire = ACP::Protocol::RawJson.from_json(schema)
+  %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Choose","requestedSchema":#{wire.json}}})
+end
+
+describe "ACP v2 form elicitation schemas" do
+  it "rejects forms with missing, malformed, or unrenderable fields before the handler" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      calls = 0
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+        calls += 1
+        ACP::Protocol::CreateElicitationResult.decline
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      choice = %({"const":"a","title":"Alpha"})
+      {
+        %({"properties":{}}),
+        %({"type":"object"}),
+        %({"type":"array","properties":{}}),
+        %({"type":"object","properties":{},"required":["absent"]}),
+        %({"type":"object","properties":{"value":{"type":"_future"}},"required":["value"]}),
+        %({"type":"object","properties":{"value":{"type":"array","items":{"type":"_future"}}},"required":["value"]}),
+        %({"type":"object","properties":{"value":{"type":"string","enum":["a"],"oneOf":[#{choice}]}}}),
+        %({"type":"object","properties":{"value":{"type":"string","enum":[]}}}),
+        %({"type":"object","properties":{"value":{"type":"string","oneOf":[{"const":"a"}]}}}),
+        %({"type":"object","properties":{"value":{"type":"array"}}}),
+        %({"type":"object","properties":{"value":{"type":"array","items":{"type":"string","anyOf":[#{choice}]}}}}),
+        %({"type":"object","properties":{"value":{"type":"array","items":{"anyOf":[]}}}}),
+        %({"type":"object","properties":{"value":{"type":"array","items":{"type":null,"anyOf":[#{choice}]}}}}),
+        %({"type":"object","properties":{"value":{"type":"integer","maximum":1.5}}}),
+        %({"type":"object","properties":{"value":{"type":"string","minLength":-1}}}),
+        %({"type":"object","properties":{"value":{"type":"string","minLength":2,"maxLength":1}}}),
+        %({"type":"object","properties":{"value":{"type":"number","minimum":2,"maximum":1.5}}}),
+        %({"type":"object","properties":{"value":{"type":"integer","minimum":9223372036854775807,"maximum":9223372036854775806}}}),
+        %({"type":"object","properties":{"value":{"type":"array","items":{"type":"string","enum":["a"]},"minItems":2,"maxItems":1}}}),
+        %({"type":"object","properties":{"value":{"type":"string","type":"boolean"}}}),
+        %({"type":"object","properties":{"value":{"type":"boolean"},"value":{"type":"string"}}}),
+      }.each_with_index do |schema, index|
+        feed.puts form_elicitation_frame(index, schema)
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(index)
+        reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+      end
+      calls.should eq(0)
+
+      feed.puts form_elicitation_frame(100, %({"type":"object","properties":{}}))
+      JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("decline")
+      calls.should eq(1)
+
+      client.on_create_elicitation = nil
+      feed.puts form_elicitation_frame(101, %({"type":"object","properties":{}}))
+      JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "decodes standard controls and omits unsupported optional controls" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      received = Channel(ACP::Protocol::CreateElicitationParams).new(1)
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        received.send(params)
+        ACP::Protocol::CreateElicitationResult.decline
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      schema = %({"type":"object","title":false,"_meta":{"width":18446744073709551615,"label":"form"},"properties":{
+        "text":{"type":"string","format":"_custom","minLength":2,"default":"ab","description":false},
+        "plain":{"type":"string","enum":["a"],"oneOf":null,"minLength":-0,"default":42},
+        "titled":{"type":"string","oneOf":[{"const":"a","title":"Alpha","description":42}]},
+        "amount":{"type":"number","maximum":1.25e50,"default":2.5},
+        "count":{"type":"integer","minimum":-9223372036854775808,"default":1.5},
+        "visible":{"type":"boolean","default":true},
+        "plainArray":{"type":"array","items":{"type":"string","enum":["a"],"anyOf":false},"maxItems":18446744073709551615,"default":["a",9]},
+        "titledArray":{"type":"array","minItems":-0,"items":{"anyOf":[{"const":"a","title":"Alpha"}]}},
+        "future":{"type":"_future","enum":18446744073709551615},
+        "futureArray":{"type":"array","items":{"type":"future","enum":18446744073709551615}}
+      },"required":["text"]})
+      feed.puts form_elicitation_frame(1, schema)
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      fail reply.to_json unless reply["result"]?
+      reply["result"]["action"].as_s.should eq("decline")
+      request = next_permission_event(received)
+      raw = request.requested_schema_raw.not_nil!
+      raw.field("_meta").not_nil!.field("width").not_nil!.json.should eq("18446744073709551615")
+      raw.field("properties").not_nil!.field("future").not_nil!.field("enum").not_nil!.json.should eq("18446744073709551615")
+      ACP::Protocol::RawJson.from_json(request.to_json).field("requested_schema_raw").should be_nil
+      present = request.requested_schema.not_nil!
+      present.required.should eq(["text"])
+      present.title.should be_nil
+      present.meta.not_nil!["label"].as_s.should eq("form")
+      props = present.properties
+      props.keys.should eq(["text", "plain", "titled", "amount", "count", "visible", "plainArray", "titledArray"])
+      props["text"].format.should eq("_custom")
+      props["text"].description.should be_nil
+      props["text"].min_length.should eq(2_u32)
+      props["text"].default.should eq(JSON::Any.new("ab"))
+      props["plain"].enum_values.should eq(["a"])
+      props["plain"].min_length.should eq(0_u32)
+      props["plain"].default.should be_nil
+      props["titled"].one_of.not_nil!.first.title.should eq("Alpha")
+      props["titled"].one_of.not_nil!.first.description.should be_nil
+      props["amount"].maximum.should eq(1.25e50)
+      props["amount"].default.should eq(JSON::Any.new(2.5))
+      props["count"].minimum.should eq(Int64::MIN)
+      props["count"].default.should be_nil
+      props["visible"].default.should eq(JSON::Any.new(true))
+      props["plainArray"].items.not_nil!.enum_values.should eq(["a"])
+      props["plainArray"].max_items.should eq(UInt64::MAX)
+      props["plainArray"].default.should eq(JSON.parse(%(["a"])))
+      props["titledArray"].items.not_nil!.any_of.not_nil!.first.const_value.should eq("a")
+      props["titledArray"].min_items.should eq(0_u64)
+      raw.field("properties").not_nil!.field("titledArray").not_nil!.field("minItems").not_nil!.json.should eq("-0")
+    ensure
+      client.try(&.close)
+    end
+  end
+end

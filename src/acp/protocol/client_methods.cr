@@ -649,6 +649,11 @@ module ACP
       @[JSON::Field(key: "requestedSchema")]
       property requested_schema : ElicitationSchema?
 
+      # Exact source schema supplied to the callback for a v2 form request.
+      # Includes optional custom controls omitted from the typed view.
+      @[JSON::Field(ignore: true)]
+      property requested_schema_raw : RawJson?
+
       # URL mode: opaque ID echoed by `elicitation/complete` (required for URL mode).
       @[JSON::Field(key: "elicitationId")]
       property elicitation_id : String?

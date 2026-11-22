@@ -117,6 +117,14 @@ reply is sent, or the connection closes. Use the channel to dismiss a form
 or URL consent prompt that is still open.
 [ACP v2 Elicitation](https://agentclientprotocol.com/protocol/v2/elicitation#creating-an-elicitation)
 
+For v2 form elicitations, `requested_schema` contains the supported
+controls. An optional control of an unsupported type is omitted.
+A form with a missing or unsupported required control, or a malformed
+standard control, returns JSON-RPC `-32602` before the callback runs.
+Use `requested_schema_raw` for the original schema with exact values.
+Render text fields with unrecognized `format` values as plain text.
+[ACP v2 Form Mode](https://agentclientprotocol.com/protocol/v2/elicitation#form-mode)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable
