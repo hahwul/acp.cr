@@ -585,6 +585,7 @@ module ACP
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
       state_result = result && result.has_key?("status") && result.has_key?("state")
+      turn_usage_result = result && result.has_key?("stopReason") && result.has_key?("usage")
       session_list_result = result && (result.has_key?("sessions") || result.has_key?("nextCursor"))
       identity_result = result && (result.has_key?("sessionId") || result.has_key?("messageId"))
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
@@ -592,7 +593,7 @@ module ACP
       response = has_id && !envelope.try(&.has_key?("method"))
       structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
       ambiguous_initialize = response && result.try(&.has_key?("protocolVersion")) && ambiguous_initialize_reply?(line)
-      if exact_params || versioned_result || choices_result || state_result || session_list_result || identity_result || result_metadata || structured_error || ambiguous_initialize ||
+      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || structured_error || ambiguous_initialize ||
          (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?) ||
          (has_id && method && !Protocol::WireFrame.repeated_members(line, "id").empty?)
         Protocol::WireFrame.new(line, exact_params: true)
