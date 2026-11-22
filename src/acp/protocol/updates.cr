@@ -37,6 +37,8 @@
 
 require "json"
 require "./content_block"
+require "./optional_capability"
+require "./patch_fields"
 require "./prompt_suggestions"
 require "./session_options"
 require "./tool_call_content"
@@ -773,51 +775,31 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup
     struct SessionInfoUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
-      # Human-readable title for the session. May be set by the agent
-      # based on conversation content (e.g., a summary of the first prompt).
-      # Omitted means unchanged, `null` means cleared: both read as nil
-      # here, so check `title_present?` to tell them apart.
-      @[JSON::Field(presence: true)]
-      getter title : String?
+      # Patches the display title and ISO 8601 timestamp of last activity.
+      PatchFields.tolerant({
+        title:      {String, "title", OptionalCapabilityString},
+        updated_at: {String, "updatedAt", OptionalCapabilityString},
+      })
 
-      # ISO 8601 timestamp of last activity. Like `title`, `null` clears
-      # it; see `updated_at_present?`.
-      @[JSON::Field(key: "updatedAt", presence: true)]
-      getter updated_at : String?
-
-      # Whether `title` was sent (possibly as `null`, i.e. cleared).
-      @[JSON::Field(ignore: true)]
-      getter? title_present : Bool
-
-      # Whether `updatedAt` was sent (possibly as `null`, i.e. cleared).
-      @[JSON::Field(ignore: true)]
-      getter? updated_at_present : Bool
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a patch with the supplied values. Assign nil through a
+      # setter to clear a field.
       def initialize(
-        @title : String? = nil,
-        @updated_at : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        title : String? = nil,
+        updated_at : String? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "session_info_update"
-        @title_present = !@title.nil?
-        @updated_at_present = !@updated_at.nil?
+        self.title = title if title
+        self.updated_at = updated_at if updated_at
+        self.meta = meta
       end
 
-      # Assigning a field marks it present (assigning nil means "clear").
-      def title=(@title : String?) : String?
-        @title_present = true
-        @title
-      end
-
-      # :ditto:
-      def updated_at=(@updated_at : String?) : String?
-        @updated_at_present = true
-        @updated_at
+      # Decodes unambiguous fields of a session information patch.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"sessionUpdate"}, optional: {"title", "updatedAt", "_meta"}))
       end
     end
 
