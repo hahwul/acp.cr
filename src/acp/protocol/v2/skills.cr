@@ -1,7 +1,6 @@
 require "../raw_json"
 require "../content_block"
 require "../optional_capability"
-require "../optional_metadata"
 require "../session_options"
 
 module ACP
@@ -104,6 +103,7 @@ module ACP
       # A user-selected reference to an advertised Agent skill.
       struct SkillReference
         include JSON::Serializable
+        include LosslessMetadata
 
         # Wire discriminator for skill references.
         getter type : String = "skill"
@@ -111,14 +111,14 @@ module ACP
         # Name of a skill in the session's current command list.
         getter name : String
 
-        # Extension metadata scoped to the reference.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Builds a reference without opening the skill's file.
-        def initialize(@name : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@name : String, meta : Hash(String, JSON::Any)? = nil)
           raise ArgumentError.new("Invalid ACP skill name") unless Skill.valid_name?(@name)
+
+          self.meta = meta
         end
+
+        def_equals_and_hash @type, @name, metadata_comparison
 
         # Parses a well-formed skill reference from an open content block.
         def self.from_content_block(block : JSON::Any) : self?

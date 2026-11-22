@@ -5530,7 +5530,8 @@ describe "ACP v2 exact permission subjects" do
       client.session_new("/work")
 
       tool = %({"toolCallId":"t","title":null,"capabilities":{"cancel":{"_meta":{"wide":18446744073709551615}}},"rawInput":{"wide":18446744073709551615},"rawOutput":0.1234567890123456789,"_meta":{"wide":18446744073709551615,"label":"new","remove":null},"vendorExtra":0.11111111111111111111,"content":[{"type":"diff","changes":[{"operation":"create","path":"/work/file","vendor":0.22222222222222222222}],"patch":{"format":"unified","text":"+change","_meta":{"wide":18446744073709551615}}}]})
-      subject = %({"type":"tool_call","toolCall":#{tool},"extension":18446744073709551616})
+      subject_meta = %({"example.test/values":[0.123456789012345678901,"before"]})
+      subject = %({"type":"tool_call","toolCall":#{tool},"extension":18446744073709551616,"_meta":#{subject_meta}})
       feed.puts %({"jsonrpc":"2.0","id":"permission-wide","method":"session/request_permission","params":{"sessionId":"s","title":"Inspect metadata","description":false,"options":[{"optionId":"approve","name":"Approve","kind":"allow_once","_meta":{"wide":18446744073709551615}}],"subject":#{subject}}})
       cancel = JSON.parse(outgoing.gets.not_nil!)
       cancel["method"]?.try(&.as_s?).should eq("tool_call/cancel")
@@ -5547,7 +5548,11 @@ describe "ACP v2 exact permission subjects" do
       request.description.should be_nil
       request.subject.should be_nil
       request.subject_raw.not_nil!.json.should eq(subject)
-      request.typed_subject.not_nil!.tool_call_raw.not_nil!.json.should eq(tool)
+      subject_details = request.typed_subject.not_nil!
+      subject_details.meta_raw.try(&.json).should eq(subject_meta)
+      subject_details.meta.not_nil!["example.test/values"].as_a[1] = JSON::Any.new("after")
+      subject_details.meta_raw.try(&.json).should eq(subject_meta.sub("before", "after"))
+      subject_details.tool_call_raw.not_nil!.json.should eq(tool)
 
       patch = next_permission_event(updates)
       patch.title_present?.should be_true
@@ -5619,7 +5624,7 @@ describe "ACP v2 exact permission subjects" do
     array_patch.raw_input_raw.not_nil!.json.should eq(array_patch.raw_input.not_nil!.to_json)
   end
 
-  it "decodes future subjects and optional command metadata" do
+  it "preserves exact permission request and command metadata in callbacks" do
     with_wide_stdio do |transport, feed, outgoing|
       client = ACP::V2::Client.new(transport)
       observed = Channel(ACP::Protocol::V2::RequestPermissionParams).new(2)
@@ -5629,19 +5634,58 @@ describe "ACP v2 exact permission subjects" do
       end
       initialize_wide_v2(client, feed, outgoing)
       options = %([{"optionId":"no","name":"No","kind":"reject_once"}])
-      command = %({"type":"command","command":"true","cwd":"/work","toolCallId":false,"_meta":{"wide":18446744073709551615}})
+      meta = %({"example.test/count":18446744073709551615,"example.test/fraction":0.123456789012345678901,"example.test/label":"before"})
+      command = %({"type":"command","command":"true","cwd":"/work","toolCallId":false,"_meta":#{meta}})
       future = %({"type":"_future","payload":18446744073709551615,"precise":0.12345678901234567})
       {command, future}.each_with_index do |subject, index|
-        feed.puts %({"jsonrpc":"2.0","id":#{index},"method":"session/request_permission","params":{"sessionId":"s","title":"Review","options":#{options},"subject":#{subject}}})
+        feed.puts %({"jsonrpc":"2.0","id":#{index},"method":"session/request_permission","params":{"sessionId":"s","title":"Review","options":#{options},"subject":#{subject},"_meta":#{meta}}})
         reply = JSON.parse(outgoing.gets.not_nil!)
         reply["result"]?.try(&.["outcome"].["outcome"].as_s).should eq("cancelled")
         request = next_permission_event(observed)
+        request.meta_raw.try(&.json).should eq(meta)
+        request.meta.not_nil!["example.test/label"] = JSON::Any.new("after")
+        ACP::Protocol::RawJson.from_json(request.to_json).field("_meta").try(&.json).should eq(meta.sub("before", "after"))
         request.subject_raw.not_nil!.json.should eq(subject)
-        if details = request.typed_subject.not_nil!.command
+        if index == 0
+          details = request.typed_subject.not_nil!.command.not_nil!
           details.cwd.should eq("/work")
           details.tool_call_id.should be_nil
+          details.meta_raw.try(&.json).should eq(meta)
+          details.meta.not_nil!["example.test/label"] = JSON::Any.new("after")
+          ACP::Protocol::RawJson.from_json(details.to_json).field("_meta").try(&.json).should eq(meta.sub("before", "after"))
+        else
+          request.typed_subject.not_nil!.type.should eq("_future")
+          request.typed_subject.not_nil!.command.should be_nil
         end
       end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects permission subjects with repeated decision fields" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      requests = Channel(ACP::Protocol::RequestId?).new(4)
+      client.on_request_permission = ->(input : ACP::Protocol::V2::RequestPermissionParams) do
+        requests.send(input.request_id)
+        ACP::Protocol::V2::RequestPermissionResult.cancelled
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      options = %([{"optionId":"no","name":"No","kind":"reject_once"}])
+      [
+        %({"type":"command","type":"command","command":"true","cwd":"/work"}),
+        %({"type":"command","command":"true","cwd":"/work","cwd":"/work"}),
+        %({"type":"tool_call","toolCall":{"toolCallId":"t","toolCallId":"t"}}),
+      ].each_with_index do |subject, id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":{"sessionId":"s","title":"Review","options":#{options},"subject":#{subject}}})
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].should eq(id)
+        reply["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+      end
+      feed.puts %({"jsonrpc":"2.0","id":4,"method":"session/request_permission","params":{"sessionId":"s","title":"Review","options":#{options},"subject":{"type":"command","command":"true","cwd":"/work"}}})
+      JSON.parse(outgoing.gets.not_nil!)["result"]["outcome"]["outcome"].should eq("cancelled")
+      next_permission_event(requests).should eq(4_i64)
     ensure
       client.try(&.close)
     end
@@ -7512,6 +7556,30 @@ describe "ACP v2 exact command advertisements" do
       setup.available_commands_raw.json.should eq(list)
       client.session_available_commands_raw("s").not_nil!.json.should eq(list)
       client.session_available_commands("s").not_nil!.map(&.name).should eq(["notes", "status"])
+
+      reference_meta = %({"example.test/rank":18446744073709551615,"example.test/fraction":0.123456789012345678901})
+      reference_wire = %({"type":"skill","name":"notes","_meta":#{reference_meta}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message","messageId":"m","content":[#{reference_wire}]}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"user_message_chunk","messageId":"m","content":#{reference_wire}}}})
+      message_event = next_exact_session_update(observed)
+      chunk_event = next_exact_session_update(observed)
+      store = ACP::V2::MessageStore.new
+      store.observe(message_event).should be_true
+      message = message_event.update.typed.as(ACP::Protocol::V2::MessageUpdate)
+      chunk = chunk_event.update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+      reference = message.skill_references.first
+      stored = store.message("s", ACP::V2::MessageKind::User, "m").not_nil!.skill_references.first
+      {reference, chunk.skill_reference.not_nil!, stored}.each do |typed|
+        typed.meta_raw.try(&.json).should eq(reference_meta)
+      end
+      selected = [reference] of ACP::Protocol::V2::PromptContentBlock
+      sent = capture_request_params(feed, outgoing, %({"messageId":"accepted"}))
+      client.session_prompt(ACP::Protocol::V2::SessionPromptParams.new("s", selected)).message_id.should eq("accepted")
+      submitted = next_permission_event(sent).field("prompt").not_nil!.elements?.not_nil!
+      submitted.size.should eq(1)
+      submitted.first.field("type").try(&.as_s?).should eq("skill")
+      submitted.first.field("name").try(&.as_s?).should eq("notes")
+      submitted.first.field("_meta").try(&.json).should eq(reference_meta)
 
       duplicate = %("availableCommands":false,"availableCommands":[])
       expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionResumeResult.from_json(%({#{duplicate}})) }

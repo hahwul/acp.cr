@@ -7,12 +7,17 @@ module ACP
     module V2
       # Tool-call fields embedded in a permission request.
       struct PermissionToolCall < ToolCallPatch
+        # Reads a patch with an unambiguous tool-call ID.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "toolCallId"))
+        end
       end
 
       # Command details for a permission request. The Agent runs the command
       # if the user approves it.
       struct PermissionCommand
         include JSON::Serializable
+        include LosslessMetadata
 
         # Complete command to present to the user.
         property command : String
@@ -28,26 +33,45 @@ module ACP
         @[JSON::Field(key: "terminalId", converter: ::ACP::Protocol::OptionalOptionDescription)]
         property terminal_id : String?
 
-        # Extension metadata scoped to the command subject.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates a command subject.
         def initialize(@command : String, @cwd : String, @tool_call_id : String? = nil,
-                       @terminal_id : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+                       @terminal_id : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @command, @cwd, @tool_call_id, @terminal_id, metadata_comparison
       end
 
       # An open permission subject with accessors for the standard variants.
       struct PermissionSubject
         include JSON::Serializable
-        include LosslessUnmapped
+        include LosslessOpenObject
+        include EditableLosslessUnmapped
 
         # Subject discriminator such as tool_call or command.
         getter type : String
 
         # Creates a subject with its variant-specific fields.
         def initialize(@type : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+        end
+
+        # Reads a subject before its routing and approval details are projected.
+        def self.new(pull : JSON::PullParser) : self
+          wire = RawJson.new(pull)
+          subject = JSON::PullParser.new(wire.json)
+          case wire.field("type", unique: true).try(&.as_s?)
+          when "command"
+            subject = WireFrame.read_with_unique_members(subject, "command", "cwd", "toolCallId", "terminalId")
+          when "tool_call"
+            subject = WireFrame.read_with_unique_members(subject, "toolCall")
+          end
+          previous_def(subject)
+        end
+
+        protected def on_unknown_json_attribute(pull, key, key_location)
+          return super if key == "_meta"
+
+          retain_unmapped_json(key, WireFrame.read_raw(pull))
         end
 
         # Decodes a tool-call patch. Raises JSON::ParseException if the required ID is malformed.
@@ -62,10 +86,6 @@ module ACP
           end
         end
 
-        protected def keep_exact_unmapped?(key : String) : Bool
-          true
-        end
-
         # Decodes a command. Raises JSON::ParseException for malformed fields.
         def command : PermissionCommand?
           PermissionCommand.from_json(WireFrame.encode(self)) if @type == "command"
@@ -76,6 +96,7 @@ module ACP
       # retains variant-specific fields for rendering or forwarding.
       struct RequestPermissionParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session requesting the decision.
         @[JSON::Field(key: "sessionId")]
@@ -99,10 +120,6 @@ module ACP
         @[JSON::Field(key: "subject")]
         @subject_wire : PreservedJson?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates permission request parameters.
         def initialize(
           @session_id : String,
@@ -110,10 +127,13 @@ module ACP
           @options : Array(Protocol::PermissionOption),
           @description : String? = nil,
           subject : JSON::Any? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
           @subject_wire = subject.try { |value| PreservedJson.new(value) }
+          self.meta = meta
         end
+
+        def_equals_and_hash @session_id, @title, @options, @request_id, @description, @subject_wire, metadata_comparison
 
         # JSON::Any view of the tagged subject when it is representable.
         def subject : JSON::Any?
