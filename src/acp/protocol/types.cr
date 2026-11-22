@@ -1516,6 +1516,8 @@ module ACP
     # The outcome when the user selected one of the provided options.
     struct SelectedPermissionOutcome
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Must be "selected".
       property outcome : String = "selected"
@@ -1524,27 +1526,27 @@ module ACP
       @[JSON::Field(key: "optionId")]
       property option_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @option_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @outcome = "selected"
+        self.meta = meta
       end
     end
 
     # The outcome when the prompt turn was cancelled.
     struct CancelledPermissionOutcome
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Must be "cancelled".
       property outcome : String = "cancelled"
 
-      def initialize
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
         @outcome = "cancelled"
+        self.meta = meta
       end
     end
 
@@ -1552,17 +1554,37 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
     struct RequestPermissionResult
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
-      # The user's decision on the permission request (required).
-      # Either a SelectedPermissionOutcome or CancelledPermissionOutcome,
-      # serialized as a JSON object.
-      property outcome : JSON::Any
+      @[JSON::Field(key: "outcome", converter: ::ACP::Protocol::ProjectedContent)]
+      @outcome_wire : PreservedJson
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      def initialize(outcome : JSON::Any, meta : Hash(String, JSON::Any)? = nil)
+        @outcome_wire = PreservedJson.new(outcome)
+        self.meta = meta
+      end
 
-      def initialize(@outcome : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+      # The user's decision as JSON::Any, omitting values outside its range.
+      def outcome : JSON::Any
+        @outcome_wire.value.not_nil!
+      end
+
+      # Replaces the decision with an ordinary JSON value.
+      def outcome=(value : JSON::Any) : JSON::Any
+        @outcome_wire = PreservedJson.new(value)
+        value
+      end
+
+      # Exact decision JSON for a selected, cancelled, or extension outcome.
+      def outcome_raw : RawJson
+        @outcome_wire.raw
+      end
+
+      # Replaces the decision while preserving its exact JSON values.
+      def outcome_raw=(value : RawJson) : RawJson
+        @outcome_wire = ProjectedContent.from_json(JSON::PullParser.new(value.json))
+        value
       end
 
       # Creates a "selected" outcome result.
@@ -1582,9 +1604,9 @@ module ACP
 
       # Returns true if the outcome was "cancelled".
       def cancelled? : Bool
-        if h = @outcome.as_h?
+        if h = outcome.as_h?
           h["outcome"]?.try(&.as_s?) == "cancelled"
-        elsif s = @outcome.as_s?
+        elsif s = outcome.as_s?
           s == "cancelled"
         else
           false
@@ -1593,7 +1615,7 @@ module ACP
 
       # Returns the option ID for a selected outcome.
       def selected_option_id : String?
-        if (decision = @outcome.as_h?) && decision["outcome"]?.try(&.as_s?) == "selected"
+        if (decision = outcome.as_h?) && decision["outcome"]?.try(&.as_s?) == "selected"
           decision["optionId"]?.try(&.as_s?)
         end
       end

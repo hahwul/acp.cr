@@ -91,8 +91,9 @@ module ACP
       end
 
       # Reads a member without projecting the rest of the object.
-      def field(name : String) : RawJson?
-        if object? && (value = WireFrame.field(@json, name))
+      # Set unique to reject a repeated member.
+      def field(name : String, *, unique : Bool = false) : RawJson?
+        if object? && (value = WireFrame.field(@json, name, unique: unique))
           RawJson.new(JSON::PullParser.new(value))
         end
       end

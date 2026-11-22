@@ -333,7 +333,7 @@ module ACP
 
         private def handle_v2_permission(input : Wire::RequestPermissionParams, offered_ids : Array(String)) : AgentReply
           result = @on_v2_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
-          validate_permission_reply(JSON.parse(result.to_json), offered_ids, allow_future: true)
+          validate_permission_reply(encode_agent_result(result), offered_ids, allow_future: true)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
           handler_error_reply(ex, "Permission handler error: #{ex.message}")
