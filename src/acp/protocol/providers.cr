@@ -1,6 +1,5 @@
 require "json"
 require "./raw_json"
-require "./optional_metadata"
 
 module ACP
   module Protocol
@@ -26,6 +25,7 @@ module ACP
     # Non-secret routing information for an enabled provider.
     struct ProviderCurrentConfig
       include JSON::Serializable
+      include LosslessMetadata
 
       # API protocol currently used for this provider.
       @[JSON::Field(key: "apiType")]
@@ -35,18 +35,18 @@ module ACP
       @[JSON::Field(key: "baseUrl")]
       getter base_url : String
 
-      # Extension metadata for this routing configuration.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates a routing summary.
-      def initialize(@api_type : LlmProtocol, @base_url : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@api_type : LlmProtocol, @base_url : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash api_type, base_url, metadata_comparison
     end
 
     # Describes one configurable model provider.
     struct ProviderInfo
       include JSON::Serializable
+      include LosslessMetadata
 
       # :nodoc:
       module SupportedProtocols
@@ -85,48 +85,47 @@ module ACP
       # Effective routing. Nil indicates a disabled provider.
       getter current : ProviderCurrentConfig?
 
-      # Extension metadata for this provider.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates an entry for a configurable provider.
       def initialize(
         @provider_id : ProviderId,
         @supported : Array(LlmProtocol),
         @required : Bool,
         @current : ProviderCurrentConfig? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash provider_id, supported, required?, current, metadata_comparison
     end
 
     # Parameters for querying configurable model providers.
     struct ListProvidersParams
       include JSON::Serializable
-
-      # Extension metadata for this query.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a provider list query.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # The Agent's list of configurable providers and current routing.
     struct ListProvidersResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # Configurable providers, including providers that are disabled.
       getter providers : Array(ProviderInfo)
 
-      # Extension metadata for this response.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates a provider list response.
-      def initialize(@providers : Array(ProviderInfo), @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@providers : Array(ProviderInfo), meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash providers, metadata_comparison
 
       # Whether the current list describes this provider as mandatory.
       def required?(provider_id : ProviderId) : Bool
@@ -137,6 +136,7 @@ module ACP
     # Full replacement of a provider's process-scoped routing configuration.
     struct SetProviderParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Opaque ID of the target provider.
       @[JSON::Field(key: "providerId")]
@@ -153,19 +153,18 @@ module ACP
       # Full header map sent to the Agent. It can contain credentials.
       getter headers : Hash(String, String)?
 
-      # Extension metadata for this request.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates a full replacement request.
       def initialize(
         @provider_id : ProviderId,
         @api_type : LlmProtocol,
         @base_url : String,
         @headers : Hash(String, String)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash provider_id, api_type, base_url, headers, metadata_comparison
 
       # Avoids printing request credentials during normal inspection.
       def inspect(io : IO) : Nil
@@ -176,44 +175,44 @@ module ACP
     # A successful configuration replacement.
     struct SetProviderResult
       include JSON::Serializable
-
-      # Extension metadata for this response.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a configuration replacement acknowledgement.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Parameters for disabling a non-mandatory provider.
     struct DisableProviderParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Opaque ID of the target provider.
       @[JSON::Field(key: "providerId")]
       getter provider_id : ProviderId
 
-      # Extension metadata for this request.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates a disable request.
-      def initialize(@provider_id : ProviderId, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@provider_id : ProviderId, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash provider_id, metadata_comparison
     end
 
     # A successful provider disable operation.
     struct DisableProviderResult
       include JSON::Serializable
-
-      # Extension metadata for this response.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a disable acknowledgement.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
   end
 end

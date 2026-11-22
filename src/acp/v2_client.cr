@@ -29,10 +29,6 @@ module ACP
           v2_initialization_result
         end
 
-        def request_typed(method : String, params : JSON::Serializable, type : T.class, *, exact_response : Bool = false) : T forall T
-          send_typed_request(method, params, type, exact_response: exact_response)
-        end
-
         def request_exact(method : String, params : JSON::Serializable, type : T.class) : T forall T
           send_exact_typed_request(method, params, type)
         end
@@ -552,7 +548,7 @@ module ACP
       def providers_list(params : Wire::ListProvidersParams = Wire::ListProvidersParams.new) : Wire::ListProvidersResult
         @connection.with_request do
           ensure_provider_support
-          @connection.request_typed(AgentMethod::PROVIDERS_LIST, params, Wire::ListProvidersResult)
+          @connection.request_exact(AgentMethod::PROVIDERS_LIST, params, Wire::ListProvidersResult)
         end
       end
 
@@ -563,7 +559,7 @@ module ACP
           unless valid_provider_url?(params.base_url)
             raise ArgumentError.new("ACP v2 provider base URLs must be absolute URIs")
           end
-          @connection.request_typed(AgentMethod::PROVIDERS_SET, params, Wire::SetProviderResult)
+          @connection.request_exact(AgentMethod::PROVIDERS_SET, params, Wire::SetProviderResult)
         end
       end
 
@@ -574,7 +570,7 @@ module ACP
           if providers_list.required?(params.provider_id)
             raise InvalidStateError.new("The Agent requires this provider")
           end
-          @connection.request_typed(AgentMethod::PROVIDERS_DISABLE, params, Wire::DisableProviderResult)
+          @connection.request_exact(AgentMethod::PROVIDERS_DISABLE, params, Wire::DisableProviderResult)
         end
       end
 

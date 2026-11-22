@@ -8788,7 +8788,8 @@ describe "ACP draft model providers" do
     result.providers.first.current.not_nil!.api_type.should eq("future")
     result.providers.last.supported.should be_empty
     result.providers.last.current.should be_nil
-    result.providers.last.meta.should be_nil
+    result.providers.last.meta.should eq({} of String => JSON::Any)
+    result.providers.last.meta_raw.not_nil!.json.should eq(%({"bad":18446744073709551615}))
     result.required?("main").should be_true
     result.required?("optional").should be_false
   end

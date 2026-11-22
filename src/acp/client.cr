@@ -737,14 +737,14 @@ module ACP
     def providers_list(params : Protocol::ListProvidersParams = Protocol::ListProvidersParams.new) : Protocol::ListProvidersResult
       method = Protocol::AgentMethod::PROVIDERS_LIST
       ensure_provider_support(method)
-      send_typed_request(method, params, Protocol::ListProvidersResult)
+      send_exact_typed_request(method, params, Protocol::ListProvidersResult)
     end
 
     # Replaces the full routing configuration for one provider.
     def providers_set(params : Protocol::SetProviderParams) : Protocol::SetProviderResult
       method = Protocol::AgentMethod::PROVIDERS_SET
       ensure_provider_support(method)
-      send_typed_request(method, params, Protocol::SetProviderResult)
+      send_exact_typed_request(method, params, Protocol::SetProviderResult)
     end
 
     # Disables a provider after checking that the Agent does not require it.
@@ -754,7 +754,7 @@ module ACP
       if providers_list.required?(params.provider_id)
         raise InvalidStateError.new("The Agent requires this provider")
       end
-      send_typed_request(method, params, Protocol::DisableProviderResult)
+      send_exact_typed_request(method, params, Protocol::DisableProviderResult)
     end
 
     # Disables the specified non-mandatory provider.

@@ -981,6 +981,11 @@ of more than 256 provider request IDs, it redacts all response payloads for
 that connection.
 Applications receive the Agent's JSON-RPC errors, including any data the
 Agent returns.
+Provider requests, replies, list entries, and routing summaries expose
+`meta` for values representable as `JSON::Any` and `meta_raw` for the
+original metadata, including full numeric precision. To send metadata
+outside the range or precision of `JSON::Any`, set `meta_raw` on the
+request and use a transport that supports exact JSON frames.
 [ACP v1 draft schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v1/schema.unstable.json) · [ACP v2 draft schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v2/schema.unstable.json)
 
 ## Agent Skills (v2 draft)
