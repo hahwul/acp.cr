@@ -387,7 +387,7 @@ module ACP
       end
     end
 
-    # Match the client's ID normalization. Hash collisions only redact extra logs.
+    # Redact both integer and string spellings of IDs. Collisions only redact extra logs.
     private def redact_response?(frame : JSON::Any, fields : Hash(String, JSON::Any)) : Bool
       return false unless fields.has_key?("result") || fields.has_key?("error")
 

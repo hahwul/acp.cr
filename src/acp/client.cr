@@ -2032,6 +2032,13 @@ module ACP
     # Handles a response to one of our pending requests.
     # Finds the corresponding channel by ID and sends the response into it.
     private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil, *, initialization_only : Bool = false) : Nil
+      # All Client-issued IDs are integers. Read the response ID without
+      # coercing numbers from a floating-point representation.
+      unless id = msg["id"]?.try(&.as_i64?)
+        ClientLog.warn { "Ignoring response without a usable integer JSON-RPC id" }
+        return
+      end
+
       repeated = wire_frame.try { |frame| Protocol::WireFrame.repeated_members(frame.json, *Protocol::WireFrame::RESPONSE_FIELDS) }
       if repeated.try(&.includes?("id"))
         ClientLog.warn { "Ignoring response with an ambiguous JSON-RPC id" }
@@ -2044,12 +2051,6 @@ module ACP
         envelope.delete("error")
         msg = JSON::Any.new(envelope)
         wire_frame = nil
-      end
-
-      id = Protocol.extract_id(msg)
-      unless id
-        ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
-        return
       end
 
       id_str = id.to_s
@@ -2066,7 +2067,7 @@ module ACP
       channel = @pending_mutex.synchronize do
         initializing = v2_wire? && @initialize_request == id_str
         next if initialization_only && !initializing
-        next if initializing && (!@v2_initialize_armed || !msg["id"]?.try(&.as_i64?))
+        next if initializing && !@v2_initialize_armed
 
         next if (waiting = @pending[id_str]?) && !waiting.armed
 
