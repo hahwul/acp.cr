@@ -6868,3 +6868,95 @@ describe "ACP JSON-RPC response outcomes" do
     end
   end
 end
+
+describe "ACP JSON-RPC response ID types" do
+  {1, 2}.each do |version|
+    it "correlates v#{version} stdio replies by the same numeric ID" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+        client.request_timeout = 2.0
+        if client.is_a?(ACP::V2::Client)
+          initialize_wide_v2(client, feed, outgoing)
+        else
+          answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+          client.initialize_connection
+        end
+
+        spawn do
+          request = JSON.parse(outgoing.gets.not_nil!)
+          id = request["id"].as_i64
+          feed.puts %({"jsonrpc":"2.0","id":"#{id}","error":{"code":-32602,"message":"Wrong ID type"}})
+          feed.puts %({"jsonrpc":"2.0","id":"#{id}","result":"string ID"})
+          feed.puts %({"jsonrpc":"2.0","id":#{id}.5,"result":"fractional ID"})
+          feed.puts %({"jsonrpc":"2.0","id":#{id}.00000000000000001,"result":"rounded ID"})
+          feed.puts %({"jsonrpc":"2.0","id":#{id}e0,"result":"exponent ID"})
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"result":"integer ID"})
+        end
+        client.ext_method("fixture/response").should eq("integer ID")
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "keeps a timed-out close pending for the matching numeric ID" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root","availableCommands":[{"type":"command","name":"status","description":"Status"}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("root") }
+    close = next_answer(transport)
+    close["method"].should eq("session/close")
+
+    client.request_timeout = 2.0
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"#{close["id"]}","result":{}}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]}.0,"result":{}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("root").not_nil!.cwd.should eq("/work")
+    client.session_available_commands("root").should be_nil
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("root").should be_nil
+    client.session_state("root").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a timed-out resume provisional until the matching numeric ID" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    next_answer(transport)
+
+    client.request_timeout = 0.01
+    params = ACP::Protocol::V2::SessionResumeParams.new("saved", "/work")
+    expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+    resume = next_answer(transport)
+    resume["method"].should eq("session/resume")
+    transport.update("saved", %({"sessionUpdate":"state_update","state":"running"}))
+    commands = %([{"type":"command","name":"status","description":"Status"}])
+
+    client.request_timeout = 2.0
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"#{resume["id"]}","result":{"availableCommands":#{commands}}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("saved").should be_nil
+    client.session_available_commands("saved").should be_nil
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"result":{"availableCommands":#{commands}}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("saved").not_nil!.cwd.should eq("/work")
+    client.session_available_commands("saved").not_nil!.map(&.name).should eq(["status"])
+    client.session_state("saved").not_nil!.state.should eq("running")
+  ensure
+    client.try(&.close)
+  end
+end

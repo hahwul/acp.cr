@@ -54,6 +54,11 @@ rescue ex : ACP::TransportTimeoutError
 A protocol-level issue occurred, such as a response without exactly one
 `result` or `error` field. A `null` result is valid at the JSON-RPC layer.
 
+Replies must use the same integer ID as the Client's request. A reply with
+an ID written as a string, decimal, or exponent leaves the request pending
+until a matching reply or the usual timeout.
+[JSON-RPC 2.0 response IDs](https://www.jsonrpc.org/specification#response_object)
+
 ```crystal
 rescue ex : ACP::ProtocolError
   puts "Protocol error: #{ex.message}"
