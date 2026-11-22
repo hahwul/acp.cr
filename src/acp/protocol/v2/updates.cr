@@ -369,6 +369,9 @@ module ACP
         private TERMINAL_WIRE_FIELDS   = {"terminalId", "data", "output", "capabilities"}
         private TOOL_CHUNK_WIRE_FIELDS = {"toolCallId", "content"}
 
+        # :nodoc:
+        PLAN_WIRE_FIELDS = {"plan", "planId", "_meta"}
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String
@@ -390,6 +393,7 @@ module ACP
 
         protected def on_unknown_json_attribute(pull, key, key_location)
           if TERMINAL_WIRE_FIELDS.includes?(key) || ToolCallUpdate::WIRE_FIELDS.includes?(key) ||
+             PLAN_WIRE_FIELDS.includes?(key) ||
              StateFields::MEMBERS.includes?(key) || SubagentUpdate::WIRE_FIELDS.includes?(key) ||
              SessionMessageUpdate::WIRE_FIELDS.includes?(key) || SessionInfoUpdate::WIRE_FIELDS.includes?(key) ||
              UsageUpdate::WIRE_FIELDS.includes?(key) || CompactionUpdate::WIRE_FIELDS.includes?(key)
@@ -409,6 +413,7 @@ module ACP
                             when "terminal_update", "terminal_output_chunk" then TERMINAL_WIRE_FIELDS
                             when "tool_call_update"                         then ToolCallUpdate::WIRE_FIELDS
                             when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
+                            when "plan_update", "plan_removed"              then PLAN_WIRE_FIELDS
                             when "state_update"                             then StateFields::MEMBERS
                             when "subagent_update"                          then SubagentUpdate::WIRE_FIELDS
                             when "session_message"                          then SessionMessageUpdate::WIRE_FIELDS
