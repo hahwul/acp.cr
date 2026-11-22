@@ -18,6 +18,7 @@ require "./capabilities"
 require "./content_block"
 require "./updates"
 require "./usage"
+require "./rfc3339_timestamp"
 
 module ACP
   module Protocol
@@ -782,10 +783,11 @@ module ACP
 
     # ─── SessionInfo ─────────────────────────────────────────────────
     # Metadata about a session, returned by `session/list`.
-    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+    # See: https://agentclientprotocol.com/protocol/v1/session-list
 
     struct SessionInfo
       include JSON::Serializable
+      include LosslessMetadata
 
       # Unique session identifier (required).
       @[JSON::Field(key: "sessionId")]
@@ -805,34 +807,84 @@ module ACP
       @[JSON::Field(key: "updatedAt")]
       property updated_at : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Whether the Agent reports this session as archived. Nil means unreported.
-      @[JSON::Field(converter: ::ACP::Protocol::ArchivedFlag, ignore_serialize: true)]
       property archived : Bool?
 
+      # Creates a session listing entry.
       def initialize(
         @session_id : String,
         @cwd : String,
         @title : String? = nil,
         @updated_at : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @archived : Bool? = nil,
       )
+        self.meta = meta
       end
 
-      protected def on_to_json(json)
-        super
-        # JSON::Serializable's converter branch emits null for false.
-        json.field("archived", @archived) unless @archived.nil?
+      # Reads a v1 session listing entry.
+      def self.new(pull : JSON::PullParser) : self
+        new(pull, v2: false)
+      end
+
+      # :nodoc:
+      def self.decode_list_item(pull : JSON::PullParser, *, v2 : Bool) : self
+        new(pull, v2: v2)
+      end
+
+      private def initialize(pull : JSON::PullParser, *, v2 : Bool)
+        identity = {"sessionId", "cwd"}
+        optional = {"title", "updatedAt", "_meta", "archived"}
+        wire = if v2
+                 RawJson.patch_parser(pull, required: identity + {"additionalDirectories"}, optional: optional)
+               else
+                 RawJson.patch_parser(pull, required: identity, optional: optional + {"additionalDirectories"})
+               end
+        session_id = nil
+        cwd = nil
+        wire.read_object do |key|
+          case key
+          when "sessionId"             then session_id = wire.read_string
+          when "cwd"                   then cwd = OptionalAbsolutePath.from_json(wire)
+          when "additionalDirectories" then @additional_directories = read_directories(wire, v2: v2)
+          when "title"                 then @title = OptionalCapabilityString.from_json(wire)
+          when "updatedAt"
+            @updated_at = v2 ? OptionalRfc3339Timestamp.from_json(wire) : OptionalCapabilityString.from_json(wire)
+          when "_meta"    then @metadata_wire = OptionalPreservedMetadata.from_json(wire)
+          when "archived" then @archived = ArchivedFlag.from_json(wire)
+          else                 wire.skip
+          end
+        end
+        @session_id = session_id || raise JSON::ParseException.new("Missing sessionId", *wire.location)
+        @cwd = cwd || raise JSON::ParseException.new("Session cwd must be absolute", *wire.location)
+      end
+
+      private def read_directories(pull : JSON::PullParser, *, v2 : Bool) : Array(String)?
+        if v2 && !pull.kind.null?
+          directories = Array(String).new(pull)
+          unless directories.all? { |path| Protocol.absolute_path?(path) }
+            raise JSON::ParseException.new("Additional session directories must be absolute", *pull.location)
+          end
+          return directories
+        end
+        unless pull.kind.begin_array?
+          pull.skip
+          return nil
+        end
+
+        directories = [] of String
+        pull.read_array do
+          if path = OptionalAbsolutePath.from_json(pull)
+            directories << path
+          end
+        end
+        directories
       end
     end
 
     # ─── Session/List Method ─────────────────────────────────────────
-    # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
+    # See: https://agentclientprotocol.com/protocol/v1/session-list
 
     # Params for the `session/list` method (Client → Agent).
     struct SessionListParams
@@ -863,24 +915,70 @@ module ACP
     # Result of the `session/list` method (Agent → Client).
     struct SessionListResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Collection of sessions (required).
+      # Collection of usable sessions in the Agent's order.
       property sessions : Array(SessionInfo) = [] of SessionInfo
 
       # Opaque pagination cursor for fetching the next page. Nil if
-      # there are no more results.
+      # there are no more results. The empty string is a valid cursor.
       @[JSON::Field(key: "nextCursor")]
       property next_cursor : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a page of session listings.
       def initialize(
         @sessions : Array(SessionInfo) = [] of SessionInfo,
         @next_cursor : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
+      end
+
+      # Reads a v1 session list response.
+      def self.new(pull : JSON::PullParser) : self
+        new(pull, v2: false)
+      end
+
+      # Reads a v2 session list response with the same public page type.
+      def self.from_v2_json(json : String) : self
+        new(JSON::PullParser.new(json), v2: true)
+      end
+
+      private def initialize(pull : JSON::PullParser, *, v2 : Bool)
+        wire = if v2
+                 RawJson.patch_parser(pull, required: {"nextCursor"}, optional: {"sessions", "_meta"})
+               else
+                 RawJson.patch_parser(pull, required: Tuple.new, optional: {"sessions", "nextCursor", "_meta"})
+               end
+
+        wire.read_object do |key|
+          case key
+          when "sessions" then read_sessions(wire, v2: v2)
+          when "nextCursor"
+            @next_cursor = if v2 && !wire.kind.null?
+                             wire.read_string
+                           else
+                             OptionalCapabilityString.from_json(wire)
+                           end
+          when "_meta" then @metadata_wire = OptionalPreservedMetadata.from_json(wire)
+          else              wire.skip
+          end
+        end
+      end
+
+      private def read_sessions(pull : JSON::PullParser, *, v2 : Bool) : Nil
+        unless pull.kind.begin_array?
+          pull.skip
+          return
+        end
+
+        pull.read_array do
+          begin
+            @sessions << SessionInfo.decode_list_item(pull, v2: v2)
+          rescue JSON::ParseException
+            # The row is consumed before its fields are decoded.
+          end
+        end
       end
 
       # Returns true if there are more pages to fetch.

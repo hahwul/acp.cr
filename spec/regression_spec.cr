@@ -6283,3 +6283,148 @@ describe "ACP v2 session detail patch decoding" do
     end
   end
 end
+
+describe "ACP session list response recovery" do
+  it "keeps valid v1 sessions and workspace roots in order" do
+    page = ACP::Protocol::SessionListResult.from_json(<<-JSON)
+      {"sessions":[
+        {"sessionId":"first","cwd":"/one","title":false,"updatedAt":12,"_meta":[],"archived":false,
+         "additionalDirectories":["/extra",13,"relative","D:/shared"]},
+        {"sessionId":"missing-directory"},
+        {"sessionId":12,"cwd":"/bad"},
+        {"sessionId":"relative","cwd":"relative"},
+        {"sessionId":"ambiguous","sessionId":"other","cwd":"/bad"},
+        42,
+        {"sessionId":"last","cwd":"/last","title":"Last","updatedAt":"2026-11-22"},
+        {"sessionId":"roots","cwd":"/roots","additionalDirectories":{}}
+      ],"nextCursor":true,"_meta":false}
+      JSON
+
+    page.sessions.map(&.session_id).should eq(["first", "last", "roots"])
+    first = page.sessions.first
+    first.additional_directories.should eq(["/extra", "D:/shared"])
+    first.title.should be_nil
+    first.updated_at.should be_nil
+    first.meta.should be_nil
+    first.archived.should eq(false)
+    JSON.parse(first.to_json)["archived"].should eq(false)
+    page.sessions[1].updated_at.should eq("2026-11-22")
+    page.sessions.last.additional_directories.should be_nil
+    page.has_more?.should be_false
+    page.meta.should be_nil
+  end
+
+  it "returns an empty page for an unusable session list while preserving its cursor" do
+    ["null", "{}", "false"].each do |invalid|
+      wire = %({"sessions":#{invalid},"nextCursor":""})
+      [
+        ACP::Protocol::SessionListResult.from_json(wire),
+        ACP::Protocol::V2::SessionListResult.from_v2_json(wire),
+      ].each do |page|
+        page.sessions.should be_empty
+        page.has_more?.should be_true
+        page.next_cursor.should eq("")
+      end
+    end
+  end
+
+  it "preserves exact session and page metadata in v1 stdio responses" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      meta = %({"count":18446744073709551615,"ratio":0.1234567890123456789,"label":"visible"})
+      spawn do
+        initialize_request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{initialize_request["id"]},"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{}}}}})
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessions":[null,{"sessionId":"session","cwd":"/work","_meta":#{meta}}],"_meta":#{meta}}})
+      end
+      client.initialize_connection
+
+      page = client.session_list
+      page.sessions.map(&.session_id).should eq(["session"])
+      page.meta.not_nil!["label"].should eq("visible")
+      page.sessions.first.meta.not_nil!["label"].should eq("visible")
+      page.to_json.scan(%("_meta":#{meta})).size.should eq(2)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "returns usable v2 sessions and sends the opaque empty cursor unchanged over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      initialize_wide_v2(client, feed, outgoing, session_id: "open")
+      calls = Channel(JSON::Any).new(1)
+      timestamp = "2026-11-22T13:20:00.1234567890123+09:00"
+      meta = %({"ratio":0.1234567890123456789,"flag":true})
+      first_page = <<-JSON
+        {"sessions":[
+          {"sessionId":"first","cwd":"/work","title":"Valid","updatedAt":#{timestamp.to_json},
+           "additionalDirectories":["/data"],"_meta":#{meta}},
+          {"sessionId":"bad-roots","cwd":"/work","additionalDirectories":["/data",1]},
+          {"sessionId":"bad-path","cwd":"/work","additionalDirectories":["relative"]},
+          {"sessionId":"duplicate-roots","cwd":"/work","additionalDirectories":["/one"],"additionalDirectories":["/two"]},
+          {"sessionId":"one","sessionId":"two","cwd":"/work"},
+          {"sessionId":"last","cwd":"/work","title":1,"updatedAt":"yesterday","additionalDirectories":null}
+        ],"nextCursor":""}
+        JSON
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        calls.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":#{first_page.lines.join}})
+      end
+
+      page = client.session_list(ACP::Protocol::V2::SessionListParams.new(cwd: "/work"))
+      page.sessions.map(&.session_id).should eq(["first", "last"])
+      page.sessions.first.updated_at.should eq(timestamp)
+      page.sessions.first.additional_directories.should eq(["/data"])
+      page.sessions.last.updated_at.should be_nil
+      page.sessions.last.title.should be_nil
+      page.sessions.last.additional_directories.should be_nil
+      page.meta_raw.should be_nil
+      page.sessions.first.meta_raw.not_nil!.json.should eq(meta)
+      page.has_more?.should be_true
+      page.next_cursor.should eq("")
+
+      next_permission_event(calls)["params"].as_h.should eq(JSON.parse(%({"cwd":"/work"})).as_h)
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        calls.send(request)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessions":[],"nextCursor":null}})
+      end
+      last = client.session_list(ACP::Protocol::V2::SessionListParams.new(cwd: "/work", cursor: page.next_cursor))
+      next_permission_event(calls)["params"].as_h.should eq(JSON.parse(%({"cwd":"/work","cursor":""})).as_h)
+      last.has_more?.should be_false
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects an invalid v2 pagination cursor without closing the connection" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      initialize_wide_v2(client, feed, outgoing, session_id: "open")
+      [
+        %({"sessions":[],"nextCursor":false}),
+        %({"nextCursor":"one","nextCursor":"two"}),
+      ].each do |invalid|
+        spawn do
+          request = JSON.parse(outgoing.gets.not_nil!)
+          feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":#{invalid}})
+        end
+        expect_raises(ACP::ProtocolError, /malformed result for 'session\/list'/) { client.session_list }
+      end
+
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessions":[]}})
+      end
+      client.session_list.has_more?.should be_false
+    ensure
+      client.try(&.close)
+    end
+  end
+end

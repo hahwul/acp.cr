@@ -731,7 +731,7 @@ module ACP
       ensure_archive_support("session/list") if archived
 
       params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived)
-      send_typed_request(Protocol::AgentMethod::SESSION_LIST, params, Protocol::SessionListResult)
+      send_typed_request(Protocol::AgentMethod::SESSION_LIST, params, Protocol::SessionListResult, exact_response: true)
     end
 
     # Previews options before creating or restoring a session.
