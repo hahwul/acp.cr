@@ -201,6 +201,40 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Tool-call state
+
+Create a `ToolCallStore` per connection and feed it v2 session updates in
+receive order. The client sends permission tool-call patches through the
+same `on_update` callback before it calls `on_request_permission`.
+
+```crystal
+tool_calls = ACP::V2::ToolCallStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  tool_calls.observe(update)
+  nil
+end
+
+call = tool_calls.tool_call(session_id, tool_call_id)
+```
+
+Snapshots contain the current fields, exact JSON for raw input and output,
+and detached content in receive order. A content patch replaces the list.
+Chunks append to it. Content-item metadata stays on the item. Read
+chunk-scoped metadata from `ToolCallContentChunk#meta_raw` in the callback.
+Use the snapshot for display and `client.tool_call_cancel` for live
+cancellation checks. When presenting a permission prompt, use the
+`RequestPermissionParams` delivered to that permission callback.
+
+By default, the store retains up to 128 calls across sessions and up to
+1 MiB of serialized state per call. Set `call_limit:` or `call_byte_limit:`
+to change the corresponding limit, or pass `nil` to remove it. `observe`
+returns `false` when an update would exceed either limit or a tool-call patch
+repeats a recognized field. The stored state remains intact in either case.
+
+Use `forget_session` to discard one session's tool-call history. For full
+replay of a session tree, clear all affected sessions first or use a fresh
+store. [ACP v2 tool-call updates](https://agentclientprotocol.com/protocol/v2/tool-calls#streaming-content)
+
 ### Display-only terminal state
 
 Create a `TerminalStore` per connection and feed it v2 session updates in

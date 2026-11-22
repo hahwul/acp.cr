@@ -382,6 +382,9 @@ module ACP
 
       # Creates or patches one tool call in the session timeline.
       struct ToolCallUpdate < ToolCallPatch
+        # :nodoc:
+        WIRE_FIELDS = {"toolCallId", "name", "title", "kind", "status", "content", "locations", "capabilities", "rawInput", "rawOutput", "_meta"}
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "tool_call_update"

@@ -10182,3 +10182,124 @@ describe ACP::V2::TerminalStore do
     observe.call("other", %({"sessionUpdate":"terminal_update","terminalId":"t"})).should be_true
   end
 end
+
+describe ACP::V2::ToolCallStore do
+  it "applies permission tool patches between streamed items and before the permission handler" do
+    transport = V2TestTransport.new
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::ToolCallStore.new
+    observed = Channel(Bool).new(4)
+    permission_snapshot = Channel(ACP::V2::ToolCallSnapshot?).new(1)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(note))
+      nil
+    end
+    client.on_request_permission = ->(permission : ACP::Protocol::V2::RequestPermissionParams) do
+      permission_snapshot.send(store.tool_call(permission.session_id, "t"))
+      ACP::Protocol::V2::RequestPermissionResult.cancelled
+    end
+    client.initialize_connection
+    take_v2_frame(transport.outgoing)
+
+    transport.update("s", %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"content","content":{"type":"text","text":"old"}},"_meta":{"chunk":true}}))
+    take_v2_frame(observed).should be_true
+    first = store.tool_call("s", "t").not_nil!
+    first.kind.should eq("other")
+    first.status.should eq("pending")
+    first.title.should be_nil
+    first.locations.should be_empty
+    first.meta_raw.should be_nil
+    first.content.first.meta_raw.should be_nil
+    first.content.first.content_block.as(ACP::Protocol::TextContentBlock).text.should eq("old")
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"p","method":"session/request_permission","params":{"sessionId":"s","title":"Review tool","subject":{"type":"tool_call","toolCall":{"toolCallId":"t","title":"Review","status":"in_progress","content":[{"type":"content","content":{"type":"text","text":"new"}}]}},"options":[{"optionId":"deny","name":"Deny","kind":"reject_once"}]}}))
+    take_v2_frame(observed).should be_true
+    during_permission = take_v2_frame(permission_snapshot).not_nil!
+    during_permission.title.should eq("Review")
+    during_permission.status.should eq("in_progress")
+    during_permission.content.map(&.content_block.as(ACP::Protocol::TextContentBlock).text).should eq(["new"])
+    take_v2_frame(transport.outgoing)["result"]["outcome"]["outcome"].should eq("cancelled")
+
+    transport.update("s", %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"content","content":{"type":"text","text":"er"}}}))
+    take_v2_frame(observed).should be_true
+    store.tool_call("s", "t").not_nil!.content.map(&.content_block.as(ACP::Protocol::TextContentBlock).text).should eq(["new", "er"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "preserves exact open data, patches fields, and isolates detached snapshots by session" do
+    store = ACP::V2::ToolCallStore.new
+    observe = ->(session : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{fields}})))
+    end
+    wide = "18446744073709551615"
+    fraction = "0.123456789012345678901"
+    observe.call("other", %({"sessionUpdate":"tool_call_update","toolCallId":"t","title":"Other"})).should be_true
+    observe.call("main", %({"sessionUpdate":"tool_call_update","toolCallId":"t","name":"fixture","title":"Main","kind":"_fixture","status":"completed","locations":[{"path":"/work/file","line":3}],"rawInput":{"wide":#{wide}},"rawOutput":#{fraction},"capabilities":{"cancel":{}},"content":[{"type":"_fixture","wide":#{wide},"_meta":{"exact":#{fraction}}}],"_meta":{"wide":#{wide},"drop":1}})).should be_true
+    store.tool_call("main", "t").not_nil!.raw_input.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    observe.call("main", %({"sessionUpdate":"tool_call_update","toolCallId":"t","name":null,"locations":{},"rawInput":null,"_meta":{"drop":null,"new":#{fraction}}})).should be_true
+    snapshot = store.tool_call("main", "t").not_nil!
+    snapshot.session_id.should eq("main")
+    snapshot.tool_call_id.should eq("t")
+    snapshot.name.should be_nil
+    snapshot.title.should eq("Main")
+    snapshot.kind.should eq("_fixture")
+    snapshot.status.should eq("completed")
+    snapshot.locations.first.line.should eq(3)
+    snapshot.raw_input.should be_nil
+    snapshot.raw_output.not_nil!.json.should eq(fraction)
+    snapshot.capabilities.not_nil!.cancel.should_not be_nil
+    snapshot.content.first.raw.field("wide").not_nil!.json.should eq(wide)
+    snapshot.content.first.meta_raw.not_nil!.field("exact").not_nil!.json.should eq(fraction)
+    snapshot.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.meta_raw.not_nil!.field("new").not_nil!.json.should eq(fraction)
+    snapshot.meta_raw.not_nil!.field("drop").should be_nil
+    snapshot.content.clear
+    snapshot.locations.clear
+    store.tool_call("main", "t").not_nil!.content.size.should eq(1)
+    store.tool_call("main", "t").not_nil!.locations.size.should eq(1)
+    observe.call("main", %({"sessionUpdate":"tool_call_update","toolCallId":"t","title":"Multiple","title":"Values"})).should be_false
+    store.tool_call("main", "t").not_nil!.title.should eq("Main")
+
+    observe.call("main", %({"sessionUpdate":"tool_call_update","toolCallId":"t","kind":null,"status":null,"content":null,"locations":[],"rawOutput":null,"capabilities":null,"_meta":null})).should be_true
+    cleared = store.tool_call("main", "t").not_nil!
+    cleared.kind.should eq("other")
+    cleared.status.should eq("pending")
+    cleared.content.should be_empty
+    cleared.locations.should be_empty
+    cleared.raw_output.should be_nil
+    cleared.capabilities.should be_nil
+    cleared.meta_raw.should be_nil
+    store.tool_call("other", "t").not_nil!.title.should eq("Other")
+    store.forget_session("main").should be_true
+    store.forget_session("main").should be_false
+    store.tool_call("main", "t").should be_nil
+    store.tool_call("other", "t").not_nil!.title.should eq("Other")
+  end
+
+  it "limits accumulated state and applies rejected updates atomically" do
+    store = ACP::V2::ToolCallStore.new(call_limit: 1, call_byte_limit: 140)
+    params = ->(session : String, fields : String) do
+      ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{fields}}))
+    end
+    chunk = %({"sessionUpdate":"tool_call_content_chunk","toolCallId":"t","content":{"type":"_fixture","data":#{("x" * 32).to_json}}})
+    large_patch = %({"sessionUpdate":"tool_call_update","toolCallId":"t","title":"Discarded","content":[],"rawInput":#{("m" * 200).to_json}})
+    store.observe(params.call("main", chunk)).should be_true
+    store.observe(params.call("main", chunk)).should be_false
+    store.observe(params.call("other", chunk)).should be_false
+    store.observe(params.call("main", large_patch)).should be_false
+    store.tool_call("main", "t").not_nil!.content.size.should eq(1)
+    store.tool_call("main", "t").not_nil!.title.should be_nil
+    store.tool_call("other", "t").should be_nil
+    store.observe(params.call("main", %({"sessionUpdate":"tool_call_update","toolCallId":"t","content":[]}))).should be_true
+    store.tool_call("main", "t").not_nil!.content.should be_empty
+    store.observe(params.call("main", chunk)).should be_true
+    store.forget_session("main").should be_true
+    store.observe(params.call("m" * 150, chunk)).should be_false
+    store.observe(params.call("other", chunk)).should be_true
+
+    unlimited = ACP::V2::ToolCallStore.new(call_limit: nil, call_byte_limit: nil)
+    unlimited.observe(params.call("main", large_patch)).should be_true
+    unlimited.tool_call("main", "t").not_nil!.title.should eq("Discarded")
+  end
+end
