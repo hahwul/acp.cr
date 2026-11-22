@@ -8963,3 +8963,141 @@ describe "ACP v1 resource request parameters" do
     end
   end
 end
+
+describe "ACP v1 resource reply metadata" do
+  it "preserves exact metadata from typed file and terminal replies over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(
+        fs: ACP::Protocol::FsCapabilities.new(read_text_file: true, write_text_file: true), terminal: true)
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts build_init_response(init["id"].as_i64).delete('\n')
+      end
+      client.initialize_connection
+      metadata = %({"example.test/wide":18446744073709551615,"example.test/decimal":0.123456789012345678901})
+      exit_status = %({"exitCode":4294967295,"_meta":#{metadata}})
+      client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) do
+        result = ACP::Protocol::ReadTextFileResult.new("fixture")
+        result.meta_raw = params.meta_raw
+        result
+      end
+      client.on_write_text_file = ->(_params : ACP::Protocol::WriteTextFileParams) do
+        ACP::Protocol::WriteTextFileResult.from_json(%({"_meta":#{metadata}}))
+      end
+      client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+        ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t","_meta":#{metadata}}))
+      end
+      client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+        ACP::Protocol::TerminalOutputResult.from_json(%({"output":"fixture","truncated":false,"exitStatus":#{exit_status},"_meta":#{metadata}}))
+      end
+      client.on_release_terminal = ->(_params : ACP::Protocol::ReleaseTerminalParams) do
+        ACP::Protocol::ReleaseTerminalResult.from_json(%({"_meta":#{metadata}}))
+      end
+      client.on_wait_for_terminal_exit = ->(_params : ACP::Protocol::WaitForTerminalExitParams) do
+        ACP::Protocol::WaitForTerminalExitResult.from_json(exit_status)
+      end
+      client.on_kill_terminal = ->(_params : ACP::Protocol::KillTerminalParams) do
+        ACP::Protocol::KillTerminalResult.from_json(%({"_meta":#{metadata}}))
+      end
+
+      {
+        {"fs/read_text_file", %("path":"/fixture","_meta":#{metadata})},
+        {"fs/write_text_file", %("path":"/fixture","content":"fixture")},
+        {"terminal/create", %("command":"fixture")},
+        {"terminal/output", %("terminalId":"t")},
+        {"terminal/release", %("terminalId":"t")},
+        {"terminal/wait_for_exit", %("terminalId":"t")},
+        {"terminal/kill", %("terminalId":"t")},
+      }.each_with_index do |(method, params), id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":{"sessionId":"s",#{params}}})
+        reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        reply.field("id").try(&.as_i64?).should eq(id)
+        result = reply.field("result")
+        result.try(&.field("_meta")).try(&.json).should eq(metadata)
+        if method == "terminal/output"
+          status = result.try(&.field("exitStatus"))
+          status.try(&.field("exitCode")).try(&.as_i64?).should eq(UInt32::MAX)
+          status.try(&.field("_meta")).try(&.json).should eq(metadata)
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "reports an exact reply the transport cannot preserve and handles the next request" do
+    transport = SignalingTransport.new
+    client = initialized_read_client(transport)
+    request = ->(id : Int32) { %({"jsonrpc":"2.0","id":#{id},"method":"fs/read_text_file","params":{"sessionId":"s","path":"/fixture"}}) }
+    client.on_read_text_file = ->(_params : ACP::Protocol::ReadTextFileParams) do
+      ACP::Protocol::ReadTextFileResult.from_json(%({"content":"fixture","_meta":{"example.test/decimal":0.123456789012345678901}}))
+    end
+    transport.inject_raw(request.call(1))
+    reply = next_answer(transport)
+    reply["id"].as_i.should eq(1)
+    reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    reply["error"]["message"].as_s.should contain("fs/read_text_file")
+
+    client.on_read_text_file = ->(_params : ACP::Protocol::ReadTextFileParams) do
+      ACP::Protocol::ReadTextFileResult.new("fixture", {"example.test/flag" => JSON::Any.new(true)})
+    end
+    transport.inject_raw(request.call(2))
+    next_answer(transport)["result"].should eq(JSON.parse(%({"content":"fixture","_meta":{"example.test/flag":true}})))
+  ensure
+    client.try(&.close)
+  end
+
+  it "honors the wire nesting limit for representable metadata in stdio replies" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
+      {120, 509, 510}.each_with_index do |depth, id|
+        nested = "[" * depth + "1" + "]" * depth
+        metadata = %({"example.test/nested":#{nested}})
+        client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+          ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t","_meta":#{metadata}}))
+        end
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"terminal/create","params":{"sessionId":"s","command":"fixture"}})
+        reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        reply.field("id").try(&.as_i64?).should eq(id)
+        if depth == 510
+          reply.field("error").try(&.field("code")).try(&.as_i64?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        else
+          reply.field("result").try(&.field("_meta")).try(&.json).should eq(metadata)
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "answers an exact reply refused by the relay line limit" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = ACP::StdioTransport.new(reader, writer, max_line_bytes: 512, exact_frames: true)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
+    spawn do
+      init = JSON.parse(outgoing.gets.not_nil!)
+      feed.puts %({"jsonrpc":"2.0","id":#{init["id"].as_i64},"result":{"protocolVersion":1}})
+    end
+    client.initialize_connection
+    metadata = %({"example.test/wide":18446744073709551615,"example.test/text":#{("a" * 600).to_json}})
+    client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+      ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t","_meta":#{metadata}}))
+    end
+    request = %({"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"fixture"}})
+    feed.puts request
+    reply = JSON.parse(outgoing.gets.not_nil!)
+    reply["id"].as_i.should eq(1)
+    reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+
+    client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) { ACP::Protocol::CreateTerminalResult.new("t") }
+    feed.puts request
+    JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].as_s.should eq("t")
+  ensure
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+end

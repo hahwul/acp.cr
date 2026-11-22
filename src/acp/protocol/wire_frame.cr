@@ -83,7 +83,12 @@ module ACP
       # Serializes an already parsed payload at the wire parser's nesting limit.
       # :nodoc:
       def self.encode(value) : String
-        JSON.build do |json|
+        String.build { |io| encode(value, io) }
+      end
+
+      # :nodoc:
+      def self.encode(value, io : IO) : Nil
+        JSON.build(io) do |json|
           json.max_nesting = 512
           value.to_json(json)
         end

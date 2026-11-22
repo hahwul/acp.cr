@@ -199,7 +199,7 @@ module ACP
 
       wire = frame.json.includes?('\n') ? Protocol::WireFrame.read_raw(pull) : frame.json
       if @exact_frames && wire.bytesize > @max_line_bytes
-        raise TransportError.new("Outgoing ACP frame exceeds the relay line limit")
+        raise FrameTooLargeError.new("Outgoing ACP frame exceeds the relay line limit")
       end
       Log.debug { ">>> [REDACTED exact frame]" }
       write_line(wire + '\n', &preflight)
@@ -211,7 +211,7 @@ module ACP
       # Build the complete frame — payload *and* delimiter — before touching
       # the IO, so a single write carries a whole line.
       frame = String.build do |io|
-        message.to_json(io)
+        Protocol::WireFrame.encode(message, io)
         io << '\n'
       end
       Log.debug { ">>> #{redact_frame(message)}" }

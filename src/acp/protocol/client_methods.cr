@@ -74,15 +74,13 @@ module ACP
     # Response for `fs/read_text_file`.
     struct ReadTextFileResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The file contents (required).
       property content : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@content : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@content : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
@@ -124,12 +122,10 @@ module ACP
     # An empty result on success.
     struct WriteTextFileResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
@@ -261,16 +257,14 @@ module ACP
     # Response for `terminal/create`.
     struct CreateTerminalResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The unique identifier for the created terminal (required).
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@terminal_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@terminal_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
@@ -305,6 +299,7 @@ module ACP
     # Response for `terminal/output`.
     struct TerminalOutputResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The terminal output captured so far (required).
       property output : String
@@ -316,16 +311,13 @@ module ACP
       @[JSON::Field(key: "exitStatus")]
       property exit_status : TerminalExitStatus?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @output : String,
         @truncated : Bool = false,
         @exit_status : TerminalExitStatus? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the command has exited.
@@ -366,12 +358,10 @@ module ACP
     # Response for `terminal/release`.
     struct ReleaseTerminalResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
@@ -405,6 +395,7 @@ module ACP
     # Response for `terminal/wait_for_exit`.
     struct WaitForTerminalExitResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The process exit code (may be nil if terminated by signal). Schema `uint32`.
       @[JSON::Field(key: "exitCode")]
@@ -413,15 +404,12 @@ module ACP
       # The signal that terminated the process (may be nil if exited normally).
       property signal : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @exit_code : UInt32? = nil,
         @signal : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the command exited successfully (exit code 0).
@@ -467,12 +455,10 @@ module ACP
     # Response for `terminal/kill`.
     struct KillTerminalResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

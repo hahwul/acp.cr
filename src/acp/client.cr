@@ -2465,7 +2465,7 @@ module ACP
                      respond_to_agent(reply_id, reply)
                      reply
                    in Protocol::RawJson
-                     write_exact_agent_result(reply_id, reply) do
+                     write_exact_agent_result(reply_id, method_name, reply) do
                        raise ConnectionClosedError.new if closed? || @v2_contract_unknown.get
                      end
                    end
@@ -2671,17 +2671,19 @@ module ACP
           Protocol::FormElicitation.validate_submission(schema, content, v2: v2)
         end
       end
-      encode_elicitation_reply(result)
+      encode_agent_result(result, exact: !result.content_raw.nil?)
     rescue ex
       ClientLog.error { "Error handling elicitation: #{ex.class}" }
       handler_error_reply(ex, "Invalid elicitation result: #{ex.message}")
     end
 
-    private def encode_elicitation_reply(result : Protocol::CreateElicitationResult) : JSON::Any | Protocol::RawJson
+    private def encode_agent_result(result : JSON::Serializable, *, exact : Bool = false) : JSON::Any | Protocol::RawJson
       wire = Protocol::WireFrame.encode(result)
-      unless result.content_raw
+      unless exact
         projection = begin
-          JSON.parse(wire)
+          parser = JSON::Parser.new(wire)
+          parser.max_nesting -= 1 # Reserve the outer JSON-RPC object.
+          parser.parse
         rescue JSON::ParseException
           nil
         end
@@ -2743,7 +2745,7 @@ module ACP
                @transport.send_checked(Protocol.build_response_raw(id, reply), &preflight)
                reply
              in Protocol::RawJson
-               write_exact_agent_result(id, reply, &preflight)
+               write_exact_agent_result(id, entry.method, reply, &preflight)
              end
     rescue ElicitationReplyClaimed
       # Another fiber owns the cancellation reply.
@@ -2756,7 +2758,8 @@ module ACP
       end
     end
 
-    private def write_exact_agent_result(id : Protocol::RequestId?, result : Protocol::RawJson, &preflight : -> Nil) : Protocol::RawJson | Protocol::JsonRpcErrorObject
+    private def write_exact_agent_result(id : Protocol::RequestId?, method : String, result : Protocol::RawJson,
+                                         &preflight : -> Nil) : Protocol::RawJson | Protocol::JsonRpcErrorObject
       started = false
       wire = JSON.build do |json|
         json.object do
@@ -2770,10 +2773,15 @@ module ACP
         started = true
       end
       result
-    rescue ex : ProtocolError | JSON::Error
+    rescue ex : ProtocolError | JSON::Error | FrameTooLargeError
       raise ex if started
 
-      error = Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Cannot send exact elicitation content")
+      message = if method == Protocol::ClientMethod::ELICITATION_CREATE
+                  "Cannot send exact elicitation content"
+                else
+                  "Cannot send exact result for #{method}"
+                end
+      error = Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, message)
       @transport.send_checked(Protocol.build_error_response(id, error.code, error.message), &preflight)
       error
     end
@@ -2887,9 +2895,7 @@ module ACP
       # Separate from the parse above: a JSON error raised by the handler's
       # own code is a handler failure, not invalid params.
       begin
-        # Convert JSON::Serializable result to JSON::Any via round-trip;
-        # Crystal has no direct JSON::Serializable → JSON::Any conversion.
-        JSON.parse(h.call(typed_params).to_json)
+        encode_agent_result(h.call(typed_params))
       rescue ex
         ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
         handler_error_reply(ex, ex.message || "Handler error")

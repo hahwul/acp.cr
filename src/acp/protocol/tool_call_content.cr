@@ -230,6 +230,7 @@ module ACP
 
     struct TerminalExitStatus
       include JSON::Serializable
+      include LosslessMetadata
 
       # The process exit code (may be nil if terminated by signal). Schema `uint32`.
       @[JSON::Field(key: "exitCode")]
@@ -238,15 +239,12 @@ module ACP
       # The signal that terminated the process (may be nil if exited normally).
       property signal : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @exit_code : UInt32? = nil,
         @signal : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the command exited successfully (exit code 0).
