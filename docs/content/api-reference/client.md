@@ -777,6 +777,8 @@ client.session_set_mode(
 Switches the session to an advertised mode. Read the available modes and
 the current selection with `client.session_modes(session_id)`. Omit the
 session ID to read or change the active session.
+Pass `ACP::Protocol::SessionSetModeParams` to include exact extension
+metadata with `meta_raw` and receive the Agent's acknowledgement.
 [ACP v1 Session Modes](https://agentclientprotocol.com/protocol/v1/session-modes)
 
 ### `#session_set_config_option`
@@ -793,6 +795,8 @@ Changes an option in the given or active session. Read the latest list with
 `client.session_config_options(session_id)`. Pass an advertised value ID for
 a `select` option. To pass a `Bool` for a `boolean` option, advertise
 `session.configOptions.boolean` when initializing the client.
+Pass typed configuration parameters and set `meta_raw` to include exact
+extension metadata. V2 exposes `value_raw` to read or replace a custom value.
 
 Setup responses and configuration updates replace the session's option list
 as the client receives them. A successful configuration change also returns

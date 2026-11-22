@@ -587,6 +587,41 @@ module ACP
     end
 
     # :nodoc:
+    # Retains exact container values behind editable LosslessUnmapped fields.
+    module EditableLosslessUnmapped
+      @[JSON::Field(ignore: true)]
+      @projected_fields : Hash(String, PreservedJson)?
+
+      protected def on_unknown_json_attribute(pull, key, key_location)
+        wire = RawJson.new(pull)
+        if wire.object? || wire.array?
+          preserved = project_unmapped_field(key, wire)
+          if (view = preserved.value) && WireFrame.encode(view) != wire.json
+            fields = @projected_fields ||= {} of String => PreservedJson
+            fields[key] = preserved
+            retain_unmapped_json(key, wire.json, projection: view)
+            return
+          end
+        end
+        @projected_fields.try(&.delete(key))
+        retain_unmapped_json(key, wire.json)
+      end
+
+      protected def project_unmapped_field(_key : String, wire : RawJson) : PreservedJson
+        PreservedMetadata.wrap(wire)
+      end
+
+      protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+        if (preserved = @projected_fields.try(&.[key]?)) && (view = preserved.value)
+          if view.as_h?.try(&.same?(value.as_h?)) || view.as_a?.try(&.same?(value.as_a?))
+            return preserved.raw.json
+          end
+        end
+        super
+      end
+    end
+
+    # :nodoc:
     module LosslessMetadata
       @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalPreservedMetadata)]
       @metadata_wire : PreservedJson?
