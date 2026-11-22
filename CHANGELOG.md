@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve exact metadata values when editing or reordering array elements through typed views.
 - Preserve exact extension metadata in typed ACP v1 and v2 elicitation requests and replies.
 - Reject scopeless ACP v1 elicitation requests and malformed URL elicitations before invoking callbacks.
 - Validate ACP v1 form submissions from typed and raw callbacks against the original schema.

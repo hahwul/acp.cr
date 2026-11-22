@@ -118,9 +118,10 @@ handler. ACP v1 accepts an explicit `null` request ID for request scope.
 Typed form and URL requests expose exact extension metadata through
 `meta_raw`. Use `CreateElicitationResult#meta_raw=` to return exact metadata
 or copy it from a request. The `meta` accessor provides editable JSON
-object fields. Edits along object paths preserve untouched wire values.
-Arrays are serialized as a whole when edited through `meta`. Use
-`meta_raw=` when exact values inside a changed array matter.
+object fields. Edits to objects and arrays preserve untouched wire values,
+including nested entries moved within an array. Scalar matches prefer their
+original positions. Use `meta_raw=` to distinguish numbers that project to
+the same value or to replace an array that contains unrepresentable scalars.
 Stdio supports exact replies. A custom transport that cannot preserve an
 exact reply returns JSON-RPC `-32603` to the Agent.
 [ACP Extension Metadata](https://agentclientprotocol.com/protocol/v2/extensibility)
