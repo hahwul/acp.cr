@@ -790,6 +790,14 @@ initialization. The client handles `fs/read_text_file` and
 `clientCapabilities.terminal` enables the terminal methods as a group.
 Requests outside the advertisement return `-32601` before reaching either
 the typed handler or `on_agent_request`.
+
+File paths and any supplied terminal working directory must be absolute
+in POSIX or Windows syntax.
+File reads use one-based line numbers. Terminal environment entries
+require string `name` and `value` fields.
+Malformed parameters return `-32602` before either callback. Typed request
+parameters provide exact extension metadata through `meta_raw`, and
+`CreateTerminalParams#env_raw` retains the complete environment array.
 [ACP v1 File System](https://agentclientprotocol.com/protocol/v1/file-system#checking-support)
 [ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#checking-support)
 

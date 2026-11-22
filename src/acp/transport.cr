@@ -575,7 +575,8 @@ module ACP
       envelope = value.as_h?
       method = envelope.try(&.["method"]?).try(&.as_s?)
       session_update = method == Protocol::AgentMethod::SESSION_UPDATE && envelope.try(&.["id"]?).try(&.raw).nil?
-      exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE,
+      resource = method && (Protocol::ClientMethod.fs_method?(method) || Protocol::ClientMethod.terminal_method?(method))
+      exact_params = resource || session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE,
         Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, Protocol::ProtocolMethod::CANCEL_REQUEST,
         Protocol::ClientMethod::ELICITATION_CREATE, Protocol::ClientMethod::ELICITATION_COMPLETE)
       result = envelope.try(&.["result"]?).try(&.as_h?)

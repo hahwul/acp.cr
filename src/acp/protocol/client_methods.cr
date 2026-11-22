@@ -45,6 +45,7 @@ module ACP
     # Request parameters for `fs/read_text_file`.
     struct ReadTextFileParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -59,17 +60,14 @@ module ACP
       # Optional maximum number of lines to read. Schema `uint32`.
       property limit : UInt32?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @path : String,
         @line : UInt32? = nil,
         @limit : UInt32? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -100,6 +98,7 @@ module ACP
     # Request parameters for `fs/write_text_file`.
     struct WriteTextFileParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -111,16 +110,13 @@ module ACP
       # The text content to write to the file (required).
       property content : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @path : String,
         @content : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -152,9 +148,62 @@ module ACP
     #
     # See: https://agentclientprotocol.com/protocol/terminals#executing-commands
 
+    # :nodoc:
+    module TerminalEnvironment
+      def self.from_json(pull : JSON::PullParser) : PreservedJson?
+        location = pull.location
+        source = RawJson.new(pull)
+        return if source.null?
+
+        entries = source.elements?
+        unless entries
+          raise JSON::ParseException.new("Terminal environment must be an array", *location)
+        end
+        entries.each do |entry|
+          fields = entry.members?
+          name = fields.try(&.["name"]?).try(&.as_s?)
+          value = fields.try(&.["value"]?).try(&.as_s?)
+          unless name && value &&
+                 WireFrame.repeated_members(entry.json, "name", "value").empty?
+            raise JSON::ParseException.new("Each terminal environment entry requires a unique string name and value", *location)
+          end
+          if name.empty? || name.includes?('=') || name.includes?('\0') || value.includes?('\0')
+            raise JSON::ParseException.new("Invalid terminal environment name or value", *location)
+          end
+        end
+
+        if (projection = source.to_json_any?) && WireFrame.encode(projection) == source.json
+          PreservedJson.new(projection)
+        else
+          PreservedJson.new(source, project_array_objects: true, project_nested_objects: true)
+        end
+      end
+
+      def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+        value.to_json(builder)
+      end
+    end
+
+    # :nodoc:
+    module TerminalOutputByteLimit
+      def self.from_json(pull : JSON::PullParser) : UInt64?
+        return pull.read_null if pull.kind.null?
+        if pull.kind.int? && pull.raw_value == "-0"
+          pull.read_raw
+          return 0_u64
+        end
+        UInt64.new(pull)
+      end
+
+      def self.to_json(value : UInt64, builder : JSON::Builder) : Nil
+        builder.number(value)
+      end
+    end
+
     # Request parameters for `terminal/create`.
     struct CreateTerminalParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -166,9 +215,8 @@ module ACP
       # Array of command arguments.
       property args : Array(String)?
 
-      # Environment variables for the command.
-      # Each variable has `name` and `value` fields.
-      property env : Array(JSON::Any)?
+      @[JSON::Field(key: "env", converter: ::ACP::Protocol::TerminalEnvironment)]
+      @environment_wire : PreservedJson?
 
       # Working directory for the command (absolute path).
       property cwd : String?
@@ -177,22 +225,36 @@ module ACP
       # earlier output is truncated to stay within this limit.
       # The Client MUST ensure truncation happens at a character boundary.
       # Schema `uint64`.
-      @[JSON::Field(key: "outputByteLimit")]
+      @[JSON::Field(key: "outputByteLimit", converter: ::ACP::Protocol::TerminalOutputByteLimit)]
       property output_byte_limit : UInt64?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @session_id : String,
         @command : String,
         @args : Array(String)? = nil,
-        @env : Array(JSON::Any)? = nil,
+        env : Array(JSON::Any)? = nil,
         @cwd : String? = nil,
         @output_byte_limit : UInt64? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.env = env
+        self.meta = meta
+      end
+
+      # Environment variables with their name, value, and editable extension fields.
+      def env : Array(JSON::Any)?
+        @environment_wire.try(&.value).try(&.as_a?)
+      end
+
+      # Replaces the terminal environment.
+      def env=(value : Array(JSON::Any)?) : Array(JSON::Any)?
+        @environment_wire = value.try { |entries| PreservedJson.new(JSON::Any.new(entries)) }
+        value
+      end
+
+      # Exact original environment values, including extension metadata.
+      def env_raw : RawJson?
+        @environment_wire.try(&.raw)
       end
     end
 
@@ -221,6 +283,7 @@ module ACP
     # Request parameters for `terminal/output`.
     struct TerminalOutputParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -230,15 +293,12 @@ module ACP
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @terminal_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -284,6 +344,7 @@ module ACP
     # Request parameters for `terminal/release`.
     struct ReleaseTerminalParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -293,15 +354,12 @@ module ACP
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @terminal_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -325,6 +383,7 @@ module ACP
     # Request parameters for `terminal/wait_for_exit`.
     struct WaitForTerminalExitParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -334,15 +393,12 @@ module ACP
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @terminal_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -389,6 +445,7 @@ module ACP
     # Request parameters for `terminal/kill`.
     struct KillTerminalParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID for this request (required).
       @[JSON::Field(key: "sessionId")]
@@ -398,15 +455,12 @@ module ACP
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @terminal_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 

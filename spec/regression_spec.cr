@@ -8855,3 +8855,111 @@ describe "ACP v1 resource callback capabilities" do
     end
   end
 end
+
+describe "ACP v1 resource request parameters" do
+  it "validates resource requests before either typed or generic callbacks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(
+        fs: ACP::Protocol::FsCapabilities.new(read_text_file: true, write_text_file: true), terminal: true)
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts build_init_response(init["id"].as_i64).delete('\n')
+      end
+      client.initialize_connection
+      calls = [] of String
+      client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) do
+        calls << params.path
+        ACP::Protocol::ReadTextFileResult.new(params.path)
+      end
+      client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+        calls << params.command
+        environment = ACP::Protocol::RawJson.from_json(params.to_json).field("env")
+        ACP::Protocol::CreateTerminalResult.new(environment.try(&.json) || "t")
+      end
+      client.on_agent_request = ->(method : String, params : JSON::Any) do
+        calls << method
+        params
+      end
+      request = ->(id : Int32, method : String, params : String) do
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":#{params}})
+        JSON.parse(outgoing.gets.not_nil!)
+      end
+      invalid = {
+        {"fs/read_text_file", %({"sessionId":"s","path":"relative.txt"})},
+        {"fs/read_text_file", %q({"sessionId":"s","path":"/file\u0000suffix"})},
+        {"fs/read_text_file", %({"sessionId":"s","path":"/a","path":"/b"})},
+        {"fs/read_text_file", %({"sessionId":"s","path":"/a","line":-1})},
+        {"fs/read_text_file", %({"sessionId":"s","path":"/a","line":0})},
+        {"fs/write_text_file", %({"sessionId":"s","path":"relative.txt","content":"example"})},
+        {"fs/write_text_file", %({"sessionId":"s","path":"/a","content":false})},
+        {"terminal/create", %({"sessionId":"s","command":"fixture","cwd":"relative"})},
+        {"terminal/create", %({"sessionId":"s","command":"fixture","env":[false]})},
+        {"terminal/create", %({"sessionId":"s","command":"fixture","env":[{"name":"FIXTURE"}]})},
+        {"terminal/create", %({"sessionId":"s","command":"fixture","env":[{"name":"FIXTURE","name":"OTHER","value":"sample"}]})},
+        {"terminal/create", %({"sessionId":"s","command":"fixture","env":[{"name":"FIXTURE=OTHER","value":"sample"}]})},
+        {"terminal/create", %q({"sessionId":"s","command":"fixture","env":[{"name":"FIXTURE","value":"a\u0000b"}]})},
+        {"terminal/create", %q({"sessionId":"s","command":"fixture\u0000suffix"})},
+        {"terminal/create", %q({"sessionId":"s","command":"fixture","args":["a\u0000b"]})},
+        {"terminal/output", %({"sessionId":"s","terminalId":false})},
+        {"terminal/wait_for_exit", %({"terminalId":"t"})},
+        {"terminal/release", %({"sessionId":"s","terminalId":"t","terminalId":"other"})},
+        {"terminal/kill", %({"sessionId":"s"})},
+      }
+      {true, false}.each do |typed|
+        unless typed
+          client.on_read_text_file = nil
+          client.on_create_terminal = nil
+        end
+        invalid.each_with_index do |(method, params), id|
+          reply = request.call(id, method, params)
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        end
+      end
+      feed.puts %({"jsonrpc":"2.0","id":19,"method":"fs/read_text_file","params":{},"params":{"sessionId":"s","path":"/fixture"}})
+      JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+      {
+        %q("jsonrpc":"1.0"),
+        %q("jsonrpc":"2.0","jsonrpc":"2.0"),
+        %q("jsonrpc":"2.0","result":{}),
+        %q("jsonrpc":"2.0","error":null),
+      }.each_with_index do |envelope, id|
+        feed.puts %({#{envelope},"id":#{id + 30},"method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+      end
+      calls.should be_empty
+
+      write_params = %({"sessionId":"s","path":"/fixture","content":"example","_meta":false})
+      request.call(20, "fs/write_text_file", write_params)["result"].should eq(JSON.parse(write_params))
+      create_params = %({"sessionId":"s","command":"fixture","outputByteLimit":-0})
+      request.call(21, "terminal/create", create_params)["result"]["outputByteLimit"].as_i.should eq(0)
+      calls.should eq(["fs/write_text_file", "terminal/create"])
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "accepts absolute paths and preserves exact terminal environment metadata for typed handlers" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
+      environment = %([{"name":"FIXTURE","value":"example","_meta":{"example.test/wide":18446744073709551615}}])
+      received = Channel({String?, String?, UInt64?}).new(2)
+      client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+        source = ACP::Protocol::RawJson.from_json(params.to_json)
+        env = source.field("env").try(&.json)
+        name = params.env.try(&.first?).try(&.["name"]?).try(&.as_s?)
+        received.send({name, params.env_raw.try(&.json), params.output_byte_limit})
+        ACP::Protocol::CreateTerminalResult.new(env || params.cwd || "t")
+      end
+      feed.puts %({"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"fixture","cwd":"C:/project","args":null,"env":#{environment},"_meta":false}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["result"]?.try(&.["terminalId"].as_s?).should eq(environment)
+      next_permission_event(received).should eq({"FIXTURE", environment, nil})
+      feed.puts %({"jsonrpc":"2.0","id":2,"method":"terminal/create","params":{"sessionId":"s","command":"fixture","cwd":"/project","env":null,"outputByteLimit":-0}})
+      JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].as_s.should eq("/project")
+      next_permission_event(received).should eq({nil, nil, 0_u64})
+    ensure
+      client.try(&.close)
+    end
+  end
+end
