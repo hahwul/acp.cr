@@ -171,6 +171,24 @@ module ACP
       struct SubagentUpdate
         include JSON::Serializable
 
+        # :nodoc:
+        WIRE_FIELDS = {"sessionUpdate", "sessionId", "title", "description", "capabilities", "state", "cwd", "additionalDirectories", "_meta"}
+
+        # :nodoc:
+        module CapabilitiesPatch
+          def self.from_json(pull : JSON::PullParser) : EntityCapabilities?
+            wire = RawJson.new(pull)
+            return unless wire.object?
+
+            unless WireFrame.repeated_members(wire.json, "cancel").empty?
+              wire = wire.without_field("cancel")
+            end
+            EntityCapabilities.from_json(wire.json)
+          rescue JSON::ParseException
+            nil
+          end
+        end
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "subagent_update"
@@ -179,12 +197,16 @@ module ACP
         @[JSON::Field(key: "sessionId")]
         getter session_id : String
 
-        # A cleared state removes the report. Cleared directories inherit the parent's values.
+        # A cleared state removes the report. Malformed optional hints leave it unchanged.
+        PatchFields.tolerant({
+          title:        {String, "title", OptionalCapabilityString},
+          description:  {String, "description", OptionalCapabilityString},
+          capabilities: {EntityCapabilities, "capabilities", CapabilitiesPatch},
+          state:        {StateSnapshot, "state", OptionalContentValue(StateSnapshot)},
+        })
+
+        # Cleared directories inherit the parent's values.
         PatchFields.define({
-          title:                  {String, "title"},
-          description:            {String, "description"},
-          capabilities:           {EntityCapabilities, "capabilities"},
-          state:                  {StateSnapshot, "state"},
           cwd:                    {String, "cwd"},
           additional_directories: {Array(String), "additionalDirectories"},
         })
@@ -194,10 +216,25 @@ module ACP
         def initialize(@session_id : String)
         end
 
-        # Reads a child patch, ignoring malformed or ambiguous optional state.
+        # Reads a child patch with an unambiguous ID and valid workspace paths.
         def self.new(pull : JSON::PullParser) : self
-          wire = StateFields.normalize_patch(RawJson.new(pull))
-          previous_def(JSON::PullParser.new(wire.json))
+          location = pull.location
+          wire = RawJson.new(pull)
+          repeated = WireFrame.repeated_members(wire.json, *WIRE_FIELDS)
+          if repeated.any? { |field| field.in?("sessionUpdate", "sessionId", "cwd", "additionalDirectories") }
+            raise JSON::ParseException.new("Ambiguous ACP subagent update fields", *location)
+          end
+
+          repeated.each { |field| wire = wire.without_field(field) }
+          patch = previous_def(JSON::PullParser.new(wire.json))
+          if (cwd = patch.cwd) && !Protocol.absolute_path?(cwd)
+            raise JSON::ParseException.new("ACP subagent working directory must be absolute", *location)
+          end
+          if (dirs = patch.additional_directories) && !dirs.all? { |path| Protocol.absolute_path?(path) }
+            raise JSON::ParseException.new("ACP subagent additional directories must be absolute", *location)
+          end
+          patch.capabilities = nil if repeated.includes?("capabilities")
+          patch
         end
       end
 
@@ -324,8 +361,14 @@ module ACP
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
         end
 
+        # Reads an update with one unambiguous discriminator.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "sessionUpdate"))
+        end
+
         protected def on_unknown_json_attribute(pull, key, key_location)
-          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key) || StateFields::MEMBERS.includes?(key)
+          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key) ||
+             StateFields::MEMBERS.includes?(key) || SubagentUpdate::WIRE_FIELDS.includes?(key)
             if earlier = exact_unmapped_json(key)
               (@duplicate_fields ||= Set(String).new).add(key)
               fields = @earlier_fields ||= {} of String => Array(String)
@@ -342,7 +385,7 @@ module ACP
                             when "terminal_update", "terminal_output_chunk" then TERMINAL_WIRE_FIELDS
                             when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
                             when "state_update"                             then StateFields::MEMBERS
-                            when "subagent_update"                          then {"state"}
+                            when "subagent_update"                          then SubagentUpdate::WIRE_FIELDS
                             end
           if retained_fields
             @earlier_fields.try &.each do |key, values|
@@ -455,6 +498,11 @@ module ACP
         # Creates a notification payload.
         def initialize(@session_id : String, @update : SessionUpdate, meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
+        end
+
+        # Reads notification params with an unambiguous session and update.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(WireFrame.read_with_unique_members(pull, "sessionId", "update"))
         end
 
         # The delivered notification params, including extension fields and exact JSON numbers.
