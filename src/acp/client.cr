@@ -371,7 +371,17 @@ module ACP
       property? releasing : Bool = false
       property? retired : Bool = false
 
+      @output_truncated = Atomic(Bool).new(false)
+
       def initialize(@session_id : String, @attachment_order : UInt64?)
+      end
+
+      def output_truncated? : Bool
+        @output_truncated.get
+      end
+
+      def mark_output_truncated : Nil
+        @output_truncated.set(true)
       end
 
       def retired_by?(sessions : Array(String), order : UInt64?) : Bool
@@ -3090,12 +3100,11 @@ module ACP
                   result = h.call(typed_params)
                   released = releasing
                   if terminal && result.is_a?(Protocol::TerminalOutputResult)
-                    output, trimmed = normalize_terminal_output(result.output, terminal.output_byte_limit)
-                    result.output = output
-                    result.truncated = true if trimmed
+                    encode_v1_terminal_output(result, terminal)
+                  else
+                    collision = terminal_id_collision(result.terminal_id) if result.is_a?(Protocol::CreateTerminalResult)
+                    collision || encode_agent_result(result)
                   end
-                  collision = terminal_id_collision(result.terminal_id) if result.is_a?(Protocol::CreateTerminalResult)
-                  collision || encode_agent_result(result)
                 rescue ex
                   ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
                   handler_error_reply(ex, ex.message || "Handler error")
@@ -3104,12 +3113,14 @@ module ACP
                 raw = handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
                 result_fields = raw.as_h? if raw.is_a?(JSON::Any)
                 released = releasing && !!result_fields
-                if method_name == Protocol::ClientMethod::TERMINAL_CREATE
-                  collision = terminal_id_collision(result_fields.try(&.["terminalId"]?).try(&.as_s?))
-                elsif terminal && method_name == Protocol::ClientMethod::TERMINAL_OUTPUT && raw.is_a?(JSON::Any)
-                  raw = normalize_terminal_output_reply(raw, terminal.output_byte_limit)
+                if terminal && method_name == Protocol::ClientMethod::TERMINAL_OUTPUT && raw.is_a?(JSON::Any)
+                  encode_v1_terminal_output(raw, terminal)
+                else
+                  if method_name == Protocol::ClientMethod::TERMINAL_CREATE
+                    collision = terminal_id_collision(result_fields.try(&.["terminalId"]?).try(&.as_s?))
+                  end
+                  collision || validate_v1_resource_reply(method_name, raw)
                 end
-                collision || validate_v1_resource_reply(method_name, raw)
               end
       reply
     ensure
@@ -3164,17 +3175,38 @@ module ACP
       {text.byte_slice(start), true}
     end
 
-    private def normalize_terminal_output_reply(reply : JSON::Any, limit : UInt64?) : JSON::Any
-      fields = reply.as_h?
-      return reply unless fields && (output = fields["output"]?.try(&.as_s?)) && !fields["truncated"]?.try(&.as_bool?).nil?
+    private def encode_v1_terminal_output(result : Protocol::TerminalOutputResult, terminal : V1Terminal) : AgentReply
+      text, trimmed = normalize_terminal_output(result.output, terminal.output_byte_limit)
+      result.output = text
+      previously_truncated = terminal.output_truncated?
+      result.truncated = true if trimmed || previously_truncated
 
-      text, trimmed = normalize_terminal_output(output, limit)
-      return reply if text.same?(output) && !trimmed
+      reply = encode_agent_result(result)
+      if result.truncated? && !previously_truncated
+        if reply.is_a?(Protocol::RawJson)
+          # Leave room for the JSON-RPC envelope without projecting exact values.
+          parser = JSON::PullParser.new(reply.json)
+          parser.max_nesting -= 1
+          parser.skip
+        end
+        terminal.mark_output_truncated
+      end
+      reply
+    end
 
-      fields = fields.dup
-      fields["output"] = JSON::Any.new(text)
-      fields["truncated"] = JSON::Any.new(true) if trimmed
-      JSON::Any.new(fields)
+    private def encode_v1_terminal_output(result : JSON::Any, terminal : V1Terminal) : AgentReply
+      fields = result.as_h?
+      if fields && (output = fields["output"]?.try(&.as_s?)) && !(truncated = fields["truncated"]?.try(&.as_bool?)).nil?
+        text, trimmed = normalize_terminal_output(output, terminal.output_byte_limit)
+        fields = fields.dup
+        fields["output"] = JSON::Any.new(text)
+        fields["truncated"] = JSON::Any.new(truncated || trimmed || terminal.output_truncated?)
+        result = JSON::Any.new(fields)
+      end
+
+      reply = validate_v1_resource_reply(Protocol::ClientMethod::TERMINAL_OUTPUT, result)
+      terminal.mark_output_truncated if reply.is_a?(JSON::Any) && reply["truncated"].as_bool
+      reply
     end
 
     private def validate_v1_resource_reply(method : String, reply : AgentReply) : AgentReply
