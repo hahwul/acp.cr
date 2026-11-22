@@ -644,7 +644,7 @@ module ACP
             raise InvalidStateError.new("The Agent did not advertise session.title")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult)
+          @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult, exact_response: true)
         end
       end
 
@@ -652,7 +652,7 @@ module ACP
       def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionArchiveResult
         @connection.with_request do
           ensure_archive_support
-          @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult)
+          @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult, exact_response: true)
         end
       end
 
@@ -660,7 +660,7 @@ module ACP
       def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionUnarchiveResult
         @connection.with_request do
           ensure_archive_support
-          @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult)
+          @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult, exact_response: true)
         end
       end
 
@@ -770,7 +770,7 @@ module ACP
       def tool_call_cancel(session_id : String, tool_call_id : String) : Wire::ToolCallCancelResult
         @connection.with_request do
           session_capabilities
-          @connection.request_typed(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult)
+          @connection.request_typed(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult, exact_response: true)
         end
       end
 
@@ -778,7 +778,7 @@ module ACP
       def terminal_cancel(session_id : String, terminal_id : String) : Wire::TerminalCancelResult
         @connection.with_request do
           session_capabilities
-          @connection.request_typed(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult)
+          @connection.request_typed(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult, exact_response: true)
         end
       end
 

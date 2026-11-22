@@ -828,7 +828,7 @@ module ACP
         raise ArgumentError.new("ACP session directories must be absolute")
       end
 
-      send_typed_request(method, params, Protocol::SessionOptionsResult)
+      send_typed_request(method, params, Protocol::SessionOptionsResult, exact_response: true)
     end
 
     # Previews options for a new session in the given workspace.
@@ -864,7 +864,7 @@ module ACP
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.status")
       end
 
-      send_typed_request(method, Protocol::SessionStatusParams.new(session_id, meta), Protocol::SessionStatusResult)
+      send_typed_request(method, Protocol::SessionStatusParams.new(session_id, meta), Protocol::SessionStatusResult, exact_response: true)
     end
 
     # Sets the title of a session and returns the title the Agent stored.
@@ -875,21 +875,21 @@ module ACP
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.title")
       end
 
-      send_typed_request(method, Protocol::SetSessionTitleParams.new(session_id, title, meta), Protocol::SetSessionTitleResult)
+      send_typed_request(method, Protocol::SetSessionTitleParams.new(session_id, title, meta), Protocol::SetSessionTitleResult, exact_response: true)
     end
 
     # Closes and archives the session while preserving its saved history.
     def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionArchiveResult
       method = Protocol::AgentMethod::SESSION_ARCHIVE
       ensure_archive_support(method)
-      send_typed_request(method, Protocol::SessionArchiveParams.new(session_id, meta), Protocol::SessionArchiveResult)
+      send_typed_request(method, Protocol::SessionArchiveParams.new(session_id, meta), Protocol::SessionArchiveResult, exact_response: true)
     end
 
     # Restores the session to default list results without attaching to it.
     def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionUnarchiveResult
       method = Protocol::AgentMethod::SESSION_UNARCHIVE
       ensure_archive_support(method)
-      send_typed_request(method, Protocol::SessionUnarchiveParams.new(session_id, meta), Protocol::SessionUnarchiveResult)
+      send_typed_request(method, Protocol::SessionUnarchiveParams.new(session_id, meta), Protocol::SessionUnarchiveResult, exact_response: true)
     end
 
     private def ensure_archive_support(method : String) : Nil
@@ -1364,7 +1364,7 @@ module ACP
     # Close and delete are idempotent when the Agent reports a missing session.
     protected def send_session_retirement_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder)
+      response = send_and_await_response(method, message_builder, exact_response: true)
       return T.new if missing_session_response?(response)
 
       decode_typed_response(method, response, type)

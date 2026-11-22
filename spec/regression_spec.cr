@@ -2560,7 +2560,7 @@ describe "ACP v2 command snapshot retirement" do
       end
       client.initialize_connection
       client.session_new("/work")
-      client.session_close("s").meta.should be_nil
+      client.session_close("s").meta_raw.not_nil!.field("wide").not_nil!.json.should eq("18446744073709551615")
       client.session_available_commands("s").should be_nil
       client.session_workspace("s").should be_nil
 
@@ -3494,35 +3494,96 @@ describe "ACP v2 replay retirement" do
   end
 end
 
+describe "ACP exact session management replies" do
+  {1, 2}.each do |version|
+    {"set_title", "archive", "unarchive", "close", "delete", "status", "options"}.each do |operation|
+      it "preserves metadata in a v#{version} session/#{operation} reply" do
+        with_wide_stdio do |transport, feed, outgoing|
+          client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+          client.request_timeout = 2.0
+          count = operation == "status" ? "42" : "18446744073709551615"
+          spawn do
+            init = JSON.parse(outgoing.gets.not_nil!)
+            supports = %({"title":{},"archive":{},"close":{},"delete":{},"status":{},"options":{}})
+            result = if version == 1
+                       %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":#{supports}}})
+                     else
+                       %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":#{supports}}})
+                     end
+            feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":#{result}})
+            setup = JSON.parse(outgoing.gets.not_nil!)
+            feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
+            request = JSON.parse(outgoing.gets.not_nil!)
+            fields = case operation
+                     when "set_title" then %("title":"Stored title",)
+                     when "status"    then %("status":"open","state":{"state":"idle"},)
+                     else                  ""
+                     end
+            feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{#{fields}"_meta":{"example.test/source":"agent","example.test/count":#{count},"example.test/ratio":1.23000000000000000001}}})
+          end
+
+          client.initialize_connection
+          client.session_new("/work")
+          result = case operation
+                   when "set_title" then client.session_set_title("root", "Proposed title")
+                   when "archive"   then client.session_archive("root")
+                   when "unarchive" then client.session_unarchive("root")
+                   when "close"     then client.session_close("root")
+                   when "delete"    then client.session_delete("root")
+                   when "status"    then client.session_status("root")
+                   else                  client.session_options("/work")
+                   end
+          result.meta.try(&.["example.test/source"]?).should eq("agent")
+          result.title.should eq("Stored title") if result.is_a?(ACP::Protocol::SetSessionTitleResult)
+          metadata = result.meta_raw.not_nil!
+          metadata.field("example.test/count").not_nil!.json.should eq(count)
+          metadata.field("example.test/ratio").not_nil!.json.should eq("1.23000000000000000001")
+          result.to_json.should contain(%("example.test/count":#{count}))
+          retired = operation.in?("archive", "close") || (version == 2 && operation == "delete")
+          client.session_workspace("root").nil?.should eq(retired)
+        ensure
+          client.try(&.close)
+        end
+      end
+    end
+  end
+end
+
 describe "ACP v2 cancellation replies" do
-  it "accepts a terminal cancel result with wide optional metadata" do
-    with_wide_stdio do |transport, feed, outgoing|
-      client = ACP::V2::Client.new(transport)
-      client.request_timeout = 2.0
-      advertised = Channel(Nil).new(1)
-      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
-        advertised.send(nil) if note.update.session_update == "terminal_update"
-        nil
+  {"terminal" => "terminalId", "tool_call" => "toolCallId"}.each do |kind, id_field|
+    {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
+      it "preserves a #{label} in a #{kind} cancel reply" do
+        with_wide_stdio do |transport, feed, outgoing|
+          client = ACP::V2::Client.new(transport)
+          client.request_timeout = 2.0
+          advertised = Channel(Nil).new(1)
+          update = "#{kind}_update"
+          client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+            advertised.send(nil) if note.update.session_update == update
+            nil
+          end
+          spawn do
+            init = JSON.parse(outgoing.gets.not_nil!)
+            feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
+            setup = JSON.parse(outgoing.gets.not_nil!)
+            feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
+            feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":#{update.to_json},#{id_field.to_json}:"entity","capabilities":{"cancel":{}}}}})
+            cancel = JSON.parse(outgoing.gets.not_nil!)
+            feed.puts %({"jsonrpc":"2.0","id":#{cancel["id"]},"result":{"_meta":{"number":#{number}}}})
+          end
+          client.initialize_connection
+          client.session_new("/work")
+          select
+          when advertised.receive
+          when timeout(2.seconds)
+            fail "the Agent's cancellation capability did not arrive"
+          end
+          result = kind == "terminal" ? client.terminal_cancel("root", "entity") : client.tool_call_cancel("root", "entity")
+          result.meta_raw.not_nil!.field("number").not_nil!.json.should eq(number)
+        ensure
+          client.try(&.close)
+        end
       end
-      spawn do
-        init = JSON.parse(outgoing.gets.not_nil!)
-        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}}})
-        setup = JSON.parse(outgoing.gets.not_nil!)
-        feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
-        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"terminal_update","terminalId":"term","capabilities":{"cancel":{}}}}})
-        cancel = JSON.parse(outgoing.gets.not_nil!)
-        feed.puts %({"jsonrpc":"2.0","id":#{cancel["id"]},"result":{"_meta":{"wide":18446744073709551615}}})
-      end
-      client.initialize_connection
-      client.session_new("/work")
-      select
-      when advertised.receive
-      when timeout(2.seconds)
-        fail "the Agent's terminal advertisement did not arrive"
-      end
-      client.terminal_cancel("root", "term").meta.should be_nil
-    ensure
-      client.try(&.close)
     end
   end
 end
