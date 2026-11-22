@@ -173,7 +173,7 @@ module ACP
     end
 
     private record Change, session_id : String, snapshot : Snapshot, mode : String?, revision : UInt64 = 0_u64, write : UInt64 = 0_u64
-    private record Attachment, session_id : String, loading : Bool, replaying : Bool, expired : Bool = false
+    private record Attachment, session_id : String, loading : Bool, replaying : Bool, expired : Bool = false, written : Bool = false
 
     EMPTY_COMMANDS = Raw.from_json("[]")
 
@@ -228,11 +228,17 @@ module ACP
     end
 
     def loading?(session_id : String) : Bool
-      !!@attaching[session_id]?.try { |id| @attachments[id]?.try(&.loading) }
+      !!@attaching[session_id]?.try { |id| @attachments[id]?.try { |attach| attach.written && attach.loading } }
+    end
+
+    def attachment_written(request_id : String) : Nil
+      if attach = @attachments[request_id]?
+        @attachments[request_id] = attach.copy_with(written: true)
+      end
     end
 
     def replay_complete(session_id : String) : Nil
-      if @v2 && (request_id = @attaching[session_id]?) && (attachment = @attachments[request_id]?)
+      if @v2 && (request_id = @attaching[session_id]?) && (attachment = @attachments[request_id]?) && attachment.written
         if attachment.expired
           finish_attachment(request_id)
         else
@@ -386,7 +392,9 @@ module ACP
     end
 
     private def replaying?(session_id : String) : Bool
-      !!@attaching[session_id]?.try { |id| @attachments[id]?.try(&.replaying) }
+      !!@attaching[session_id]?.try do |id|
+        @attachments[id]?.try { |attach| attach.written && attach.replaying }
+      end
     end
 
     private def array_field(wire : String, name : String, *, unique : Bool = false) : Raw?

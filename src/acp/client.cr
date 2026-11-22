@@ -1611,15 +1611,12 @@ module ACP
         fork_cursor = fork_cursor_grant(params) if check_fork_cursor
         begin
           @session_choices.start_attachment(id_str, method, params)
-          start_cursor_replay(id_str, method, params)
+          reserve_cursor_replay(id_str, method, params)
           @subagent_registry.request_sent(id_str, method, params)
         rescue ex
           @session_choices.finish_attachment(id_str)
           @cursor_registry.try(&.finish_replay(id_str))
           raise ex
-        end
-        if loading_session && @suggestion_content_types
-          @suggestion_loads[id_str] = loading_session
         end
         @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor,
           on_result, on_response, !arm_at_write, exact_response: exact_response, v1_resource_offer: resource_offer)
@@ -1655,7 +1652,15 @@ module ACP
                 if session_setup || closing_session
                   @session_lifecycle_order += 1
                 end
-                @subagent_registry.root_setup_written(id_str, @session_lifecycle_order) if session_setup
+                if session_setup
+                  # Requests enter replay as the transport is ready to write them.
+                  @cursor_registry.try(&.replay_written(id_str))
+                  @session_choices.attachment_written(id_str)
+                  @subagent_registry.root_setup_written(id_str, @session_lifecycle_order)
+                  if loading_session && @suggestion_content_types
+                    @suggestion_loads[id_str] = loading_session
+                  end
+                end
                 retirement_order = @session_lifecycle_order if closing_session
                 pending = @pending[id_str]
                 if pending.v1_resource_offer
@@ -3535,18 +3540,18 @@ module ACP
     end
 
     # Runs under the pending-request mutex.
-    private def start_cursor_replay(request_id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
+    private def reserve_cursor_replay(request_id : String, method : String, params : Hash(String, JSON::Any)?) : Nil
       return unless (registry = @cursor_registry) && params && (session_id = params["sessionId"]?.try(&.as_s?))
 
       if v2_wire?
         return unless method == Protocol::AgentMethod::SESSION_RESUME
         return unless replay_type = params["replayFrom"]?.try(&.as_h?).try(&.["type"]?).try(&.as_s?)
 
-        registry.start_replay(request_id, session_id, full: replay_type == "start")
+        registry.reserve_replay(request_id, session_id, full: replay_type == "start")
       else
         return unless method == Protocol::AgentMethod::SESSION_LOAD
 
-        registry.start_replay(request_id, session_id, full: true)
+        registry.reserve_replay(request_id, session_id, full: true)
       end
     end
 

@@ -4686,6 +4686,122 @@ describe "ACP exact notices and replay completion" do
   end
 end
 
+describe "ACP replay write boundaries" do
+  it "keeps live v2 cursors and session choices while a resume is queued and then rejected" do
+    transport = QueuedChoiceStateTransport.new("session/resume")
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    initial = choice_state_option("configId", "fast", ["fast", "large"])
+    changed = choice_state_option("configId", "large", ["fast", "large"])
+    transport.replies["session/new"] = %("result":{"sessionId":"s","configOptions":[#{initial}],"availableCommands":[]})
+    transport.replies["session/resume"] = %("error":{"code":-32602,"message":"Replay unavailable"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+
+    result = Channel(ACP::Protocol::V2::SessionResumeResult | Exception).new(1)
+    spawn do
+      params = ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      result.send(client.session_resume(params))
+    rescue ex
+      result.send(ex)
+    end
+    select
+    when transport.queued.receive
+    when timeout(2.seconds)
+      fail "resume did not reach the transport queue"
+    end
+
+    transport.update("s", %({"sessionUpdate":"user_message","messageId":"m","content":[{"type":"text","text":"Live"}]}))
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"live","anchor":{"type":"user_message","messageId":"m","position":"after"}}))
+    transport.update("s", %({"sessionUpdate":"config_option_update","configOptions":[#{changed}]}))
+    transport.update("s", %({"sessionUpdate":"available_commands_update","availableCommands":[{"type":"command","name":"status","description":"Status"}]}))
+    choice_state_barrier(client, transport)
+    transport.sent_messages.none? { |message| message["method"]?.try(&.as_s?) == "session/resume" }.should be_true
+    read_live = -> do
+      {!client.session_cursor("s", "live").nil?, client.session_config_options_raw("s").try(&.json),
+       client.session_available_commands("s").try(&.map(&.name))}
+    end
+    read_live.call.should eq({true, "[#{ACP::Protocol::RawJson.from_json(changed).json}]", ["status"]})
+
+    transport.write.send(nil)
+    select
+    when outcome = result.receive
+      outcome.as(ACP::JsonRpcError).code.should eq(-32602)
+    when timeout(2.seconds)
+      fail "resume rejection was not delivered"
+    end
+    read_live.call.should eq({true, "[#{ACP::Protocol::RawJson.from_json(changed).json}]", ["status"]})
+  ensure
+    transport.try(&.write.close)
+    client.try(&.close)
+  end
+
+  it "keeps live v1 cursors, modes, and suggestions while a load is queued and then rejected" do
+    transport = QueuedChoiceStateTransport.new("session/load")
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}})
+    modes = %({"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"code","name":"Code"}]})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","modes":#{modes}})
+    transport.replies["session/load"] = %("error":{"code":-32602,"message":"Load unavailable"})
+    capabilities = ACP::Protocol::ClientSessionCapabilities.new(cursors: ACP::Protocol::SessionCursorsCapabilities.new,
+      prompt_suggestions: ACP::Protocol::PromptSuggestionsCapabilities.new)
+    client_caps = ACP::Protocol::ClientCapabilities.new(session: capabilities, subagents: ACP::Protocol::SubagentCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: client_caps)
+    client.request_timeout = 2.0
+    suggestions = [] of ACP::Protocol::PromptSuggestionsUpdate
+    load_flags = [] of Bool
+    client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+      if update = note.update.as?(ACP::Protocol::PromptSuggestionsUpdate)
+        suggestions << update
+      end
+      load_flags << note.before_load_response?
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+    transport.update("s", %({"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"running"}}))
+    choice_state_barrier(client, transport)
+    client.subagent("child").not_nil!.state.not_nil!.state.should eq("running")
+
+    result = Channel(ACP::Protocol::SessionLoadResult | Exception).new(1)
+    spawn do
+      result.send(client.session_load("s", "/work"))
+    rescue ex
+      result.send(ex)
+    end
+    select
+    when transport.queued.receive
+    when timeout(2.seconds)
+      fail "load did not reach the transport queue"
+    end
+
+    transport.update("s", %({"sessionUpdate":"user_message_chunk","messageId":"m","content":{"type":"text","text":"Live"}}))
+    transport.update("s", %({"sessionUpdate":"cursor_update","cursorId":"live","anchor":{"type":"user_message","messageId":"m","position":"after"}}))
+    transport.update("s", %({"sessionUpdate":"current_mode_update","currentModeId":"code"}))
+    transport.update("s", %({"sessionUpdate":"prompt_suggestions_update","suggestions":[{"prompt":[{"type":"text","text":"Continue"}]}]}))
+    transport.update("s", %({"sessionUpdate":"subagent_update","sessionId":"child","state":{"state":"idle"}}))
+    choice_state_barrier(client, transport)
+    transport.sent_messages.none? { |message| message["method"]?.try(&.as_s?) == "session/load" }.should be_true
+    read_live = -> { {!client.session_cursor("s", "live").nil?, client.session_modes("s").try(&.current_mode_id)} }
+    read_live.call.should eq({true, "code"})
+    suggestions.size.should eq(1)
+    load_flags.should eq(Array.new(6, false))
+    client.subagent("child").not_nil!.state.not_nil!.state.should eq("idle")
+
+    transport.write.send(nil)
+    select
+    when outcome = result.receive
+      outcome.as(ACP::JsonRpcError).code.should eq(-32602)
+    when timeout(2.seconds)
+      fail "load rejection was not delivered"
+    end
+    read_live.call.should eq({true, "code"})
+  ensure
+    transport.try(&.write.close)
+    client.try(&.close)
+  end
+end
+
 describe "ACP v2 exact configuration options" do
   it "preserves full-width configuration options in every typed wrapper" do
     meta = %({"example.test/sequence":18446744073709551615,"example.test/precision":0.1234567890123456789})
