@@ -7700,6 +7700,17 @@ private class PausedRequestElicitationStdio < ACP::StdioTransport
     super(message, &preflight)
   end
 
+  def send_wire(frame : ACP::Protocol::WireFrame, &preflight : -> Nil) : Nil
+    if @pause_accept
+      source = ACP::Protocol::RawJson.from_json(frame.json)
+      if source.field("result").try(&.field("action")).try(&.as_s?) == "accept"
+        @queued.send(source.field("id").not_nil!.to_json_any)
+        @release.receive?
+      end
+    end
+    super(frame, &preflight)
+  end
+
   private def pause_parent(message : Hash(String, JSON::Any)) : Nil
     if (method = @pause_method) && message["method"]?.try(&.as_s?) == method
       @queued.send(message["id"])
@@ -7842,37 +7853,45 @@ describe "ACP v2 request-scoped elicitations" do
     end
   end
 
-  it "drops an approval queued behind the writer after the parent receives its answer" do
-    reader, feed = IO.pipe
-    outgoing, writer = IO.pipe
-    outgoing.read_timeout = 2.seconds
-    transport = PausedRequestElicitationStdio.new(reader, writer)
-    transport.pause_accept = true
-    client = request_elicitation_client(transport)
-    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { ACP::Protocol::CreateElicitationResult.accept }
-    initialize_wide_v2(client, feed, outgoing)
-    result = Channel(JSON::Any).new(1)
-    spawn { result.send(client.ext_method("parent", JSON.parse("{}"))); nil }
-    parent = JSON.parse(outgoing.gets.not_nil!)["id"]
-    feed.puts request_elicitation_frame("child", %("requestId":#{parent}))
-    next_permission_event(transport.queued).as_s.should eq("child")
-    feed.puts %({"jsonrpc":"2.0","id":#{parent},"result":{}})
-    next_permission_event(result).should eq(JSON.parse("{}"))
-    cancelled = JSON.parse(outgoing.gets.not_nil!)
-    cancelled["id"].as_s.should eq("child")
-    cancelled["result"]["action"].as_s.should eq("cancel")
-    transport.release.send(nil)
+  {false, true}.each do |exact|
+    it "drops a queued #{exact ? "exact" : "typed"} approval when the parent receives its answer" do
+      reader, feed = IO.pipe
+      outgoing, writer = IO.pipe
+      outgoing.read_timeout = 2.seconds
+      transport = PausedRequestElicitationStdio.new(reader, writer)
+      transport.pause_accept = true
+      client = request_elicitation_client(transport)
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+        if exact
+          ACP::Protocol::CreateElicitationResult.accept_raw(ACP::Protocol::RawJson.from_json("{}"))
+        else
+          ACP::Protocol::CreateElicitationResult.accept
+        end
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      result = Channel(JSON::Any).new(1)
+      spawn { result.send(client.ext_method("parent", JSON.parse("{}"))); nil }
+      parent = JSON.parse(outgoing.gets.not_nil!)["id"]
+      feed.puts request_elicitation_frame("child", %("requestId":#{parent}))
+      next_permission_event(transport.queued).as_s.should eq("child")
+      feed.puts %({"jsonrpc":"2.0","id":#{parent},"result":{}})
+      next_permission_event(result).should eq(JSON.parse("{}"))
+      cancelled = JSON.parse(outgoing.gets.not_nil!)
+      cancelled["id"].as_s.should eq("child")
+      cancelled["result"]["action"].as_s.should eq("cancel")
+      transport.release.send(nil)
 
-    spawn { result.send(client.ext_method("barrier", JSON.parse("{}"))); nil }
-    barrier = JSON.parse(outgoing.gets.not_nil!)
-    barrier["method"].as_s.should eq("_barrier")
-    feed.puts %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":true})
-    next_permission_event(result).as_bool.should be_true
-  ensure
-    transport.try { |fixture| fixture.release.close }
-    client.try(&.close)
-    feed.try(&.close)
-    outgoing.try(&.close)
+      spawn { result.send(client.ext_method("barrier", JSON.parse("{}"))); nil }
+      barrier = JSON.parse(outgoing.gets.not_nil!)
+      barrier["method"].as_s.should eq("_barrier")
+      feed.puts %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":true})
+      next_permission_event(result).as_bool.should be_true
+    ensure
+      transport.try { |fixture| fixture.release.close }
+      client.try(&.close)
+      feed.try(&.close)
+      outgoing.try(&.close)
+    end
   end
 
   it "retires a timed-out parent's URL input and allows its elicitation ID to be reused" do
@@ -7972,6 +7991,7 @@ describe "ACP v2 form elicitation schemas" do
         %({"type":"object","properties":{"value":{"type":"string","minLength":-1}}}),
         %({"type":"object","properties":{"value":{"type":"string","minLength":2,"maxLength":1}}}),
         %({"type":"object","properties":{"value":{"type":"number","minimum":2,"maximum":1.5}}}),
+        %({"type":"object","properties":{"value":{"type":"number","minimum":0.10000000000000000001,"maximum":0.1}}}),
         %({"type":"object","properties":{"value":{"type":"integer","minimum":9223372036854775807,"maximum":9223372036854775806}}}),
         %({"type":"object","properties":{"value":{"type":"array","items":{"type":"string","enum":["a"]},"minItems":2,"maxItems":1}}}),
         %({"type":"object","properties":{"value":{"type":"string","type":"boolean"}}}),
@@ -8052,6 +8072,145 @@ describe "ACP v2 form elicitation schemas" do
       props["titledArray"].items.not_nil!.any_of.not_nil!.first.const_value.should eq("a")
       props["titledArray"].min_items.should eq(0_u64)
       raw.field("properties").not_nil!.field("titledArray").not_nil!.field("minItems").not_nil!.json.should eq("-0")
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v2 form elicitation replies" do
+  it "validates submitted fields against the original schema" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      value = ACP::Protocol::CreateElicitationResult.accept
+      client.on_create_elicitation = ->(input : ACP::Protocol::CreateElicitationParams) do
+        # A renderer can edit its presentation without changing the wire contract.
+        input.requested_schema.not_nil!.properties.clear
+        input.requested_schema_raw = nil
+        value
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      schema = %({"type":"object","required":["choice"],"properties":{"choice":{"type":"string","enum":["one","two"]},"text":{"type":"string","minLength":1,"maxLength":1},"integer":{"type":"integer","minimum":0,"maximum":9223372036854775806},"number":{"type":"number","minimum":0.5,"maximum":1.5},"check":{"type":"boolean"},"items":{"type":"array","items":{"anyOf":[{"const":"a","title":"Alpha"},{"const":"b","title":"Beta"}]},"minItems":1,"maxItems":2}}})
+      good = {"choice" => "one", "text" => "한", "integer" => 9223372036854775806_i64, "number" => 1.25, "check" => false, "items" => ["a", "b"]} of String => ACP::Protocol::ElicitationContentValue
+      bad = {
+        good.reject("choice"),
+        good.merge({"choice" => "three"}),
+        good.merge({"text" => "두자"}),
+        good.merge({"integer" => 1.5}),
+        good.merge({"integer" => 9223372036854775807_i64}),
+        good.merge({"number" => 2_i64}),
+        good.merge({"check" => "false"}),
+        good.merge({"items" => [] of String}),
+        good.merge({"items" => ["unoffered"]}),
+        good.merge({"unrequested" => "answer"}),
+      }
+      bad.each_with_index do |content, index|
+        value = ACP::Protocol::CreateElicitationResult.accept(content)
+        feed.puts form_elicitation_frame(index, schema)
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(index)
+        reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      end
+      value = ACP::Protocol::CreateElicitationResult.accept(good)
+      feed.puts form_elicitation_frame(100, schema)
+      JSON.parse(outgoing.gets.not_nil!)["result"]["content"].should eq(JSON.parse(good.to_json))
+
+      value = ACP::Protocol::CreateElicitationResult.accept
+      feed.puts form_elicitation_frame(101, schema)
+      JSON.parse(outgoing.gets.not_nil!)["result"].should eq(JSON.parse(%({"action":"accept"})))
+
+      value = ACP::Protocol::CreateElicitationResult.new("decline", good)
+      feed.puts form_elicitation_frame(102, schema)
+      JSON.parse(outgoing.gets.not_nil!)["result"].should eq(JSON.parse(%({"action":"decline"})))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "sends exact custom content and validates standard fields in the same reply" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      result = ACP::Protocol::CreateElicitationResult.accept
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { result }
+      initialize_wide_v2(client, feed, outgoing)
+      schema = %({"type":"object","required":["choice"],"properties":{"choice":{"type":"string","oneOf":[{"const":"one","title":"One"}]},"number":{"type":"number","minimum":0.1,"maximum":0.2},"negative":{"type":"number","minimum":-0.2,"maximum":-0.1},"extension":{"type":"_custom"}}})
+      opaque = %({"count":18446744073709551615,"precise":0.12345678901234567890,"values":[true,null,{"extra":[]} ]})
+      content = ACP::Protocol::RawJson.from_json(%({"choice":"one","number":10e-2,"negative":-0.200,"extension":#{opaque}}))
+      result = ACP::Protocol::CreateElicitationResult.accept_raw(content)
+      result.content_raw.should eq(content)
+      feed.puts form_elicitation_frame(1, schema)
+      reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+      reply.field("id").not_nil!.as_i64?.should eq(1)
+      reply.field("result").not_nil!.field("content").not_nil!.json.should eq(content.json)
+
+      {
+        %({"choice":"two","extension":#{opaque}}),
+        %({"choice":"one","choice":"one","extension":#{opaque}}),
+        %({"choice":null}),
+        %({"choice":"one","number":0.09999999999999999999}),
+        %({"choice":"one","number":0.20000000000000000001}),
+        %({"choice":"one","negative":-0.20000000000000000001}),
+        %({"choice":"one","negative":-0.09999999999999999999}),
+      }.each_with_index do |invalid, index|
+        result = ACP::Protocol::CreateElicitationResult.accept_raw(ACP::Protocol::RawJson.from_json(invalid))
+        feed.puts form_elicitation_frame(index + 2, schema)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      end
+
+      result = ACP::Protocol::CreateElicitationResult.accept_raw(ACP::Protocol::RawJson.from_json("null"))
+      feed.puts form_elicitation_frame(100, schema)
+      JSON.parse(outgoing.gets.not_nil!)["result"].should eq(JSON.parse(%({"action":"accept","content":null})))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects lossy projection by a transport using the default send_wire" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"}})
+    client = request_elicitation_client(transport)
+    content = ACP::Protocol::RawJson.from_json("{}")
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+      ACP::Protocol::CreateElicitationResult.accept_raw(content)
+    end
+    client.initialize_connection
+    next_answer(transport)["method"].as_s.should eq("initialize")
+    schema = %({"type":"object","properties":{"extra":{"type":"_future"}}})
+    {
+      %({"extra":18446744073709551615}),
+      %({"extra":0.12345678901234567890}),
+      %({"extra":{"same":1,"same":2}}),
+      %({"extra":10e-1}),
+    }.each_with_index do |inexact, index|
+      content = ACP::Protocol::RawJson.from_json(inexact)
+      transport.inject_raw(form_elicitation_frame(index, schema))
+      reply = next_answer(transport)
+      reply["id"].as_i.should eq(index)
+      reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    end
+    content = ACP::Protocol::RawJson.from_json(%({"extra":[1,0.5,true]}))
+    transport.inject_raw(form_elicitation_frame(100, schema))
+    next_answer(transport)["result"]["content"].should eq(content.to_json_any)
+    client.closed?.should be_false
+  ensure
+    client.try(&.close)
+  end
+
+  it "answers when the exact result exceeds the nesting limit only after framing" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      nested = "[" * 510 + "0" + "]" * 510
+      content = ACP::Protocol::RawJson.from_json(%({"extra":#{nested}}))
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+        ACP::Protocol::CreateElicitationResult.accept_raw(content)
+      end
+      initialize_wide_v2(client, feed, outgoing)
+      feed.puts form_elicitation_frame(12, %({"type":"object","properties":{"extra":{"type":"_future"}}}))
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].as_i.should eq(12)
+      reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      reply["error"]["message"].as_s.should eq("Cannot send exact elicitation content")
+      client.closed?.should be_false
     ensure
       client.try(&.close)
     end

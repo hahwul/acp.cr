@@ -125,6 +125,16 @@ Use `requested_schema_raw` for the original schema with exact values.
 Render text fields with unrecognized `format` values as plain text.
 [ACP v2 Form Mode](https://agentclientprotocol.com/protocol/v2/elicitation#form-mode)
 
+For accepted forms, the client checks submitted field names, required
+fields, types, choices, and bounds against the original schema. A callback
+that supplies invalid form content causes a JSON-RPC `-32603` reply to the
+Agent.
+For a declared custom field, use `CreateElicitationResult.accept_raw`
+with a `Protocol::RawJson` content object. Stdio sends those values with
+their exact JSON numbers. Custom transports can override `send_wire`
+to support exact frames.
+[ACP v2 Elicitation Responses](https://agentclientprotocol.com/protocol/v2/elicitation#responses)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable

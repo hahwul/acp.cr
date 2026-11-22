@@ -322,7 +322,7 @@ module ACP
               deliver_update(Wire::SessionUpdateParams.new(input.session_id, update))
             end
           end
-          -> { handle_v2_permission(input, offered_ids) }
+          -> { handle_v2_permission(input, offered_ids).as(AgentReply) }
         rescue JSON::ParseException
           invalid_permission("Malformed ACP v2 permission request")
         end
@@ -339,7 +339,7 @@ module ACP
           handler_error_reply(ex, "Permission handler error: #{ex.message}")
         end
 
-        private def route_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : JSON::Any | Protocol::JsonRpcErrorObject
+        private def route_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : AgentReply
           if Protocol::ExtensionMethod.extension?(method_name)
             return super
           end

@@ -49,6 +49,9 @@ module ACP
     # support values outside the range of JSON::Any.
     def send_wire(frame : Protocol::WireFrame, &preflight : -> Nil) : Nil
       message = JSON.parse(frame.json).as_h
+      if frame.require_exact? && Protocol::WireFrame.encode(message) != frame.json
+        raise ProtocolError.new("This transport cannot preserve the exact JSON frame")
+      end
       send_checked(message, &preflight)
     rescue JSON::Error
       raise ProtocolError.new("This transport cannot send an exact JSON frame")

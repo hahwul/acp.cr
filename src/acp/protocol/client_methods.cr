@@ -707,7 +707,17 @@ module ACP
 
       # The submitted values; only meaningful for an accepted form
       # elicitation, normally omitted for URL mode.
-      property content : Hash(String, ElicitationContentValue)?
+      getter content : Hash(String, ElicitationContentValue)?
+
+      # Exact content set by `accept_raw`.
+      @[JSON::Field(ignore: true)]
+      getter content_raw : RawJson?
+
+      # Replaces submitted content with standard typed values.
+      def content=(value : Hash(String, ElicitationContentValue)?) : Hash(String, ElicitationContentValue)?
+        @content_raw = nil
+        @content = value
+      end
 
       # Extension metadata.
       @[JSON::Field(key: "_meta")]
@@ -723,6 +733,25 @@ module ACP
       # The user submitted the form or consented to open the URL.
       def self.accept(content : Hash(String, ElicitationContentValue)? = nil) : CreateElicitationResult
         new("accept", content)
+      end
+
+      # Accepts an ACP v2 form with exact JSON content, including custom values.
+      # Content must be an object or null.
+      def self.accept_raw(content : RawJson) : CreateElicitationResult
+        raise ArgumentError.new("Elicitation content must be an object or null") unless content.object? || content.null?
+
+        result = new("accept")
+        result.content_raw = content
+        result
+      end
+
+      protected def content_raw=(@content_raw : RawJson)
+      end
+
+      protected def on_to_json(json : JSON::Builder) : Nil
+        if raw = @content_raw
+          json.field("content", raw)
+        end
       end
 
       # The user explicitly declined.

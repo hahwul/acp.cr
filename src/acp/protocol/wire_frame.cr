@@ -205,8 +205,11 @@ module ACP
       # Whether the result or error is outside the range of JSON::Any.
       getter? wide_response = false
 
+      # Whether a transport must preserve the outbound JSON exactly.
+      getter? require_exact : Bool
+
       # Checks the complete JSON syntax and extracts the raw params.
-      def initialize(@json : String, *, @exact_params : Bool = false)
+      def initialize(@json : String, *, @exact_params : Bool = false, @require_exact : Bool = false)
         pull = JSON::PullParser.new(@json)
         if pull.kind.begin_object?
           pull.read_object do |key|
