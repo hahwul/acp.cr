@@ -489,6 +489,7 @@ module ACP
       property name : String
 
       # The values in this group (required).
+      @[JSON::Field(converter: ::ACP::Protocol::DefaultContentList(::ACP::Protocol::ConfigOptionValue))]
       property options : Array(ConfigOptionValue)
 
       # Creates a named group with its selectable values.
@@ -530,12 +531,14 @@ module ACP
       property name : String
 
       # Optional description providing more details.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property description : String?
 
       # Optional semantic category to help Clients provide consistent UX.
       # Reserved categories: "mode", "model", "thought_level".
       # Names beginning with `_` are free for custom use.
       # See: https://agentclientprotocol.com/protocol/session-config-options#option-categories
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property category : String?
 
       # The type of input control (required): "select" or "boolean".
@@ -590,18 +593,24 @@ module ACP
         self.meta = meta
       end
 
-      # Populate the typed `options`/`groups` views from the raw wire array
-      # after JSON deserialization. A group element is identified by the
-      # presence of the `"group"` key (per `SessionConfigSelectGroup`).
+      # Populate the typed `options`/`groups` views from the raw wire array.
       def after_initialize : Nil
         return unless raw = @options_wire.try(&.raw.elements?)
 
-        if raw.any?(&.field("group"))
-          @groups = raw.compact_map { |item| ConfigOptionGroup.from_json(item.json) rescue nil }
-          @options = nil
-        else
+        # Malformed group entries must not shadow usable flat values.
+        groups = raw.compact_map do |item|
+          next unless item.field("group").try(&.as_s?) && item.field("options").try(&.array?)
+
+          ConfigOptionGroup.from_json(item.json)
+        rescue JSON::ParseException
+          nil
+        end
+        if groups.empty?
           @options = raw.compact_map { |item| ConfigOptionValue.from_json(item.json) rescue nil }
           @groups = nil
+        else
+          @groups = groups
+          @options = nil
         end
       end
 

@@ -7268,6 +7268,72 @@ describe "ACP v1 exact session modes" do
   end
 end
 
+describe "ACP v1 recoverable configuration options" do
+  it "keeps usable grouped choices through stdio and allows selecting them" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}}}}))
+      client.initialize_connection
+
+      metadata = %({"example.test/count":18446744073709551615})
+      values = %([false,{"value":"missing-name"},{"value":"fast","name":"Fast"},{"value":"large","name":"Large","_meta":#{metadata}}])
+      option = %({"id":"model","name":"Model","type":"select","currentValue":"fast","options":[{"group":"local","name":"Local","options":#{values}}]})
+      check_option = ->(options : Array(ACP::Protocol::ConfigOption)) do
+        choose = options.first
+        choose.groups.not_nil!.map(&.group).should eq(["local"])
+        choose.all_values.map(&.value).should eq(["fast", "large"])
+        choose.all_values.last.meta_raw.not_nil!.json.should eq(metadata)
+        choose.options_raw.not_nil!.first["options"].as_a.first.should eq(false)
+        nil
+      end
+
+      answer_identity_request(feed, outgoing, %({"configOptions":[#{option}]}))
+      check_option.call(client.session_options("/work").config_options.not_nil!)
+      answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":[#{option}]}))
+      check_option.call(client.session_new("/work").config_options.not_nil!)
+      check_option.call(client.session_config_options.not_nil!)
+
+      expect_raises(ArgumentError, /advertised value ID/) do
+        client.session_set_config_option("model", "missing-name")
+      end
+      changed = option.sub(%("currentValue":"fast"), %("currentValue":"large"))
+      answer_identity_request(feed, outgoing, %({"configOptions":[#{changed}]}))
+      result = client.session_set_config_option("model", "large")
+      check_option.call(result.config_options)
+      client.session_config_options.not_nil!.first.current_value.should eq("large")
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps selectors with malformed optional descriptions and categories" do
+    selector = %({"id":"model","name":"Model","description":false,"category":[],"type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast","description":false}]})
+    toggle = %({"id":"enabled","name":"Enabled","description":"Available","category":"_future","type":"boolean","currentValue":false})
+    result = ACP::Protocol::SessionOptionsResult.from_json(%({"configOptions":[#{selector},#{toggle}]}))
+    options = result.config_options.not_nil!
+    options.map(&.id).should eq(["model", "enabled"])
+    options[0].description.should be_nil
+    options[0].category.should be_nil
+    options[0].all_values.first.description.should be_nil
+    options[1].description.should eq("Available")
+    options[1].category.should eq("_future")
+    options[1].boolean_value.should be_false
+  end
+
+  it "keeps flat choices when other entries resemble malformed groups" do
+    entries = %([{"group":"bad","name":false,"options":[]},{"group":"bad-array","name":"Bad","options":false},{"value":"fast","name":"Fast","group":"extension"}])
+    option = ACP::Protocol::ConfigOption.from_json(%({"id":"model","name":"Model","currentValue":"fast","options":#{entries}}))
+    option.grouped?.should be_false
+    option.all_values.map(&.value).should eq(["fast"])
+  end
+
+  it "defaults a malformed group value list to empty when decoding a group directly" do
+    group = ACP::Protocol::ConfigOptionGroup.from_json(%({"group":"local","name":"Local","options":false}))
+    group.options.should be_empty
+  end
+end
+
 describe "ACP v1 exact configuration options" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
     it "keeps flat and grouped choices with a #{label} in extension metadata" do
