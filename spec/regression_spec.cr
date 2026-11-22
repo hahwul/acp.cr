@@ -8428,3 +8428,90 @@ describe "ACP v1 form submission validation" do
     end
   end
 end
+
+describe "ACP elicitation request parameters" do
+  it "requires a v1 scope and still accepts explicit null, integer, and string request IDs" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new)
+      client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+      calls = 0
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        calls += 1
+        ACP::Protocol::CreateElicitationResult.accept({"scope" => params.request_id.to_json} of String => ACP::Protocol::ElicitationContentValue)
+      end
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+        calls += 1
+        JSON.parse(%({"action":"decline"}))
+      end
+      schema = %({"properties":{"scope":{"type":"string"}}})
+      {true, false}.each do |typed|
+        client.on_create_elicitation = nil unless typed
+        { %("extra":true), %("sessionId":null), %("requestId":false), %("toolCallId":"tool") }.each_with_index do |scope, id|
+          feed.puts form_elicitation_frame(id, schema, scope: scope)
+          reply = JSON.parse(outgoing.gets.not_nil!)
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        end
+        calls.should eq(0)
+      end
+      client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+        params.tool_call_id.should be_nil
+        ACP::Protocol::CreateElicitationResult.accept({"scope" => params.request_id.to_json} of String => ACP::Protocol::ElicitationContentValue)
+      end
+      {"null", "23", %("parent")}.each_with_index do |parent, id|
+        feed.puts form_elicitation_frame(id + 100, schema, scope: %("requestId":#{parent}))
+        JSON.parse(outgoing.gets.not_nil!)["result"]["content"]["scope"].as_s.should eq(parent)
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  {1, 2}.each do |version|
+    it "checks the v#{version} URL before invoking either callback or reserving the elicitation ID" do
+      with_wide_stdio do |transport, feed, outgoing|
+        caps = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+        if version == 2
+          v2 = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(elicitation: caps))
+          client = v2
+          initialize_wide_v2(v2, feed, outgoing)
+        else
+          client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+        end
+        calls = 0
+        if client.is_a?(ACP::Client)
+          client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+            calls += 1
+            JSON.parse(%({"action":"accept"}))
+          end
+        end
+        handler = ->(params : ACP::Protocol::CreateElicitationParams) do
+          calls += 1
+          params.url.should eq("https://example.test/a%20b")
+          params.meta.should be_nil
+          params.tool_call_id.should be_nil
+          params.requested_schema.should be_nil
+          ACP::Protocol::CreateElicitationResult.accept
+        end
+        send_url = ->(id : Int32, url : String, extra : String) do
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"mode":"url","message":"Open","sessionId":"s","elicitationId":"one","url":#{url.to_json}#{extra}}})
+          JSON.parse(outgoing.gets.not_nil!)
+        end
+        client.on_create_elicitation = handler
+        {true, false}.each do |typed|
+          client.on_create_elicitation = nil unless typed
+          {"/relative", "https://example.test/%GG", "https://example.test/a b"}.each_with_index do |url, id|
+            reply = send_url.call(id, url, "")
+            reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+          end
+        end
+        calls.should eq(0)
+        client.on_create_elicitation = handler
+        reply = send_url.call(100, "https://example.test/a%20b", %q(,"_meta":false,"toolCallId":42,"requestedSchema":"irrelevant"))
+        reply["result"]["action"].as_s.should eq("accept")
+        calls.should eq(1)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+end

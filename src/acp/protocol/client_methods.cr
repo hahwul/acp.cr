@@ -695,6 +695,37 @@ module ACP
       end
     end
 
+    # :nodoc:
+    # Projects the wire envelope independently of mode-specific schema fields.
+    module ElicitationRequest
+      def self.from_json(json : String) : CreateElicitationParams
+        fields = RawJson.new(JSON::PullParser.new(json)).members?
+        raise JSON::ParseException.new("Elicitation params must be an object", 1, 1) unless fields
+
+        from_fields(fields)
+      end
+
+      def self.from_fields(fields : Hash(String, RawJson)) : CreateElicitationParams
+        mode = fields["mode"]?.try(&.as_s?)
+        message = fields["message"]?.try(&.as_s?)
+        raise JSON::ParseException.new("Elicitation requires a mode and message", 1, 1) unless mode && message
+
+        session = fields["sessionId"]?.try(&.as_s?)
+        request = fields["requestId"]?
+        meta = fields["_meta"]?
+        if meta && meta.object?
+          metadata = PreservedJson.new(meta, project_object_members: true, project_nested_objects: true).value.try(&.as_h?)
+        end
+        CreateElicitationParams.new(mode, message,
+          session_id: session,
+          tool_call_id: (fields["toolCallId"]?.try(&.as_s?) if session),
+          request_id: request.try(&.as_i64?) || request.try(&.as_s?),
+          elicitation_id: (fields["elicitationId"]?.try(&.as_s?) if mode == "url"),
+          url: (fields["url"]?.try(&.as_s?) if mode == "url"),
+          meta: metadata)
+      end
+    end
+
     # A submitted form value (`ElicitationContentValue`).
     alias ElicitationContentValue = String | Int64 | Float64 | Bool | Array(String)
 

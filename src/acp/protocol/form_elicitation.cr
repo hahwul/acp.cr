@@ -7,32 +7,13 @@ module ACP
     # :nodoc:
     # Decodes form requests and checks submissions against the original schema.
     module FormElicitation
-      def self.from_v2_json(json : String) : CreateElicitationParams
+      def self.from_json(json : String, *, v2 : Bool) : CreateElicitationParams
         fields = RawJson.new(JSON::PullParser.new(json)).members? || invalid("Form elicitation params must be an object")
         form = fields["requestedSchema"]? || invalid("Missing form schema")
-        message = fields["message"]?.try(&.as_s?) || invalid("Invalid elicitation message")
-        request = fields["requestId"]?
-        input = CreateElicitationParams.new("form", message,
-          session_id: fields["sessionId"]?.try(&.as_s?),
-          tool_call_id: fields["toolCallId"]?.try(&.as_s?),
-          request_id: request.try(&.as_i64?) || request.try(&.as_s?),
-          requested_schema: schema(form, v2: true), meta: metadata(fields["_meta"]?))
+        input = ElicitationRequest.from_fields(fields)
+        input.requested_schema = schema(form, v2: v2)
         input.requested_schema_raw = form
         input
-      end
-
-      def self.from_v1_json(json : String) : CreateElicitationParams
-        source = RawJson.from_json(json)
-        form = source.field("requestedSchema") || invalid("Missing form schema")
-        envelope = source.without_field("requestedSchema").without_field("_meta")
-        if (tool_call = envelope.field("toolCallId")) && !tool_call.null? && !tool_call.as_s?
-          envelope = envelope.without_field("toolCallId")
-        end
-        request = CreateElicitationParams.from_json(envelope.json)
-        request.requested_schema = schema(form, v2: false)
-        request.requested_schema_raw = form
-        request.meta = metadata(source.field("_meta"))
-        request
       end
 
       def self.validate_submission(form : RawJson, content : RawJson?, *, v2 : Bool) : Nil
