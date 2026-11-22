@@ -1897,6 +1897,67 @@ describe "ACP MCP configuration logging" do
 end
 
 describe "ACP typed content chunks" do
+  it "delivers all v1 message chunks with exact content and envelope metadata" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      notes = Channel(ACP::Protocol::SessionUpdateParams).new(3)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        notes.send(note)
+        nil
+      end
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      fragments = {"agent_message_chunk", "user_message_chunk", "agent_thought_chunk"}
+      fragments.each do |kind|
+        id = kind == "agent_thought_chunk" ? "false" : %("message-1")
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","_meta":#{metadata},"update":{"sessionUpdate":#{kind.to_json},"messageId":#{id},"content":{"type":"text","text":#{kind.to_json},"_meta":#{metadata}},"_meta":#{metadata}}}})
+      end
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      fragments.each do |kind|
+        select
+        when note = notes.receive
+          note.meta_raw.not_nil!.json.should eq(metadata)
+          case update = note.update
+          when ACP::Protocol::AgentMessageChunkUpdate, ACP::Protocol::UserMessageChunkUpdate, ACP::Protocol::AgentThoughtChunkUpdate
+            update.text.should eq(kind)
+            chunk = update.to_content_chunk.not_nil!
+            chunk.text.should eq(kind)
+            chunk.meta_raw.not_nil!.json.should eq(metadata)
+            chunk.content.as(ACP::Protocol::TextContentBlock).meta_raw.not_nil!.json.should eq(metadata)
+            chunk.message_id.should eq(kind == "agent_thought_chunk" ? nil : "message-1")
+            chunk.meta.not_nil!["example.test/edited"] = JSON::Any.new(true)
+            update.meta.not_nil!["example.test/edited"].should eq(true)
+            chunk.meta_raw.not_nil!.field("example.test/count").not_nil!.json.should eq("18446744073709551615")
+          else
+            fail "expected a message chunk update"
+          end
+        else
+          fail "#{kind} did not reach the typed callback"
+        end
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "preserves exact content when the JSON::Any view is edited" do
+    type = ACP::Protocol::AgentMessageChunkUpdate
+    metadata = %({"example.test/count":18446744073709551615})
+    update = type.from_json(%({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"before","_meta":#{metadata}}}))
+    update.content.as_h["text"] = JSON::Any.new("after")
+    update.content_raw.field("_meta").not_nil!.json.should eq(metadata)
+    update.text.should eq("after")
+    type.from_json(update.to_json).should eq(update)
+
+    update.content = JSON::Any.new("legacy text")
+    update.content_raw.as_s?.should eq("legacy text")
+    update.text.should eq("legacy text")
+    update.to_content_chunk.should be_nil
+  end
+
   it "retains the message ID and metadata from each message update" do
     %w(agent_message_chunk user_message_chunk agent_thought_chunk).each do |kind|
       wire = %({"sessionUpdate":#{kind.to_json},"messageId":"message-1","content":{"type":"text","text":"chunk"},"_meta":{"example.test/chunk":true}})

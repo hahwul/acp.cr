@@ -193,7 +193,9 @@ Session updates are received via the `on_update` callback. They form a discrimin
 
 Use `to_content_chunk` on agent message, user message, and thought updates
 to convert their payload to a typed `ContentChunk` with the same
-`message_id` and extension metadata.
+`message_id` and extension metadata. Use `content_raw` and `meta_raw` to
+read exact v1 content and chunk metadata when values exceed `JSON::Any`.
+The `content` accessor provides the editable `JSON::Any` view.
 
 `CompactionUpdate`'s `summary`, `error` and `_meta` are patches. If a field is omitted, the stored value stays as it is. If it is `null`, the value is cleared. Both cases read as nil, so use `summary_present?` / `error_present?` / `meta_present?` to tell them apart.
 
