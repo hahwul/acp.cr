@@ -345,6 +345,9 @@ module ACP
       include ToolCallCollections
       include LosslessMetadata
 
+      private DEFAULT_KIND   = "other"
+      private DEFAULT_STATUS = "pending"
+
       # Unique identifier for this tool call within the session (required).
       @[JSON::Field(key: "toolCallId")]
       property tool_call_id : String
@@ -355,23 +358,26 @@ module ACP
       # The category of tool being invoked. Helps clients choose icons.
       # Values: read, edit, delete, move, search, execute, think, fetch,
       #         switch_mode, other
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property kind : String?
 
       # Current execution status: pending, in_progress, completed, failed.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property status : String?
 
       # The name of the tool being invoked (non-standard, backward compat).
-      @[JSON::Field(key: "toolName")]
+      @[JSON::Field(key: "toolName", converter: ::ACP::Protocol::OptionalCapabilityString)]
       property tool_name : String?
 
       # The name of the tool being invoked.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property name : String?
 
       def initialize(
         @tool_call_id : String,
         @title : String,
         @kind : String? = nil,
-        @status : String? = "pending",
+        @status : String? = DEFAULT_STATUS,
         content : Array(JSON::Any)? = nil,
         locations : Array(JSON::Any)? = nil,
         raw_input : JSON::Any? = nil,
@@ -388,8 +394,24 @@ module ACP
         self.meta = meta
       end
 
-      def_equals_and_hash @session_update, @tool_call_id, @title, @kind, @status, content_comparison, locations_comparison,
+      # Decodes unambiguous tool call identity and display fields.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull,
+          required: {"sessionUpdate", "toolCallId", "title"},
+          optional: {"kind", "status", "name", "toolName", "content", "locations", "rawInput", "rawOutput", "_meta"}))
+      end
+
+      private def after_initialize : Nil
+        @kind ||= DEFAULT_KIND
+        @status ||= DEFAULT_STATUS
+      end
+
+      def_equals_and_hash @session_update, @tool_call_id, @title, display_comparison, content_comparison, locations_comparison,
         raw_input_comparison, raw_output_comparison, @tool_name, @name, metadata_comparison
+
+      protected def display_comparison
+        {@kind || DEFAULT_KIND, @status || DEFAULT_STATUS}
+      end
 
       protected def metadata_comparison
         meta_raw.try { |wire| wire.to_json_any? || wire }
@@ -416,15 +438,19 @@ module ACP
       property tool_call_id : String
 
       # Update the execution status.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property status : String?
 
       # Update the human-readable title.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property title : String?
 
       # Update the tool kind.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property kind : String?
 
       # Update the tool name.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property name : String?
 
       def initialize(
@@ -445,6 +471,13 @@ module ACP
         self.raw_input = raw_input
         self.raw_output = raw_output
         self.meta = meta
+      end
+
+      # Decodes unambiguous tool call identity and display fields.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull,
+          required: {"sessionUpdate", "toolCallId"},
+          optional: {"title", "kind", "status", "name", "content", "locations", "rawInput", "rawOutput", "_meta"}))
       end
 
       def_equals_and_hash @session_update, @tool_call_id, @status, @title, @kind, content_comparison, locations_comparison,
