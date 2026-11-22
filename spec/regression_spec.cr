@@ -6168,3 +6168,118 @@ describe "ACP v2 session-directed message patches" do
     end
   end
 end
+describe "ACP v2 session detail patch decoding" do
+  it "keeps the usable session info fields and preserves valid timestamp strings" do
+    wire = %({"sessionUpdate":"session_info_update","title":[],"updatedAt":"2026-11-22T00:00:00.123456789012345+09:00"})
+    info = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::SessionInfoUpdate)
+    info.title_present?.should be_false
+    info.updated_at.should eq("2026-11-22T00:00:00.123456789012345+09:00")
+
+    [
+      "2026-02-29T00:00:00Z",
+      "2026-11-22T00:00:00Zjunk",
+      "2026-11-22T00:00:00+24:00",
+      "2016-12-31T12:00:60Z",
+      "2016-12-30T23:59:60Z",
+      "yesterday",
+    ].each do |time|
+      update = ACP::Protocol::V2::SessionInfoUpdate.from_json(%({"title":"Kept","updatedAt":#{time.to_json}}))
+      update.title.should eq("Kept")
+      update.updated_at_present?.should be_false
+    end
+    ["2016-12-31T23:59:60Z", "2017-01-01T08:59:60+09:00", "1990-12-31T15:59:60-08:00", "0000-02-29T00:00:00Z"].each do |time|
+      ACP::Protocol::V2::SessionInfoUpdate.from_json(%({"updatedAt":#{time.to_json}})).updated_at.should eq(time)
+    end
+    clear = ACP::Protocol::V2::SessionInfoUpdate.from_json(%({"updatedAt":null}))
+    clear.updated_at_present?.should be_true
+    clear.updated_at.should be_nil
+  end
+
+  it "omits invalid costs while preserving counts and distinguishing an explicit clear" do
+    base = %("sessionUpdate":"usage_update","used":18446744073709551615,"size":200)
+    [
+      "[]",
+      %({"currency":"USD"}),
+      %({"amount":"1","currency":"USD"}),
+      %({"amount":1e999,"currency":"USD"}),
+      %({"amount":1.0,"amount":2.0,"currency":"USD"}),
+    ].each do |cost|
+      usage = ACP::Protocol::V2::SessionUpdate.from_json(%({#{base},"cost":#{cost}})).typed.as(ACP::Protocol::V2::UsageUpdate)
+      usage.used.should eq(UInt64::MAX)
+      usage.size.should eq(200_u64)
+      usage.cost_present?.should be_false
+      ACP::Protocol::RawJson.from_json(usage.to_json).field("cost").should be_nil
+    end
+
+    clear = ACP::Protocol::V2::UsageUpdate.from_json(%({#{base},"cost":null}))
+    clear.cost_present?.should be_true
+    clear.cost.should be_nil
+    ["10000000000000000000", "1e19"].each do |amount|
+      usage = ACP::Protocol::V2::UsageUpdate.from_json(%({#{base},"cost":{"amount":#{amount},"currency":"credits"}}))
+      usage.cost.not_nil!.amount.should eq(1e19)
+    end
+    expect_raises(JSON::ParseException) { ACP::Protocol::V2::UsageUpdate.from_json(%({#{base},"used":1})) }
+  end
+
+  it "keeps valid compaction fields and rejects unusable streamed summaries" do
+    base = %("sessionUpdate":"compaction_update","compactionId":"c")
+    update = ACP::Protocol::V2::SessionUpdate.from_json(%({#{base},"status":false,"error":"Kept","summary":[false,{"type":"text","text":"Summary"}]})).typed.as(ACP::Protocol::V2::CompactionUpdate)
+    update.status_present?.should be_false
+    update.error.should eq("Kept")
+    update.summary_raw.not_nil!.elements?.not_nil!.size.should eq(2)
+    update.typed_summary.not_nil!.map(&.type).should eq(["text"])
+
+    bad = %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":false})
+    expect_raises(JSON::ParseException) { ACP::Protocol::CompactionSummaryChunkUpdate.from_v2_json(bad) }
+    ACP::Protocol::V2::SessionUpdate.from_json(bad).typed.should be_nil
+  end
+
+  it "preserves exact session details and clear semantics over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "s")
+      send_update = ->(wire : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":#{wire}}})
+        next_exact_session_update(observed)
+      end
+
+      info = send_update.call(%({"sessionUpdate":"session_info_update","title":null,"title":"Ambiguous","updatedAt":"2026-11-22T09:00:00+09:00"}))
+      patch = info.update.typed.as(ACP::Protocol::V2::SessionInfoUpdate)
+      patch.title_present?.should be_false
+      patch.updated_at.should eq("2026-11-22T09:00:00+09:00")
+      ACP::Protocol::WireFrame.repeated_members(info.raw.field("update").not_nil!.json, "title").should contain("title")
+
+      cost = %({"amount":0.1234567890123456789,"currency":"credits","_meta":{"example.test/value":18446744073709551615}})
+      usage = send_update.call(%({"sessionUpdate":"usage_update","used":3,"size":10,"cost":#{cost}}))
+      usage.raw.field("update").not_nil!.field("cost").not_nil!.json.should eq(cost)
+      usage.update.typed.as(ACP::Protocol::V2::UsageUpdate).cost.not_nil!.meta_raw.not_nil!.field("example.test/value").not_nil!.json.should eq(UInt64::MAX.to_s)
+      invalid = send_update.call(%({"sessionUpdate":"usage_update","used":3,"used":4,"size":10,"cost":null}))
+      invalid.update.typed.should be_nil
+
+      chunk = send_update.call(%({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"_future","value":0.9876543210987654321}}))
+      block = chunk.update.typed.as(ACP::Protocol::CompactionSummaryChunkUpdate).content_block.as(ACP::Protocol::UnknownContentBlock)
+      block.raw.field("value").not_nil!.json.should eq("0.9876543210987654321")
+      malformed = send_update.call(%({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":false,"content":{"type":"text","text":"ambiguous"}}))
+      malformed.update.typed.should be_nil
+      ACP::Protocol::WireFrame.repeated_members(malformed.raw.field("update").not_nil!.json, "content").should contain("content")
+
+      patch = send_update.call(%({"sessionUpdate":"compaction_update","compactionId":"c","status":"future","error":{},"summary":[],"summary":null})).update.typed.as(ACP::Protocol::V2::CompactionUpdate)
+      patch.status.should eq("future")
+      patch.error_present?.should be_false
+      patch.summary_present?.should be_false
+      clear = send_update.call(%({"sessionUpdate":"compaction_update","compactionId":"c","status":null,"error":null,"summary":null})).update.typed.as(ACP::Protocol::V2::CompactionUpdate)
+      clear.status_present?.should be_true
+      clear.error_present?.should be_true
+      clear.summary_present?.should be_true
+      clear.summary.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end

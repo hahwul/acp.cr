@@ -315,8 +315,12 @@ received content and its exact values.
 [ACP v2 session-directed messages](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-directed-messages)
 
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
-fields from clears and apply metadata patches by key. Compaction summary
-chunks reuse their wire-compatible `ACP::Protocol` types.
+fields from clears and apply metadata patches by key. Invalid optional fields
+leave the previous value in place. `updated_at` preserves the reported RFC 3339
+string. A compaction summary patch replaces or clears accumulated content, and
+usable summary chunks append in receive order. Raw notifications retain the
+original values.
+[ACP v2 compaction and usage](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-compaction)
 
 V2 notices use `NoticeUpdate` and expose the original severity, the
 required title, and optional description. They are live events with no

@@ -64,7 +64,9 @@ module ACP
         include JSON::Serializable
 
         # :nodoc:
-        WIRE_FIELDS = {"sessionUpdate", "messageId", "senderSessionId", "recipientSessionId", "senderMessageId", "recipientMessageId", "content", "_meta"}
+        REQUIRED_FIELDS = {"sessionUpdate", "messageId"}
+        OPTIONAL_FIELDS = {"senderSessionId", "recipientSessionId", "senderMessageId", "recipientMessageId", "content", "_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -90,14 +92,7 @@ module ACP
 
         # Reads a patch for an unambiguous local message and omits conflicting optional fields.
         def self.new(pull : JSON::PullParser) : self
-          location = pull.location
-          wire = RawJson.new(pull)
-          repeated = WireFrame.repeated_members(wire.json, *WIRE_FIELDS)
-          if repeated.includes?("sessionUpdate") || repeated.includes?("messageId")
-            raise JSON::ParseException.new("Ambiguous ACP session message ID or type", *location)
-          end
-          repeated.each { |field| wire = wire.without_field(field) }
-          previous_def(JSON::PullParser.new(wire.json))
+          previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
         end
       end
 
@@ -105,25 +100,88 @@ module ACP
       struct SessionInfoUpdate
         include JSON::Serializable
 
+        # :nodoc:
+        REQUIRED_FIELDS = {"sessionUpdate"}
+        OPTIONAL_FIELDS = {"title", "updatedAt", "_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
+
+        # :nodoc:
+        module OptionalTimestamp
+          def self.from_json(pull : JSON::PullParser) : String?
+            return unless value = OptionalCapabilityString.from_json(pull)
+            return unless value.ascii_only?
+
+            date = /\A([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9]|60)(?:\.[0-9]++)?([Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])\z/.match(value)
+            return unless date
+
+            # Crystal starts at year one. Year 400 has the same calendar as year zero.
+            year = date[1].to_i
+            year = 400 if year.zero?
+            local_minute = Time.utc(year, date[2].to_i, date[3].to_i, date[4].to_i, date[5].to_i)
+            return if date[6] == "60" && !leap_second_position?(local_minute, date[7])
+
+            value
+          rescue ArgumentError
+            nil
+          end
+
+          private def self.leap_second_position?(local_minute : Time, zone : String) : Bool
+            offset = 0
+            if zone.bytesize > 1
+              offset = zone[1, 2].to_i * 60 + zone[4, 2].to_i
+              offset = -offset if zone.starts_with?('-')
+            end
+            utc_minute = local_minute - offset.minutes
+            utc_minute.hour == 23 && utc_minute.minute == 59 && (utc_minute + 1.minute).day == 1
+          end
+        end
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "session_info_update"
 
         # Title and RFC 3339 timestamp, with a key-level metadata patch.
-        PatchFields.define({
-          title:      {String, "title"},
-          updated_at: {String, "updatedAt"},
+        PatchFields.tolerant({
+          title:      {String, "title", OptionalCapabilityString},
+          updated_at: {String, "updatedAt", OptionalTimestamp},
         })
         include LosslessMetadataPatch
 
         # Creates a session info update. Assign fields to patch them.
         def initialize
         end
+
+        # Reads a session info patch with unambiguous fields.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
+        end
       end
 
       # Reports context-window usage and optionally updates cumulative cost.
       struct UsageUpdate
         include JSON::Serializable
+
+        # :nodoc:
+        REQUIRED_FIELDS = {"sessionUpdate", "used", "size"}
+        OPTIONAL_FIELDS = {"cost", "_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
+
+        # :nodoc:
+        module OptionalCost
+          def self.from_json(pull : JSON::PullParser) : Protocol::Cost?
+            wire = RawJson.new(RawJson.patch_parser(pull, required: {"amount", "currency"}, optional: {"_meta"}))
+            return unless token = wire.field("amount")
+
+            kind = JSON::PullParser.new(token.json).kind
+            return unless kind.int? || kind.float?
+            return unless (amount = token.json.to_f64?) && amount.finite?
+
+            # JSON's integer decoder is narrower than the Float64 cost field.
+            Protocol::Cost.from_json(wire.with_field("amount", RawJson.new(JSON::Any.new(amount))).json)
+          rescue JSON::ParseException
+            nil
+          end
+        end
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -136,19 +194,29 @@ module ACP
         property size : UInt64
 
         # Cumulative cost and key-level metadata patches.
-        PatchFields.define({
-          cost: {Protocol::Cost, "cost"},
+        PatchFields.tolerant({
+          cost: {Protocol::Cost, "cost", OptionalCost},
         })
         include LosslessMetadataPatch
 
         # Creates a usage update for the reported token counts.
         def initialize(@used : UInt64, @size : UInt64)
         end
+
+        # Reads required counts and an optional cumulative cost patch.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
+        end
       end
 
       # Creates or patches a context compaction entry on the session timeline.
       struct CompactionUpdate
         include JSON::Serializable
+
+        # :nodoc:
+        REQUIRED_FIELDS = {"sessionUpdate", "compactionId"}
+        OPTIONAL_FIELDS = {"status", "summary", "error", "_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
@@ -159,9 +227,9 @@ module ACP
         getter compaction_id : String
 
         # Clearing status resets it to in_progress. The summary is open content.
-        PatchFields.define({
-          status: {String, "status"},
-          error:  {String, "error"},
+        PatchFields.tolerant({
+          status: {String, "status", OptionalCapabilityString},
+          error:  {String, "error", OptionalCapabilityString},
         })
         ContentArrayPatch.define(summary)
         include LosslessMetadataPatch
@@ -173,6 +241,11 @@ module ACP
 
         # Creates an update for the specified compaction entry.
         def initialize(@compaction_id : String)
+        end
+
+        # Reads a patch for an unambiguous compaction ID.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
         end
       end
 

@@ -26,6 +26,19 @@ module ACP
         new(WireFrame.read_raw(pull))
       end
 
+      # Reads a patch with unambiguous required fields and drops repeated optional fields.
+      # :nodoc:
+      def self.patch_parser(pull : JSON::PullParser, *, required : Tuple, optional : Tuple) : JSON::PullParser
+        location = pull.location
+        wire = new(pull)
+        repeated = WireFrame.repeated_members(wire.json, *required, *optional)
+        if required.any? { |field| repeated.includes?(field) }
+          raise JSON::ParseException.new("Ambiguous JSON patch fields: #{repeated.join(", ")}", *location)
+        end
+        repeated.each { |field| wire = wire.without_field(field) }
+        JSON::PullParser.new(wire.json)
+      end
+
       # Whether the value is a JSON object.
       def object? : Bool
         @json.starts_with?('{')
