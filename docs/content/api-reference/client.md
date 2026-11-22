@@ -137,6 +137,15 @@ their exact JSON numbers. Custom transports can override `send_wire`
 to support exact frames.
 [ACP v2 Elicitation Responses](https://agentclientprotocol.com/protocol/v2/elicitation#responses)
 
+ACP v1 form callbacks also validate submissions against the original schema.
+The schema type and property map retain their v1 defaults. V1 `date-time`
+uses ISO 8601. V1 `pattern` translates common ECMAScript character classes and
+Unicode escapes and uses Crystal's regex engine with bounded matching.
+A v1 client using its generic Agent request callback can
+return the same form replies as a typed handler. Invalid submissions return
+`-32603` to the Agent.
+[ACP v1 Elicitation](https://agentclientprotocol.com/protocol/v1/elicitation)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable

@@ -35,7 +35,7 @@ require "uri"
 require "./protocol/types"
 require "./protocol/session_fork"
 require "./protocol/client_methods"
-require "./protocol/v2/elicitation"
+require "./protocol/form_elicitation"
 require "./transport"
 require "./mcp_provider"
 require "./errors"
@@ -2546,10 +2546,13 @@ module ACP
       method = Protocol::ClientMethod::ELICITATION_CREATE
       return JSON.parse(Protocol::CreateElicitationResult.cancel.to_json) if entry.cancellation.try(&.closed?)
 
-      v2_form = v2_wire? && params.try(&.as_h?).try(&.["mode"]?).try(&.as_s?) == "form"
+      form = params.try(&.as_h?).try(&.["mode"]?).try(&.as_s?) == "form"
       unless handler = @on_create_elicitation
-        if v2_form
-          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Client cannot render an elicitation form")
+        if form
+          if v2_wire?
+            return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Client cannot render an elicitation form")
+          end
+          return handle_v1_raw_form(params, params_json)
         end
         return handle_unknown_agent_request(method, params, (params_json unless raw_notification_representable?(params_json)))
       end
@@ -2561,8 +2564,8 @@ module ACP
           handler.call(input)
         end
       end
-      if v2_form
-        handle_v2_form_elicitation(params_json || params.to_json, callback)
+      if form
+        handle_form_elicitation(params_json || params.to_json, callback)
       else
         typed_callback = ->(input : Protocol::CreateElicitationParams) do
           result = callback.call(input)
@@ -2573,18 +2576,24 @@ module ACP
       end
     end
 
-    private def handle_v2_form_elicitation(json : String, handler : CreateElicitationHandler) : AgentReply
+    private def handle_form_elicitation(json : String, handler : CreateElicitationHandler) : AgentReply
+      v2 = v2_wire?
       input = begin
-        Protocol::V2::FormElicitationRequest.from_json(json)
+        if v2
+          Protocol::FormElicitation.from_v2_json(json)
+        else
+          Protocol::FormElicitation.from_v1_json(json)
+        end
       rescue ex : JSON::Error
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid form elicitation: #{ex.message}")
       end
       schema = input.requested_schema_raw.not_nil!
       result = handler.call(input)
+      raise ArgumentError.new("Exact elicitation content requires an ACP v2 form") if !v2 && result.content_raw
       result.content = nil if result.action.in?("decline", "cancel")
       if result.action == "accept"
         content = result.content_raw || result.content.try { |value| Protocol::RawJson.from_json(Protocol::WireFrame.encode(value)) }
-        Protocol::V2::FormElicitationRequest.validate_submission(schema, content)
+        Protocol::FormElicitation.validate_submission(schema, content, v2: v2)
       end
 
       wire = Protocol::WireFrame.encode(result)
@@ -2595,6 +2604,36 @@ module ACP
       end
     rescue ex
       ClientLog.error { "Error handling elicitation form: #{ex.class}" }
+      handler_error_reply(ex, "Invalid elicitation form result: #{ex.message}")
+    end
+
+    private def handle_v1_raw_form(params : JSON::Any?, params_json : String?) : AgentReply
+      method = Protocol::ClientMethod::ELICITATION_CREATE
+      return handle_unknown_agent_request(method, params, nil) unless @on_agent_request
+      return unrepresentable_request_params unless raw_notification_representable?(params_json)
+
+      schema = begin
+        request = Protocol::FormElicitation.from_v1_json(params_json || params.to_json)
+        request.requested_schema_raw.not_nil!
+      rescue ex : JSON::Error
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid form elicitation: #{ex.message}")
+      end
+      result = handle_unknown_agent_request(method, params, nil)
+      return result unless result.is_a?(JSON::Any)
+
+      fields = result.as_h?
+      action = fields.try(&.["action"]?).try(&.as_s?)
+      raise ArgumentError.new("Form reply requires a string action") unless fields && action
+
+      if action == "accept"
+        Protocol::FormElicitation.validate_submission(schema, fields["content"]?.try { |value| Protocol::RawJson.new(value) }, v2: false)
+      elsif action.in?("decline", "cancel")
+        reply_fields = fields.dup
+        reply_fields.delete("content")
+        return JSON::Any.new(reply_fields)
+      end
+      result
+    rescue ex
       handler_error_reply(ex, "Invalid elicitation form result: #{ex.message}")
     end
 
