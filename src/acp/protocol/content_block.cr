@@ -47,34 +47,40 @@ module ACP
       end
     end
 
-    # Checks the syntax of an absolute wire URI.
+    # Checks an absolute URI that will be used by the content API.
     # :nodoc:
     def self.absolute_uri?(value : String) : Bool
+      absolute_uri_syntax?(value) && URI.parse(value).absolute?
+    rescue URI::Error | OverflowError
+      false
+    end
+
+    # Checks the RFC 3986 absolute URI syntax without coercing port digits.
+    # :nodoc:
+    def self.absolute_uri_syntax?(value : String) : Bool
       return false unless value.ascii_only?
       return false if value.count('#') > 1 || value.matches?(%r{[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]|%(?![A-Fa-f0-9]{2})})
-      return false unless URI.parse(value).absolute?
-
-      _, _, remainder = value.partition(':')
+      scheme, colon, remainder = value.partition(':')
+      return false unless !colon.empty? && scheme.matches?(/\A[A-Za-z][A-Za-z0-9+.-]*\z/)
       unless hierarchy = remainder.lchop?("//")
         return !remainder.matches?(/[\[\]]/)
       end
 
-      # Check delimiters before URI.parse's percent decoding of host and user info.
+      # Validate raw delimiters and ports without decoding or integer conversion.
       authority, _, resource = hierarchy.partition(%r{[/?#]})
       return false if resource.matches?(/[\[\]]/)
 
       user, separator, host_port = authority.partition('@')
       host_port = authority if separator.empty?
       return false if (!separator.empty? && user.matches?(/[\[\]]/)) || host_port.includes?('@')
-      return true unless host_port.matches?(/[\[\]]/)
+      return host_port.matches?(/\A[^:]*(?::[0-9]*)?\z/) unless host_port.matches?(/[\[\]]/)
 
       match = /\A\[([^\[\]]+)\](?::[0-9]*)?\z/.match(host_port)
       return false unless match
 
       literal = match[1]
-      Socket::IPAddress.valid_v6?(literal) || literal.matches?(%r{\A[vV][A-Fa-f0-9]+\.[A-Za-z0-9._~!$&'()*+,;=:\-]+\z})
-    rescue URI::Error | OverflowError
-      false
+      (!literal.includes?('%') && Socket::IPAddress.valid_v6?(literal)) ||
+        literal.matches?(%r{\A[vV][A-Fa-f0-9]+\.[A-Za-z0-9._~!$&'()*+,;=:\-]+\z})
     end
 
     # :nodoc:

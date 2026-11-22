@@ -1,4 +1,5 @@
 require "../client_methods"
+require "./elicitation_string_format"
 
 module ACP
   module Protocol
@@ -47,7 +48,7 @@ module ACP
             return false if (options = field.enum_values) && !options.includes?(text)
             return false if (options = field.one_of) && !options.any? { |option| option.const_value == text }
 
-            true
+            ElicitationStringFormat.valid?(field.format, text)
           when "integer"
             input = value.as_i64?
             !input.nil? && within_bounds?(input, field.minimum, field.maximum)

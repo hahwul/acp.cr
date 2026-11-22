@@ -126,9 +126,11 @@ Render text fields with unrecognized `format` values as plain text.
 [ACP v2 Form Mode](https://agentclientprotocol.com/protocol/v2/elicitation#form-mode)
 
 For accepted forms, the client checks submitted field names, required
-fields, types, choices, and bounds against the original schema. A callback
-that supplies invalid form content causes a JSON-RPC `-32603` reply to the
-Agent.
+fields, types, choices, bounds, and the `email`, `uri`, `date`, and
+`date-time` string formats against the original schema. Format checks
+are local syntax checks. Leap seconds are checked for possible placement at
+the end of a UTC month. A callback that supplies invalid form content
+causes a JSON-RPC `-32603` reply to the Agent.
 For a declared custom field, use `CreateElicitationResult.accept_raw`
 with a `Protocol::RawJson` content object. Stdio sends those values with
 their exact JSON numbers. Custom transports can override `send_wire`
