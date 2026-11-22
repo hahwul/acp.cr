@@ -201,6 +201,41 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Session compaction
+
+Feed each connection's v2 session updates to a `CompactionStore` in
+receive order. Compaction updates are available without a v2 capability.
+
+```crystal
+compactions = ACP::V2::CompactionStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  compactions.observe(update)
+  nil
+end
+
+snapshot = compactions.compaction(session_id, compaction_id)
+```
+
+`compactions(session_id)` lists retained entries in first-seen order. The
+snapshot has the current status, error, and exact `meta_raw`. Read
+`summary_raw` for exact blocks or `summary_blocks` for usable display
+blocks. A summary replacement clears or replaces the accumulated blocks.
+Chunk metadata stays on the incoming `CompactionSummaryChunkUpdate`.
+
+The store defaults to 128 compactions across sessions and 256 KiB per entry.
+Adjust `compaction_limit:` and `compaction_byte_limit:`, or pass `nil` to
+remove a limit. `summary_incomplete?` flags a gap caused by the byte limit.
+An accepted summary replacement clears the gap and resumes appending chunks.
+When a replacement summary exceeds the budget, the store can still retain
+the status, error, and metadata that fit. An update can also retain a new
+status and summary with earlier details if the new error or metadata
+would exceed the budget.
+
+Use `forget_session` to discard one session's compactions. To reconstruct a
+view from full replay, collect its updates in a fresh store and use each
+session's own `replay_complete` to track delivery. The configured limits
+apply to replayed updates. [ACP v2 session compaction](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-compaction) · [Replay completion](https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete)
+
 ### Transcript messages
 
 Feed each connection's v2 session updates to a `MessageStore` in receive

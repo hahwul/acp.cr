@@ -10545,3 +10545,125 @@ describe ACP::V2::MessageStore do
     unlimited.message("main", kind, "m").not_nil!.recipient_session_id.should eq(excess)
   end
 end
+
+describe ACP::V2::CompactionStore do
+  it "retains streamed compactions and replaces replayed summaries in first-seen order" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::CompactionStore.new
+    observed = Channel(Bool).new(8)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(note))
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+
+    transport.update("s", %({"sessionUpdate":"compaction_summary_chunk","compactionId":"first","content":{"type":"text","text":"Earlier"},"_meta":{"chunk":true}}))
+    take_v2_frame(observed).should be_true
+    original = store.compaction("s", "first").not_nil!
+    original.status.should eq("in_progress")
+    original.meta_raw.should be_nil
+    transport.update("s", %({"sessionUpdate":"compaction_update","compactionId":"second","status":"completed"}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"compaction_update","compactionId":"first","status":"completed","_meta":{"original":true}}))
+    take_v2_frame(observed).should be_true
+    store.compaction("s", "first").not_nil!.summary_blocks.first.as(ACP::Protocol::TextContentBlock).text.should eq("Earlier")
+
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"compaction_update","compactionId":"first","summary":[]}))
+        transport.update("s", %({"sessionUpdate":"compaction_summary_chunk","compactionId":"first","content":{"type":"text","text":"Replayed"}}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}))
+      end
+      nil
+    end
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    take_v2_frame(observed).should be_true
+    take_v2_frame(observed).should be_true
+    take_v2_frame(observed).should be_false
+    take_v2_frame(observed).should be_false
+    entries = store.compactions("s")
+    entries.map(&.compaction_id).should eq(["first", "second"])
+    entries.first.status.should eq("completed")
+    entries.first.summary_blocks.map(&.as(ACP::Protocol::TextContentBlock).text).should eq(["Replayed"])
+    entries.first.meta_raw.not_nil!.field("original").not_nil!.json.should eq("true")
+  ensure
+    client.try(&.close)
+  end
+
+  it "preserves open values, distinguishes patches from clears, and isolates sessions" do
+    store = ACP::V2::CompactionStore.new
+    observe = ->(sid : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{sid.to_json},"update":#{fields}})))
+    end
+    wide = UInt64::MAX.to_s
+    observe.call("main", %({"sessionUpdate":"compaction_update","compactionId":"c","status":"_paused","error":"waiting","summary":[{"type":"_diagram","nodes":#{wide}}],"_meta":{"wide":#{wide},"drop":1}})).should be_true
+    observe.call("other", %({"sessionUpdate":"compaction_update","compactionId":"c","status":"cancelled"})).should be_true
+    observe.call("main", %({"sessionUpdate":"compaction_update","compactionId":"c","status":false,"error":{},"summary":true,"_meta":{"drop":null,"new":true}})).should be_true
+    snapshot = store.compaction("main", "c").not_nil!
+    snapshot.session_id.should eq("main")
+    snapshot.status.should eq("_paused")
+    snapshot.error.should eq("waiting")
+    snapshot.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.meta_raw.not_nil!.field("new").not_nil!.json.should eq("true")
+    snapshot.meta_raw.not_nil!.field("drop").should be_nil
+    snapshot.summary_blocks.first.as(ACP::Protocol::UnknownContentBlock).raw.field("nodes").not_nil!.json.should eq(wide)
+    snapshot.summary_raw.clear
+    store.compaction("main", "c").not_nil!.summary_raw.size.should eq(1)
+
+    observe.call("main", %({"sessionUpdate":"compaction_update","compactionId":"c","status":null,"error":null,"summary":null,"_meta":null})).should be_true
+    cleared = store.compaction("main", "c").not_nil!
+    cleared.status.should eq("in_progress")
+    cleared.error.should be_nil
+    cleared.meta_raw.should be_nil
+    cleared.summary_raw.should be_empty
+    store.forget_session("main").should be_true
+    store.forget_session("main").should be_false
+    store.compaction("main", "c").should be_nil
+    store.compaction("other", "c").not_nil!.status.should eq("cancelled")
+  end
+
+  it "retains fitting status and prevents summary splicing after a budget gap" do
+    store = ACP::V2::CompactionStore.new(compaction_limit: 1, compaction_byte_limit: 160)
+    observe = ->(fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"main","update":#{fields}})))
+    end
+    chunk = %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"text","text":"Start"}})
+    suffix = %({"sessionUpdate":"compaction_summary_chunk","compactionId":"c","content":{"type":"text","text":" suffix"}})
+    observe.call(chunk).should be_true
+    observe.call(%({"sessionUpdate":"compaction_update","compactionId":"other"})).should be_false
+    excess = "x" * 200
+    observe.call(%({"sessionUpdate":"compaction_update","compactionId":"c","status":"cancelled","error":#{excess.to_json}})).should be_true
+    status_only = store.compaction("main", "c").not_nil!
+    status_only.status.should eq("cancelled")
+    status_only.error.should be_nil
+    status_only.summary_blocks.first.as(ACP::Protocol::TextContentBlock).text.should eq("Start")
+    observe.call(%({"sessionUpdate":"compaction_update","compactionId":"c","status":"failed","error":"interrupted","summary":[{"type":"text","text":#{excess.to_json}}]})).should be_true
+    observe.call(suffix).should be_false
+    gap = store.compaction("main", "c").not_nil!
+    gap.status.should eq("failed")
+    gap.error.should eq("interrupted")
+    gap.summary_incomplete?.should be_true
+    gap.summary_raw.should be_empty
+
+    observe.call(%({"sessionUpdate":"compaction_update","compactionId":"c","summary":[{"type":"text","text":"Replacement"}]})).should be_true
+    observe.call(suffix).should be_true
+    restored = store.compaction("main", "c").not_nil!
+    restored.summary_incomplete?.should be_false
+    restored.summary_blocks.map(&.as(ACP::Protocol::TextContentBlock).text).should eq(["Replacement", " suffix"])
+
+    observe.call(%({"sessionUpdate":"compaction_update","compactionId":"c","status":"completed","error":#{excess.to_json},"summary":[]})).should be_true
+    cleared = store.compaction("main", "c").not_nil!
+    cleared.status.should eq("completed")
+    cleared.error.should eq("interrupted")
+    cleared.summary_raw.should be_empty
+
+    tight_store = ACP::V2::CompactionStore.new(compaction_byte_limit: 11)
+    tight_store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"main","update":{"sessionUpdate":"compaction_update","compactionId":"c","status":"failed"}}))).should be_true
+    tight_store.compaction("main", "c").not_nil!.status.should eq("failed")
+  end
+end
