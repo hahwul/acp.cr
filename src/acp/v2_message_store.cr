@@ -1,4 +1,5 @@
 require "./protocol/v2/updates"
+require "./v2_transcript_content"
 
 module ACP
   module V2
@@ -24,9 +25,6 @@ module ACP
       # Exact message-scoped metadata after applying patches.
       getter meta_raw : Protocol::RawJson?
 
-      # Whether the store exceeded its budget for part of this message's content.
-      getter? content_incomplete : Bool
-
       # Sender session, when reported for a session-directed message.
       getter sender_session_id : String?
 
@@ -40,14 +38,27 @@ module ACP
       getter recipient_message_id : String?
 
       # :nodoc:
-      def initialize(@session_id, @kind, @message_id, @content_base : Protocol::RawJson?, @chunks : Array(Protocol::RawJson),
-                     @meta_raw, @content_incomplete, @sender_session_id, @recipient_session_id, @sender_message_id, @recipient_message_id)
+      def initialize(@session_id, @kind, @message_id, @content : TranscriptContent::Snapshot,
+                     @meta_raw, @sender_session_id, @recipient_session_id, @sender_message_id, @recipient_message_id)
+      end
+
+      # :nodoc:
+      def initialize(session_id : String, kind : MessageKind, message_id : String,
+                     content_base : Protocol::RawJson?, chunks : Array(Protocol::RawJson), meta_raw : Protocol::RawJson?,
+                     content_incomplete : Bool, sender_session_id : String?, recipient_session_id : String?,
+                     sender_message_id : String?, recipient_message_id : String?)
+        initialize(session_id, kind, message_id, TranscriptContent::Snapshot.new(content_base, chunks, content_incomplete),
+          meta_raw, sender_session_id, recipient_session_id, sender_message_id, recipient_message_id)
+      end
+
+      # Whether the store exceeded its budget for part of this message's content.
+      def content_incomplete? : Bool
+        @content.incomplete?
       end
 
       # Returns exact content blocks in receive order.
       def content_raw : Array(Protocol::RawJson)
-        blocks = @content_base.try(&.elements?) || [] of Protocol::RawJson
-        blocks.concat(@chunks)
+        @content.blocks
       end
 
       # Decodes the usable display blocks, including custom and future types.
@@ -95,17 +106,11 @@ module ACP
       end
 
       private class Entry
-        @content_base : Protocol::RawJson?
-        @chunks = [] of Protocol::RawJson
-        @content_bytes = 0_i64
-        @content_incomplete = false
+        @content = TranscriptContent.new
         @field_bytes : Int64
         @identity_bytes : Int64
         @meta_raw : Protocol::RawJson?
         @links = Links.new
-
-        # Reserve storage for the raw block's string and the array's element capacity.
-        private CHUNK_OVERHEAD = instance_sizeof(String) + 2 * sizeof(Protocol::RawJson) + 1
 
         def initialize(@session_id : String, @kind : MessageKind, @message_id : String, @byte_limit : Int32?)
           @identity_bytes = @session_id.bytesize.to_i64 + @message_id.bytesize
@@ -119,33 +124,20 @@ module ACP
 
           replacement = patch.content_present?
           content = patch.content_raw if replacement
-          content = nil if content.try(&.json) == "[]"
-          content_bytes = replacement ? (content.try(&.json.bytesize.to_i64) || 0_i64) : @content_bytes
+          content_bytes = replacement ? TranscriptContent.replacement_bytesize(content) : @content.bytesize
           # A fitting replacement supersedes earlier content even when new links or metadata are too large.
           if (limit = @byte_limit) && field_bytes + content_bytes > limit
             return false unless replacement
-            return mark_content_gap(clear: true) if @field_bytes + content_bytes > limit
           else
             @links = links
             @meta_raw = metadata
             @field_bytes = field_bytes
           end
-          replace_content(content, content_bytes) if replacement
-          true
+          replacement ? @content.replace(content, content_room) : true
         end
 
         def apply(chunk : Wire::MessageChunkUpdate) : Bool
-          return false if @content_incomplete
-
-          block = chunk.content_raw
-          content_bytes = @content_bytes + block.json.bytesize.to_i64 + CHUNK_OVERHEAD
-          if (limit = @byte_limit) && @field_bytes + content_bytes > limit
-            return mark_content_gap(clear: false)
-          end
-
-          @chunks << block
-          @content_bytes = content_bytes
-          true
+          @content.append(chunk.content_raw, content_room)
         end
 
         def fits_identity? : Bool
@@ -153,25 +145,12 @@ module ACP
         end
 
         def snapshot : MessageSnapshot
-          MessageSnapshot.new(@session_id, @kind, @message_id, @content_base, @chunks.dup, @meta_raw, @content_incomplete,
+          MessageSnapshot.new(@session_id, @kind, @message_id, @content.snapshot, @meta_raw,
             @links.sender_session_id, @links.recipient_session_id, @links.sender_message_id, @links.recipient_message_id)
         end
 
-        private def mark_content_gap(*, clear : Bool) : Bool
-          changed = !@content_incomplete
-          if clear && @content_bytes > 0
-            replace_content(nil, 0_i64)
-            changed = true
-          end
-          @content_incomplete = true
-          changed
-        end
-
-        private def replace_content(base : Protocol::RawJson?, bytes : Int64) : Nil
-          @content_base = base
-          @chunks = [] of Protocol::RawJson
-          @content_bytes = bytes
-          @content_incomplete = false
+        private def content_room : Int64?
+          @byte_limit.try { |limit| limit.to_i64 - @field_bytes }
         end
       end
 
