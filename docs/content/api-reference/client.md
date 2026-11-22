@@ -98,7 +98,8 @@ Return `RequestPermissionResult.selected(option_id)` for an option from the
 request or `RequestPermissionResult.cancelled` when no option was chosen.
 An invalid result or selection returns JSON-RPC `-32603` to the Agent.
 Over stdio, repeated permission option fields return `-32602` before the
-callback runs. Custom and future ACP v2 outcome objects pass through unchanged.
+callback runs. Set `outcome_raw` for a custom or future outcome with exact JSON
+and `meta_raw` for exact metadata on the result.
 [ACP v2 Permissions](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
 `on_elicitation_complete` fires once for each accepted URL elicitation on the
@@ -825,8 +826,9 @@ The tool call exposes `raw_input_raw`, `raw_output_raw`, `content_raw`, and
 `locations_raw` for values that need exact JSON. Its `meta_raw` accessor also
 preserves exact extension values, as do those on the request and its options.
 A selected ID must appear in the Agent's original options. Invalid results or
-selections return JSON-RPC `-32603`. Over stdio, repeated permission option
-fields return `-32602` before the callback runs.
+selections return JSON-RPC `-32603`. Set `meta_raw` for exact metadata on the
+result or `outcome_raw` for an exact decision object. Over stdio, repeated
+permission option fields return `-32602` before the callback runs.
 
 With `on_request_permission` unset, `on_agent_request` handles representable
 permission requests and returns the JSON form of the same result. Without a

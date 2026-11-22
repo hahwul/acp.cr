@@ -8585,6 +8585,64 @@ describe "ACP cancellation request identities" do
 end
 
 describe "Permission result validation" do
+  it "round-trips exact metadata on the result and selected outcome" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    outcome = %({"outcome":"selected","optionId":"deny","_meta":#{metadata}})
+    result = ACP::Protocol::RequestPermissionResult.from_json(%({"outcome":#{outcome},"_meta":#{metadata}}))
+    result.selected_option_id.should eq("deny")
+    wire = ACP::Protocol::RawJson.from_json(result.to_json)
+    wire.field("outcome").not_nil!.json.should eq(outcome)
+    wire.field("_meta").not_nil!.json.should eq(metadata)
+  end
+
+  {1, 2}.each do |version|
+    it "sends exact v#{version} outcomes while checking the original offer" do
+      with_wide_stdio do |transport, feed, outgoing|
+        number = "18446744073709551615"
+        decimal = "0.123456789012345678901"
+        metadata = %({"example.test/count":#{number},"example.test/ratio":#{decimal}})
+        result = ACP::Protocol::RequestPermissionResult.cancelled
+        if version == 1
+          v1 = ACP::Client.new(transport)
+          v1.request_timeout = 2.0
+          answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+          v1.initialize_connection
+          v1.on_request_permission = ->(_params : ACP::Protocol::RequestPermissionParams) { result }
+        else
+          v2 = ACP::V2::Client.new(transport)
+          v2.request_timeout = 2.0
+          initialize_wide_v2(v2, feed, outgoing)
+          v2.on_request_permission = ->(_params : ACP::Protocol::V2::RequestPermissionParams) { result }
+        end
+
+        option = %([{"optionId":"deny","name":"Deny","kind":"reject_once"}])
+        details = version == 1 ? %({"sessionId":"s","toolCall":{"toolCallId":"tool"},"options":#{option}}) : %({"sessionId":"s","title":"Review","options":#{option}})
+        result.meta_raw = ACP::Protocol::RawJson.from_json(metadata)
+        {
+          %({"outcome":"selected","optionId":"deny","_meta":#{metadata}})        => true,
+          %({"outcome":"selected","optionId":"unavailable","_meta":#{metadata}}) => false,
+          %({"outcome":"cancelled","_meta":#{metadata}})                         => true,
+          %({"outcome":"_deferred","extension":{"count":#{number}}})             => (version == 2),
+        }.each_with_index do |(decision, valid), id|
+          result.outcome_raw = ACP::Protocol::RawJson.from_json(decision)
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":#{details}})
+          reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          reply.field("id").not_nil!.as_i64?.should eq(id)
+          if valid
+            wire = reply.field("result").not_nil!
+            wire.field("outcome").not_nil!.json.should eq(decision)
+            wire.field("_meta").not_nil!.json.should eq(metadata)
+          else
+            reply.field("error").not_nil!.field("code").not_nil!.as_i64?.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+          end
+        end
+      ensure
+        v1.try(&.close)
+        v2.try(&.close)
+      end
+    end
+  end
+
   it "checks v1 selections against the original options before a raw handler can change them" do
     with_wide_stdio do |transport, feed, outgoing|
       client = ACP::Client.new(transport)

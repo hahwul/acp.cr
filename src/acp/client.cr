@@ -3310,7 +3310,7 @@ module ACP
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Permission request options must have unique IDs")
       end
       input.request_id = id
-      validate_permission_reply(JSON.parse(handler.call(input).to_json), offered_ids)
+      validate_permission_reply(encode_agent_result(handler.call(input)), offered_ids)
     rescue ex
       ClientLog.error { "Error handling permission request: #{ex.message}" }
       handler_error_reply(ex, "Permission handler error: #{ex.message}")
@@ -3367,17 +3367,24 @@ module ACP
     end
 
     # Match selected IDs against the options as received, before calling app code.
-    private def validate_permission_reply(reply : JSON::Any, offered_ids : Array(String), *, allow_future : Bool = false) : AgentReply
-      if outcome = reply.as_h?.try(&.["outcome"]?).try(&.as_h?)
-        case kind = outcome["outcome"]?.try(&.as_s?)
-        when "selected"
-          id = outcome["optionId"]?.try(&.as_s?)
-          return reply if id && offered_ids.count(id) == 1
-        when "cancelled"
-          return reply
-        else
-          return reply if allow_future && kind
-        end
+    private def validate_permission_reply(reply : JSON::Any | Protocol::RawJson, offered_ids : Array(String), *, allow_future : Bool = false) : AgentReply
+      if reply.is_a?(Protocol::RawJson)
+        outcome = reply.field("outcome", unique: true)
+        kind = outcome.try(&.field("outcome", unique: true)).try(&.as_s?)
+        id = outcome.try(&.field("optionId", unique: true)).try(&.as_s?) if kind == "selected"
+      else
+        outcome = reply.as_h?.try(&.[]?("outcome")).try(&.as_h?)
+        kind = outcome.try(&.[]?("outcome")).try(&.as_s?)
+        id = outcome.try(&.[]?("optionId")).try(&.as_s?) if kind == "selected"
+      end
+
+      case kind
+      when "selected"
+        return reply if id && offered_ids.count(id) == 1
+      when "cancelled"
+        return reply
+      else
+        return reply if allow_future && kind
       end
 
       Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Permission handler returned an invalid outcome or option ID")
