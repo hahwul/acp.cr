@@ -152,6 +152,14 @@ module ACP
       @root_states[session_id]?.try(&.attachment_order) || @v1_attachments[session_id]?
     end
 
+    def runtime_attachment_order(session_id : String) : UInt64?
+      attachment_order(ancestors(session_id).last)
+    end
+
+    def closed_runtime?(session_id : String) : Bool
+      @closed_roots.includes?(ancestors(session_id).last)
+    end
+
     # Returns the order for an attached session or an in-flight reattachment.
     def plan_update_order(session_id : String) : UInt64?
       root = ancestors(session_id).last

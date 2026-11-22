@@ -7035,6 +7035,11 @@ describe "ACP cancellation request identities" do
   it "cancels a v1 request despite malformed optional metadata over stdio" do
     with_wide_stdio do |transport, feed, outgoing|
       client = initialized_v1_terminal_client(transport, feed, outgoing)
+      client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+        ACP::Protocol::CreateTerminalResult.new("terminal")
+      end
+      feed.puts %({"jsonrpc":"2.0","id":16,"method":"terminal/create","params":{"sessionId":"root","command":"fixture"}})
+      JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].should eq("terminal")
       started = Channel(Nil).new(1)
       release = Channel(Nil).new(1)
       client.on_wait_for_terminal_exit = ->(_params : ACP::Protocol::WaitForTerminalExitParams) do
@@ -8720,10 +8725,10 @@ describe "ACP v1 resource callback capabilities" do
     entered = Channel(String).new(2)
     client.on_agent_request = ->(method : String, _params : JSON::Any) do
       entered.send(method)
-      JSON.parse(%({"output":"fixture","truncated":false}))
+      JSON.parse(%({"terminalId":"fixture"}))
     end
     offer = JSON.parse(%({"protocolVersion":1,"clientCapabilities":{"terminal":true}}))
-    terminal_request = %({"jsonrpc":"2.0","id":"terminal","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+    terminal_request = %({"jsonrpc":"2.0","id":"terminal","method":"terminal/create","params":{"sessionId":"s","command":"fixture"}})
     spawn do
       request = next_answer(transport)
       transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"].as_i64},"error":{"code":-32603,"message":"Initialization failed"}}))
@@ -8741,9 +8746,9 @@ describe "ACP v1 resource callback capabilities" do
     transport.inject_raw(terminal_request)
     transport.inject_raw(%({"jsonrpc":"2.0","id":"extension","method":"_test","params":{}}))
     replies = {next_answer(transport), next_answer(transport)}
-    replies.each { |reply| reply["result"]?.try(&.["output"].as_s?).should eq("fixture") }
+    replies.each { |reply| reply["result"]?.try(&.["terminalId"].as_s?).should eq("fixture") }
     methods = {next_permission_event(entered), next_permission_event(entered)}
-    methods.to_a.sort.should eq(["_test", "terminal/output"])
+    methods.to_a.sort.should eq(["_test", "terminal/create"])
     next_permission_event(finished)["protocolVersion"].as_i.should eq(1)
   ensure
     client.try(&.close)
@@ -8758,7 +8763,7 @@ describe "ACP v1 resource callback capabilities" do
     client = ACP::Client.new(transport)
     client.request_timeout = 2.0
     client.on_agent_request = ->(_method : String, _params : JSON::Any) do
-      JSON.parse(%({"output":"fixture","truncated":false}))
+      JSON.parse(%({"terminalId":"fixture"}))
     end
 
     offer = JSON.parse(%({"protocolVersion":1,"clientCapabilities":{"terminal":true}}))
@@ -8767,7 +8772,7 @@ describe "ACP v1 resource callback capabilities" do
     id = next_permission_event(transport.queued).as_i64
     offer["clientCapabilities"].as_h["terminal"] = JSON::Any.new(false)
 
-    request = %({"jsonrpc":"2.0","id":"term","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+    request = %({"jsonrpc":"2.0","id":"term","method":"terminal/create","params":{"sessionId":"s","command":"fixture"}})
     feed.puts request
     JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
 
@@ -8776,7 +8781,7 @@ describe "ACP v1 resource callback capabilities" do
     initialize["params"]["clientCapabilities"]["terminal"].as_bool.should be_true
     feed.puts build_init_response(id).delete('\n')
     feed.puts request
-    JSON.parse(outgoing.gets.not_nil!)["result"]["output"].as_s.should eq("fixture")
+    JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].as_s.should eq("fixture")
     next_permission_event(finished)["protocolVersion"].as_i.should eq(1)
   ensure
     transport.try(&.release.close)
@@ -8791,7 +8796,7 @@ describe "ACP v1 resource callback capabilities" do
       client = ACP::Client.new(transport)
       client.request_timeout = 2.0
       client.on_agent_request = ->(_method : String, _params : JSON::Any) do
-        JSON.parse(%({"output":"fixture","truncated":false}))
+        JSON.parse(%({"terminalId":"fixture"}))
       end
       finished = Channel(Bool).new(2)
       send_offer = ->(terminal : Bool) do
@@ -8820,10 +8825,10 @@ describe "ACP v1 resource callback capabilities" do
       outcomes = {next_permission_event(finished), next_permission_event(finished)}
       outcomes.count(true).should eq(second_fails ? 1 : 2)
 
-      transport.inject_raw(%({"jsonrpc":"2.0","id":"term","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":"term","method":"terminal/create","params":{"sessionId":"s","command":"fixture"}}))
       reply = next_answer(transport)
       if second_fails
-        reply["result"]["output"].as_s.should eq("fixture")
+        reply["result"]["terminalId"].as_s.should eq("fixture")
       else
         reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
       end
@@ -9016,9 +9021,9 @@ describe "ACP v1 resource reply metadata" do
         {"fs/write_text_file", %("path":"/fixture","content":"fixture")},
         {"terminal/create", %("command":"fixture")},
         {"terminal/output", %("terminalId":"t")},
-        {"terminal/release", %("terminalId":"t")},
         {"terminal/wait_for_exit", %("terminalId":"t")},
         {"terminal/kill", %("terminalId":"t")},
+        {"terminal/release", %("terminalId":"t")},
       }.each_with_index do |(method, params), id|
         feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":{"sessionId":"s",#{params}}})
         reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
@@ -9065,7 +9070,7 @@ describe "ACP v1 resource reply metadata" do
         nested = "[" * depth + "1" + "]" * depth
         metadata = %({"example.test/nested":#{nested}})
         client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
-          ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t","_meta":#{metadata}}))
+          ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t-#{id}","_meta":#{metadata}}))
         end
         feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"terminal/create","params":{"sessionId":"s","command":"fixture"}})
         reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
@@ -9150,8 +9155,8 @@ describe "ACP v1 generic resource replies" do
         {"terminal/create", create, {"{}", %({"terminalId":null})}, %({"terminalId":"t","note":true})},
         {"terminal/output", terminal, invalid_output, valid_output},
         {"terminal/wait_for_exit", terminal, { %({"exitCode":-1}), %({"signal":false}), "null" }, %({"exitCode":null,"signal":"fixture","detail":"accepted"})},
-        {"terminal/release", terminal, {"false"}, "{}"},
         {"terminal/kill", terminal, { %({"_meta":[]}) }, %({"_meta":null})},
+        {"terminal/release", terminal, {"false"}, "{}"},
       }
       cases.each_with_index do |(method, params, invalid, valid), id|
         invalid.each do |result|
@@ -9463,6 +9468,267 @@ describe "ACP v1 session workspaces" do
   ensure
     permission_release.try(&.close)
     transport.try(&.release.close)
+    client.try(&.close)
+  end
+end
+
+private class QueuedTerminalReplyTransport < ChoiceStateTransport
+  getter queued = Channel(Nil).new(1)
+  getter release = Channel(Nil).new(1)
+
+  def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
+    if message["id"]?.try(&.as_s?) == "queued-create"
+      @queued.send(nil)
+      @release.receive?
+    end
+    super(message, &preflight)
+  end
+end
+
+describe "ACP v1 terminal ownership" do
+  it "routes a terminal only to its owning session until release succeeds" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
+      called = [] of String
+      release_fails = true
+      client.on_agent_request = ->(method : String, _params : JSON::Any) do
+        called << method
+        case method
+        when "terminal/create"
+          JSON.parse(%({"terminalId":"fixture"}))
+        when "terminal/output"
+          JSON.parse(%({"output":"captured","truncated":false}))
+        when "terminal/wait_for_exit"
+          JSON.parse(%({"exitCode":0}))
+        when "terminal/release"
+          raise ACP::JsonRpcError.new(ACP::JsonRpcError::INTERNAL_ERROR, "Release failed") if release_fails
+          JSON.parse("{}")
+        else
+          JSON.parse("{}")
+        end
+      end
+      call = ->(id : Int32, method : String, session : String) do
+        field = method == "terminal/create" ? %("command":"fixture") : %("terminalId":"fixture")
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":{"sessionId":#{session.to_json},#{field}}})
+        answer = JSON.parse(outgoing.gets.not_nil!)
+        answer["id"].should eq(id)
+        answer
+      end
+
+      call.call(1, "terminal/output", "owner")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      call.call(2, "terminal/create", "owner")["result"]["terminalId"].should eq("fixture")
+      {"terminal/output", "terminal/wait_for_exit", "terminal/kill", "terminal/release"}.each_with_index do |method, i|
+        call.call(4 + i, method, "other")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      end
+      called.should eq(["terminal/create"])
+
+      call.call(8, "terminal/kill", "owner")["result"].should eq(JSON.parse("{}"))
+      call.call(9, "terminal/output", "owner")["result"]["output"].should eq("captured")
+      call.call(10, "terminal/wait_for_exit", "owner")["result"]["exitCode"].should eq(0)
+      call.call(11, "terminal/release", "owner")["error"]["message"].should eq("Release failed")
+      call.call(12, "terminal/output", "owner")["result"]["output"].should eq("captured")
+      release_fails = false
+      call.call(13, "terminal/release", "owner")["result"].should eq(JSON.parse("{}"))
+
+      total = called.size
+      {"terminal/output", "terminal/wait_for_exit", "terminal/kill", "terminal/release"}.each_with_index do |method, i|
+        call.call(14 + i, method, "owner")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      end
+      called.size.should eq(total)
+      call.call(18, "terminal/create", "other")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      client.forget_session("owner").should be_false
+      total = called.size
+      call.call(19, "terminal/create", "owner")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      called.size.should eq(total)
+    ensure
+      client.try(&.close)
+    end
+  end
+  it "publishes only sent creations and detaches generic replies before writing" do
+    transport = QueuedTerminalReplyTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
+    client.initialize_connection
+    next_answer(transport)
+    client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+      ACP::Protocol::CreateTerminalResult.from_json(%({"terminalId":"t","_meta":{"example.test/decimal":0.123456789012345678901}}))
+    end
+    client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+      ACP::Protocol::TerminalOutputResult.new("fixture")
+    end
+    send_create = ->(id : String, session : String) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"method":"terminal/create","params":{"sessionId":#{session.to_json},"command":"fixture"}}))
+    end
+    send_output = ->(id : Int32) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}}))
+      next_answer(transport)
+    end
+
+    send_create.call("exact", "s")
+    next_answer(transport)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    send_output.call(1)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+
+    client.on_create_terminal = nil
+    generic_reply = JSON.parse(%({"terminalId":"t"}))
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) { generic_reply }
+    send_create.call("queued-create", "s")
+    next_permission_event(transport.queued)
+    generic_reply.as_h["terminalId"] = JSON::Any.new("edited")
+    send_output.call(2)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    transport.release.send(nil)
+    next_answer(transport)["result"]["terminalId"].should eq("t")
+    send_output.call(3)["result"]["output"].should eq("fixture")
+    generic_reply.as_h["terminalId"] = JSON::Any.new("t")
+    generic_reply.as_h["_meta"] = JSON::Any.new({"example.test/value" => JSON::Any.new(Float64::NAN)})
+    send_create.call("duplicate", "other")
+    next_answer(transport)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    send_output.call(4)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+
+    generic_reply.as_h.delete("_meta")
+    generic_reply.as_h["terminalId"] = JSON::Any.new("queued-collision")
+    send_create.call("queued-create", "s")
+    next_permission_event(transport.queued)
+    send_create.call("second-create", "other")
+    next_answer(transport)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    transport.release.send(nil)
+    obsolete = next_answer(transport)
+    obsolete["id"].should eq("queued-create")
+    obsolete["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+  ensure
+    transport.try(&.release.close)
+    client.try(&.close)
+  end
+
+  {"typed", "generic"}.each do |kind|
+    it "keeps a completed #{kind} release retired when its reply cannot be encoded" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = initialized_v1_terminal_client(transport, feed, outgoing)
+        client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+          ACP::Protocol::CreateTerminalResult.new("t")
+        end
+        client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+          ACP::Protocol::TerminalOutputResult.new("fixture")
+        end
+        entered = Channel(Nil).new(1)
+        finish = Channel(Nil).new(1)
+        if kind == "typed"
+          client.on_release_terminal = ->(_params : ACP::Protocol::ReleaseTerminalParams) do
+            entered.send(nil)
+            finish.receive?
+            result = ACP::Protocol::ReleaseTerminalResult.from_json(%({"_meta":{"example.test/value":0}}))
+            result.meta.not_nil!["example.test/value"] = JSON::Any.new(Float64::NAN)
+            result
+          end
+        else
+          client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+            entered.send(nil)
+            finish.receive?
+            JSON::Any.new({"_meta" => JSON::Any.new({"example.test/value" => JSON::Any.new(Float64::NAN)})})
+          end
+        end
+        call = ->(id : Int32, method : String, field : String) do
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":{"sessionId":"s",#{field}}})
+        end
+        terminal = %("terminalId":"t")
+
+        call.call(1, "terminal/create", %("command":"fixture"))
+        JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].should eq("t")
+        call.call(2, "terminal/release", terminal)
+        next_permission_event(entered)
+        call.call(3, "terminal/release", terminal)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+        call.call(4, "terminal/output", terminal)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+        finish.send(nil)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        call.call(5, "terminal/output", terminal)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      ensure
+        finish.try(&.close)
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "retires existing and pending terminals when a session closes" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/close"] = %("result":{})
+    transport.replies["session/load"] = %("result":{})
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    entered = Channel(Nil).new(1)
+    finish = Channel(Nil).new(1)
+    callbacks = [] of String
+    client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+      callbacks << params.command
+      if params.command == "pending"
+        entered.send(nil)
+        finish.receive?
+      end
+      ACP::Protocol::CreateTerminalResult.new(params.command)
+    end
+    client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+      ACP::Protocol::TerminalOutputResult.new("fixture")
+    end
+    create = ->(id : Int32, command : String) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"terminal/create","params":{"sessionId":"root","command":#{command.to_json}}}))
+    end
+    output = ->(id : Int32, terminal : String) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id},"method":"terminal/output","params":{"sessionId":"root","terminalId":#{terminal.to_json}}}))
+      next_answer(transport)
+    end
+
+    create.call(21, "initial")
+    next_answer(transport)["result"]["terminalId"].should eq("initial")
+    create.call(22, "pending")
+    next_permission_event(entered)
+
+    client.session_close("root")
+    next_answer(transport)["method"].should eq("session/close")
+    output.call(23, "initial")["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    create.call(24, "closed")
+    next_answer(transport)["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    callbacks.should eq(["initial", "pending"])
+
+    client.session_load("root", "/work")
+    next_answer(transport)["method"].should eq("session/load")
+    create.call(25, "new")
+    next_answer(transport)["result"]["terminalId"].should eq("new")
+    finish.send(nil)
+    pending = next_answer(transport)
+    pending["id"].should eq(22)
+    pending["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    output.call(26, "pending")["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    output.call(27, "new")["result"]["output"].should eq("fixture")
+
+    transport.replies.delete("session/close")
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("root") }
+    close = next_answer(transport)
+    close["method"].should eq("session/close")
+    next_answer(transport)["method"].should eq("$/cancel_request")
+    client.request_timeout = 2.0
+    client.session_load("root", "/work")
+    next_answer(transport)["method"].should eq("session/load")
+    create.call(28, "newest")
+    next_answer(transport)["result"]["terminalId"].should eq("newest")
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+    choice_state_barrier(client, transport)
+    next_answer(transport)
+    output.call(29, "new")["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+    output.call(30, "newest")["result"]["output"].should eq("fixture")
+    client.forget_session("root").should be_true
+    output.call(31, "newest")["error"]["code"].should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+  ensure
+    finish.try(&.close)
     client.try(&.close)
   end
 end

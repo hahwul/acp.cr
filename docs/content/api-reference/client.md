@@ -827,6 +827,19 @@ empty successful acknowledgement. Malformed results return `-32603`.
 Additional result fields and explicit `ACP::JsonRpcError` replies pass
 through.
 
+Return a fresh `terminalId` for every successful `terminal/create` on the
+connection. Subsequent terminal requests must use that ID with its creating
+session. With a handler registered, unknown, retired, and other-session IDs
+return `-32002` before dispatch. A duplicate creation ID returns `-32603` and
+invalidates that ID for the connection.
+`terminal/kill` keeps the terminal available for output and exit status.
+Your release callback must stop the command if it is still running and free
+its resources. Successful release invalidates the ID. A confirmed session
+close or archive, or a local `forget_session`, also clears the retired
+attachment's terminal bindings. The application owns terminal processes and
+their cleanup, including cleanup when a creation reply cannot be delivered.
+[ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#releasing-terminals)
+
 | Handler | Params Type | Result Type | Description |
 |---------|-------------|-------------|-------------|
 | `on_read_text_file` | `ReadTextFileParams` | `ReadTextFileResult` | Handle `fs/read_text_file` |
