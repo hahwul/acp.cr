@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Validate JSON-RPC outcomes before applying session changes and preserve exact agent error data in `JsonRpcError#data_raw`.
 - Reject ambiguous session IDs in setup responses and ambiguous message IDs in v2 prompt acknowledgements while preserving exact extension metadata.
 - Reject ambiguous ACP v2 transcript message IDs and malformed streamed blocks while preserving the raw notifications.
 - Keep usable sessions and exact metadata when ACP v1 and v2 session list responses contain malformed entries.

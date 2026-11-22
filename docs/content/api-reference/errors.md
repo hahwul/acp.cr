@@ -51,7 +51,8 @@ rescue ex : ACP::TransportTimeoutError
 
 ### ACP::ProtocolError
 
-A protocol-level issue occurred (e.g., malformed message).
+A protocol-level issue occurred, such as a response without exactly one
+`result` or `error` field. A `null` result is valid at the JSON-RPC layer.
 
 ```crystal
 rescue ex : ACP::ProtocolError
@@ -78,7 +79,9 @@ rescue ex : ACP::InvalidStateError
 
 ### ACP::JsonRpcError
 
-A JSON-RPC 2.0 error was returned by the agent.
+A JSON-RPC 2.0 error was returned by the agent. Use `data_raw` to read the
+exact JSON data, including numbers outside the range of `JSON::Any`. The
+`data` accessor exposes representable values.
 
 Use `unsupported_protocol_version?` for the ACP v2 negotiation error
 `-32022`. Its data can be decoded as

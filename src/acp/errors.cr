@@ -3,6 +3,8 @@
 # Custom exceptions for ACP protocol errors, transport failures,
 # and JSON-RPC 2.0 standard error codes.
 
+require "./protocol/raw_json"
+
 module ACP
   # Base error for all ACP-related exceptions.
   class Error < Exception
@@ -93,14 +95,28 @@ module ACP
     # The integer error code.
     getter code : Int32
 
-    # Optional structured data attached to the error.
-    getter data : JSON::Any?
+    @data_wire : Protocol::PreservedJson?
 
-    # True when this error was decoded from a peer's error response (see
-    # `from_json_any`) rather than raised by local code.
+    # Optional error data representable as JSON::Any.
+    def data : JSON::Any?
+      @data_wire.try(&.value)
+    end
+
+    # Exact JSON data attached to the error, including wide numbers.
+    def data_raw : Protocol::RawJson?
+      @data_wire.try(&.raw)
+    end
+
+    # True when this error was decoded from a peer's structured error response.
     getter? received : Bool
 
-    def initialize(@code : Int32, message : String, @data : JSON::Any? = nil, @received : Bool = false)
+    # Creates a JSON-RPC error with optional data.
+    def initialize(@code : Int32, message : String, data : JSON::Any? = nil, @received : Bool = false)
+      @data_wire = data.try { |value| Protocol::PreservedJson.new(value) }
+      super(message)
+    end
+
+    private def initialize(@code : Int32, message : String, *, @data_wire : Protocol::PreservedJson?, @received : Bool)
       super(message)
     end
 
@@ -157,7 +173,7 @@ module ACP
     # Builds a human-readable representation including the code.
     def to_s(io : IO) : Nil
       io << "JsonRpcError(#{@code}): #{message}"
-      if d = @data
+      if d = data
         io << " data=#{d.to_json}"
       end
     end
@@ -166,12 +182,24 @@ module ACP
     # Expects the object to have "code" (int) and "message" (string) keys,
     # with an optional "data" key.
     def self.from_json_any(obj : JSON::Any) : JsonRpcError
-      # `ErrorCode` is an int32; an out-of-range code falls back like a
-      # missing one instead of raising `OverflowError` from `as_i`.
-      code = obj["code"]?.try(&.as_i64?).try { |c| c.to_i32 if (Int32::MIN..Int32::MAX).includes?(c) } || INTERNAL_ERROR
+      code = int32_code(obj["code"]?.try(&.as_i64?)) || INTERNAL_ERROR
       message = obj["message"]?.try(&.as_s?) || "Unknown error"
-      data = obj["data"]?
-      new(code, message, data, received: true)
+      new(code, message, obj["data"]?, received: true)
+    end
+
+    # Reads a structured error while retaining the exact data payload.
+    # :nodoc:
+    def self.from_wire(error : Protocol::RawJson) : self
+      code = int32_code(error.field("code").try(&.as_i64?)) || INTERNAL_ERROR
+      message = error.field("message").try(&.as_s?) || "Unknown error"
+      data = error.field("data").try { |wire| Protocol::PreservedJson.new(wire, project_object_members: true) }
+      new(code, message, data_wire: data, received: true)
+    end
+
+    # Returns the error code if it fits the ACP schema's signed 32-bit range.
+    # :nodoc:
+    def self.int32_code(code : Int64?) : Int32?
+      code.to_i32 if code && (Int32::MIN..Int32::MAX).includes?(code)
     end
   end
 

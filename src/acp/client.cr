@@ -1680,6 +1680,11 @@ module ACP
       raise raw_response if raw_response.is_a?(ProtocolError)
 
       if raw_response.is_a?(Protocol::WireFrame)
+        if error_json = Protocol::WireFrame.field(raw_response.json, "error")
+          error = Protocol::RawJson.from_json(error_json)
+          raise JsonRpcError.from_wire(error) if error.object?
+          raise JsonRpcError.new(JsonRpcError::INTERNAL_ERROR, error.as_s? || "Unknown error")
+        end
         raise ProtocolError.new("Response to '#{method}' contains a number outside the range of JSON::Any")
       end
 
@@ -2027,20 +2032,18 @@ module ACP
     # Handles a response to one of our pending requests.
     # Finds the corresponding channel by ID and sends the response into it.
     private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil, *, initialization_only : Bool = false) : Nil
-      if wire_frame
-        repeated = Protocol::WireFrame.repeated_members(wire_frame.json, *Protocol::WireFrame::RESPONSE_FIELDS)
-        if repeated.includes?("id")
-          ClientLog.warn { "Ignoring response with an ambiguous JSON-RPC id" }
-          return
-        elsif !repeated.empty?
-          ambiguous_response = ProtocolError.new("Ambiguous JSON-RPC response fields: #{repeated.join(", ")}")
-          # Settle the request without exposing either outcome to the cache observers.
-          envelope = msg.as_h.dup
-          envelope.delete("result")
-          envelope.delete("error")
-          msg = JSON::Any.new(envelope)
-          wire_frame = nil
-        end
+      repeated = wire_frame.try { |frame| Protocol::WireFrame.repeated_members(frame.json, *Protocol::WireFrame::RESPONSE_FIELDS) }
+      if repeated.try(&.includes?("id"))
+        ClientLog.warn { "Ignoring response with an ambiguous JSON-RPC id" }
+        return
+      end
+      if malformed = response_outcome_error(msg, wire_frame, repeated)
+        # Finish the request without exposing an invalid outcome to the cache observers.
+        envelope = msg.as_h.dup
+        envelope.delete("result")
+        envelope.delete("error")
+        msg = JSON::Any.new(envelope)
+        wire_frame = nil
       end
 
       id = Protocol.extract_id(msg)
@@ -2057,7 +2060,8 @@ module ACP
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
       wide_frame = wire_frame if wire_frame.try(&.wide_response?)
-      response = ambiguous_response || wide_frame || msg
+      error_frame = wire_frame if msg["error"]?
+      response = malformed || error_frame || wide_frame || msg
       observed_reply = false
       channel = @pending_mutex.synchronize do
         initializing = v2_wire? && @initialize_request == id_str
@@ -2074,7 +2078,7 @@ module ACP
         @suggestion_loads.delete(id_str)
         if request = @pending.delete(id_str)
           response = wire_frame if request.exact_response && wire_frame && !msg["error"]?
-          if (grant = request.fork_cursor) && msg["error"]?.try(&.as_h?).try(&.["code"]?).try(&.as_i64?) == JsonRpcError::INVALID_PARAMS
+          if (grant = request.fork_cursor) && response_error_code(msg) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
           end
           if !v2_wire? && @initialize_request == id_str
@@ -2125,6 +2129,24 @@ module ACP
         end
       elsif !observed_reply
         ClientLog.warn { "Received response for unknown request id=#{id_str}" }
+      end
+    end
+
+    private def response_outcome_error(msg : JSON::Any, frame : Protocol::WireFrame?, repeated : Set(String)?) : ProtocolError?
+      if repeated && !repeated.empty?
+        return ProtocolError.new("Ambiguous JSON-RPC response fields: #{repeated.join(", ")}")
+      end
+
+      error = msg["error"]?
+      if msg["result"]?.nil? == error.nil?
+        return ProtocolError.new("JSON-RPC response must contain exactly one of result or error")
+      end
+
+      if error && frame && (wire = Protocol::WireFrame.field(frame.json, "error"))
+        repeated_error = Protocol::WireFrame.repeated_members(wire, "code", "message")
+        unless repeated_error.empty?
+          return ProtocolError.new("Ambiguous JSON-RPC error fields: #{repeated_error.join(", ")}")
+        end
       end
     end
 
@@ -2194,11 +2216,11 @@ module ACP
       message.is_a?(JSON::Any) && response_error_code(message) == JsonRpcError::RESOURCE_NOT_FOUND
     end
 
-    private def response_error_code(response : JSON::Any) : Int64?
+    private def response_error_code(response : JSON::Any) : Int32?
       return unless response["jsonrpc"]?.try(&.as_s?) == "2.0" && !response["result"]?
       return unless (error = response["error"]?.try(&.as_h?)) && error["message"]?.try(&.as_s?)
 
-      error["code"]?.try(&.as_i64?)
+      JsonRpcError.int32_code(error["code"]?.try(&.as_i64?))
     end
 
     # Runs under the pending-request mutex before releasing the initialize waiter.

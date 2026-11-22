@@ -545,7 +545,7 @@ describe "ACP::Client typed result decoding" do
       transport.inject_raw(%({"jsonrpc":"2.0","id":1}))
     end
 
-    expect_raises(ACP::ProtocolError, /malformed result for 'initialize'/) do
+    expect_raises(ACP::ProtocolError, /exactly one.*result.*error/) do
       client.initialize_connection
     end
 
@@ -6720,6 +6720,149 @@ describe "ACP result identities" do
       forked.session_id.should eq("new")
       forked.meta_raw.not_nil!.json.should eq(meta)
       client.session_id.should eq("new")
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+private def answer_rpc_outcome(feed : IO, outgoing : IO, fields : String) : Nil
+  spawn do
+    request = JSON.parse(outgoing.gets.not_nil!)
+    feed.puts %({"jsonrpc":"2.0","id":#{request["id"]}#{fields}})
+  end
+end
+
+describe "ACP JSON-RPC response outcomes" do
+  {1, 2}.each do |version|
+    it "requires one outcome on v#{version} requests and preserves a null success" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+        client.request_timeout = 2.0
+        if client.is_a?(ACP::V2::Client)
+          initialize_wide_v2(client, feed, outgoing)
+        else
+          answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+          client.initialize_connection
+        end
+
+        answer_rpc_outcome(feed, outgoing, %(,"result":null,"error":{"code":-32602,"message":"Invalid"}))
+        expect_raises(ACP::ProtocolError, /exactly one.*result.*error/) { client.ext_method("fixture/outcome") }
+        answer_rpc_outcome(feed, outgoing, "")
+        expect_raises(ACP::ProtocolError, /exactly one.*result.*error/) { client.ext_method("fixture/outcome") }
+        answer_rpc_outcome(feed, outgoing, %(,"result":null))
+        client.ext_method("fixture/outcome").raw.should be_nil
+      ensure
+        client.try(&.close)
+      end
+    end
+
+    it "keeps the v#{version} agent error type when data has wide JSON numbers" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+        client.request_timeout = 2.0
+        if client.is_a?(ACP::V2::Client)
+          initialize_wide_v2(client, feed, outgoing)
+        else
+          answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+          client.initialize_connection
+        end
+
+        data = %({"count":18446744073709551615,"precise":0.1234567890123456789,"label":"visible"})
+        answer_rpc_outcome(feed, outgoing, %(,"error":{"code":-32602,"message":"Invalid","data":#{data}}))
+        error = expect_raises(ACP::JsonRpcError, "Invalid") { client.ext_method("fixture/wide") }
+        error.invalid_params?.should be_true
+        error.received?.should be_true
+        error.data.not_nil!["label"].should eq("visible")
+        error.data_raw.not_nil!.json.should eq(data)
+
+        decimal = "0.9876543210987654321"
+        answer_rpc_outcome(feed, outgoing, %(,"error":{"code":-32602,"message":"Custom","data":#{decimal}}))
+        exact = expect_raises(ACP::JsonRpcError, "Custom") { client.ext_method("fixture/decimal") }
+        exact.data_raw.not_nil!.json.should eq(decimal)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "keeps exact error data during v2 initialization and accepts a later offer" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      data = %({"providers":["fixture"],"large":18446744073709551615})
+      answer_rpc_outcome(feed, outgoing, %(,"error":{"code":-32000,"message":"Login required","data":#{data}}))
+      failure = expect_raises(ACP::JsonRpcError, "Login required") { client.initialize_connection }
+      failure.auth_required?.should be_true
+      failure.received?.should be_true
+      failure.data.not_nil!["providers"].as_a.first.should eq("fixture")
+      failure.data_raw.not_nil!.json.should eq(data)
+      initialize_wide_v2(client, feed, outgoing)
+      client.negotiated_protocol_version.should eq(2)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps retirement-dependent choices unavailable after a late out-of-range error" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"s","availableCommands":[{"type":"command","name":"old","description":"Old"}]})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    client.session_available_commands("s").not_nil!.map(&.name).should eq(["old"])
+    next_answer(transport)
+    next_answer(transport)
+
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.session_close("s") }
+    request = next_answer(transport)
+    request["method"].should eq("session/close")
+
+    client.request_timeout = 2.0
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":2147483648,"message":"Out of range"}}))
+    choice_state_barrier(client, transport)
+    client.session_available_commands("s").should be_nil
+    client.session_workspace("s").not_nil!.cwd.should eq("/work")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a fork cursor available after an ambiguous or incomplete error reply" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(Nil).new(1)
+      client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(nil)
+        nil
+      end
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"fork":{}}}}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"source"}))
+      client.session_new("/work")
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"source","update":{"sessionUpdate":"cursor_update","cursorId":"c","capabilities":{"fork":{}}}}})
+      next_permission_event(updates)
+
+      [
+        %(,"result":{"sessionId":"impossible"},"error":{"code":-32602,"message":"Expired"}),
+        %(,"error":{"code":-32603,"code":-32602,"message":"Ambiguous"}),
+      ].each do |fields|
+        answer_rpc_outcome(feed, outgoing, fields)
+        expect_raises(ACP::ProtocolError) { client.session_fork("source", "/fork", cursor_id: "c") }
+        client.session_cursor("source", "c").not_nil!.fork?.should be_true
+        client.session_workspace("impossible").should be_nil
+      end
+
+      answer_rpc_outcome(feed, outgoing, %(,"error":{"code":-32602}))
+      expect_raises(ACP::JsonRpcError) { client.session_fork("source", "/fork", cursor_id: "c") }
+      client.session_cursor("source", "c").not_nil!.fork?.should be_true
+
+      answer_rpc_outcome(feed, outgoing, %(,"error":{"code":-32602,"message":"Expired"}))
+      expect_raises(ACP::JsonRpcError, "Expired") { client.session_fork("source", "/fork", cursor_id: "c") }
+      client.session_cursor("source", "c").not_nil!.fork?.should be_false
     ensure
       client.try(&.close)
     end
