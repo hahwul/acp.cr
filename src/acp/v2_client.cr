@@ -33,6 +33,10 @@ module ACP
           send_typed_request(method, params, type, exact_response: exact_response)
         end
 
+        def request_exact(method : String, params : JSON::Serializable, type : T.class) : T forall T
+          send_exact_typed_request(method, params, type)
+        end
+
         def retire_session(method : String, params : JSON::Serializable, type : T.class) : T forall T
           send_session_retirement_request(method, params, type)
         end
@@ -488,20 +492,25 @@ module ACP
 
       # Selects an advertised Agent-managed authentication flow.
       def auth_login(method_id : String) : Wire::AuthLoginResult
+        auth_login(Wire::AuthLoginParams.new(method_id))
+      end
+
+      # Selects an advertised Agent-managed authentication flow with metadata.
+      def auth_login(params : Wire::AuthLoginParams) : Wire::AuthLoginResult
         @connection.with_request do
-          method = advertised_auth_method(method_id)
+          method = advertised_auth_method(params.method_id)
           raise InvalidStateError.new("An advertised Agent auth method is required") unless method && method.agent?
 
-          request(AgentMethod::AUTH_LOGIN, Wire::AuthLoginParams.new(method_id), Wire::AuthLoginResult)
+          @connection.request_exact(AgentMethod::AUTH_LOGIN, params, Wire::AuthLoginResult)
         end
       end
 
       # Ends authentication when the Agent advertised authentication methods.
-      def auth_logout : Wire::AuthLogoutResult
+      def auth_logout(params : Wire::AuthLogoutParams = Wire::AuthLogoutParams.new) : Wire::AuthLogoutResult
         @connection.with_request do
           raise InvalidStateError.new("The Agent advertised no auth methods") if ready.auth_methods.empty?
 
-          request(AgentMethod::AUTH_LOGOUT, Wire::AuthLogoutParams.new, Wire::AuthLogoutResult)
+          @connection.request_exact(AgentMethod::AUTH_LOGOUT, params, Wire::AuthLogoutResult)
         end
       end
 
@@ -512,7 +521,7 @@ module ACP
             raise InvalidStateError.new("The Agent did not advertise auth.status")
           end
 
-          @connection.request_auth_status(params)
+          @connection.request_exact(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
         end
       end
 
@@ -842,16 +851,6 @@ module ACP
         true
       rescue URI::Error
         false
-      end
-
-      private def request(method : String, params : JSON::Serializable, type : T.class) : T forall T
-        decode(type, @connection.send_request(method, params), method)
-      end
-
-      private def decode(type : T.class, raw : JSON::Any, method : String) : T forall T
-        T.from_json(raw.to_json)
-      rescue ex : JSON::ParseException
-        raise ProtocolError.new("Agent returned a malformed result for '#{method}': #{ex.message}", ex)
       end
 
       private def handle_extension_request(method : String, params : JSON::Any) : JSON::Any

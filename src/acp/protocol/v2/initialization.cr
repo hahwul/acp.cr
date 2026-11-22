@@ -587,18 +587,18 @@ module ACP
       # Parameters of an Agent-managed auth/login request.
       struct AuthLoginParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Advertised method identifier.
         @[JSON::Field(key: "methodId")]
         property method_id : String
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates a login request for the specified method.
-        def initialize(@method_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@method_id : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @method_id, metadata_comparison
       end
 
       # Empty successful auth/login result with optional metadata.

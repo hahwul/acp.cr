@@ -1938,6 +1938,139 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact authentication replies" do
+  {"wide integer" => "18446744073709551615", "precise decimal" => "0.123456789012345678901"}.each do |kind, number|
+    it "accepts a #{kind} in v1 login and logout results" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::Client.new(transport)
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"auth":{"logout":{}}},"authMethods":[{"id":"login","name":"Agent sign-in"}]}))
+        client.initialize_connection
+
+        payload = %({"_meta":{"example.test/value":#{number}}})
+        answer_identity_request(feed, outgoing, payload)
+        client.authenticate("login").should be_nil
+        answer_identity_request(feed, outgoing, payload)
+        result = client.logout
+        ACP::Protocol::RawJson.from_json(result.to_json).json.should eq(payload)
+      ensure
+        client.try(&.close)
+      end
+    end
+
+    it "preserves a #{kind} in v2 login and logout results" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::V2::Client.new(transport)
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":[{"type":"agent","methodId":"login","name":"Agent sign-in"}]}))
+        client.initialize_connection
+
+        payload = %({"_meta":{"example.test/value":#{number}}})
+        answer_identity_request(feed, outgoing, payload)
+        ACP::Protocol::RawJson.from_json(client.auth_login("login").to_json).json.should eq(payload)
+        answer_identity_request(feed, outgoing, payload)
+        ACP::Protocol::RawJson.from_json(client.auth_logout.to_json).json.should eq(payload)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "round trips v1 typed authentication and logout parameters over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"auth":{"logout":{}}},"authMethods":[{"id":"login","name":"Agent sign-in"},{"type":"terminal","id":"terminal","name":"Terminal sign-in"}]}))
+      client.initialize_connection
+      expect_raises(ACP::InvalidStateError) { client.authenticate(ACP::Protocol::AuthenticateParams.new("terminal")) }
+
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      payload = %({"_meta":#{metadata}})
+      login_params = ACP::Protocol::AuthenticateParams.from_json(%({"methodId":"login","credentials":{"example":"value"},"_meta":#{metadata}}))
+      request = echo_authentication_metadata(feed, outgoing)
+      client.authenticate(login_params).meta_raw.not_nil!.json.should eq(metadata)
+      login = next_permission_event(request)
+      login.field("method").not_nil!.as_s?.should eq("authenticate")
+      login.field("params").not_nil!.json.should eq(login_params.to_json)
+
+      request = echo_authentication_metadata(feed, outgoing)
+      client.logout(ACP::Protocol::LogoutParams.from_json(payload)).meta_raw.not_nil!.json.should eq(metadata)
+      logout = next_permission_event(request)
+      logout.field("method").not_nil!.as_s?.should eq("logout")
+      logout.field("params").not_nil!.json.should eq(payload)
+
+      answer_identity_request(feed, outgoing, "null")
+      client.authenticate("login").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "round trips v2 typed login and logout parameters over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":[{"type":"agent","methodId":"login","name":"Agent sign-in"}]}))
+      client.initialize_connection
+      expect_raises(ACP::InvalidStateError) { client.auth_login(ACP::Protocol::V2::AuthLoginParams.new("unlisted")) }
+
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      payload = %({"_meta":#{metadata}})
+      login_params = ACP::Protocol::V2::AuthLoginParams.from_json(%({"methodId":"login","_meta":#{metadata}}))
+      request = echo_authentication_metadata(feed, outgoing)
+      client.auth_login(login_params).meta_raw.not_nil!.json.should eq(metadata)
+      login = next_permission_event(request)
+      login.field("method").not_nil!.as_s?.should eq("auth/login")
+      login.field("params").not_nil!.json.should eq(login_params.to_json)
+
+      request = echo_authentication_metadata(feed, outgoing)
+      client.auth_logout(ACP::Protocol::V2::AuthLogoutParams.from_json(payload)).meta_raw.not_nil!.json.should eq(metadata)
+      logout = next_permission_event(request)
+      logout.field("method").not_nil!.as_s?.should eq("auth/logout")
+      logout.field("params").not_nil!.json.should eq(payload)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "refuses lossy authentication writes through a JSON::Any transport" do
+    transport = SignalingTransport.new
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"authMethods":[{"type":"agent","methodId":"login","name":"Agent sign-in"}]}}))
+    end
+    client.initialize_connection
+
+    params = ACP::Protocol::V2::AuthLoginParams.from_json(%({"methodId":"login","_meta":{"example.test/ratio":0.123456789012345678901}}))
+    expect_raises(ACP::ProtocolError, /cannot preserve/) { client.auth_login(params) }
+    transport.sent_messages.size.should eq(1)
+
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":-32000,"message":"Sign-in was declined"}}))
+    end
+    error = expect_raises(ACP::JsonRpcError, /Sign-in was declined/) { client.auth_login("login") }
+    error.code.should eq(ACP::JsonRpcError::AUTH_REQUIRED)
+    error.received?.should be_true
+    transport.sent_messages.size.should eq(2)
+  ensure
+    client.try(&.close)
+  end
+end
+
+private def echo_authentication_metadata(feed : IO, outgoing : IO) : Channel(ACP::Protocol::RawJson)
+  requests = Channel(ACP::Protocol::RawJson).new(1)
+  spawn do
+    request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+    requests.send(request)
+    metadata = request.field("params").not_nil!.field("_meta").not_nil!.json
+    feed.puts %({"jsonrpc":"2.0","id":#{request.field("id").not_nil!.json},"result":{"_meta":#{metadata}}})
+  end
+  requests
+end
+
 describe "ACP exact authentication status snapshots" do
   wide = "18446744073709551615"
   decimal = "0.123456789012345678901"

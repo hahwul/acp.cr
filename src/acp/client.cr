@@ -579,7 +579,18 @@ module ACP
     # Raises `InvalidStateError` if not in the Initialized state.
     # Raises `JsonRpcError` on authentication failure.
     def authenticate(method_id : String, credentials : JSON::Any? = nil) : Nil
-      ensure_state(ClientState::Initialized, "authenticate")
+      # Callers of this overload discard the result, so accept any JSON payload.
+      send_authenticate(Protocol::AuthenticateParams.new(method_id, credentials), Protocol::RawJson)
+    end
+
+    # Authenticates with typed parameters and returns the Agent's metadata.
+    def authenticate(params : Protocol::AuthenticateParams) : Protocol::AuthenticateResult
+      send_authenticate(params, Protocol::AuthenticateResult)
+    end
+
+    private def send_authenticate(params : Protocol::AuthenticateParams, result_type : T.class) : T forall T
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::AUTHENTICATE)
+      method_id = params.method_id
 
       # A terminal descriptor can never be passed to the protocol method.
       # Inspect its discriminator even if its other fields could not decode.
@@ -593,10 +604,9 @@ module ACP
         raise InvalidStateError.new("Authentication method #{method_id.inspect} has an invalid descriptor")
       end
 
-      params = Protocol::AuthenticateParams.new(method_id, credentials)
-      send_request(Protocol::AgentMethod::AUTHENTICATE, params)
-
+      result = send_exact_typed_request(Protocol::AgentMethod::AUTHENTICATE, params, result_type)
       ClientLog.info { "Authenticated with method: #{method_id}" }
+      result
     end
 
     # Decoded authentication methods from the initialize handshake.
@@ -696,14 +706,13 @@ module ACP
     #
     # Raises `InvalidStateError` if not initialized.
     # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
-    def logout : Protocol::LogoutResult
-      ensure_state(ClientState::Initialized, "logout")
+    def logout(params : Protocol::LogoutParams = Protocol::LogoutParams.new) : Protocol::LogoutResult
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::LOGOUT)
       unless @agent_capabilities.try(&.auth).try(&.logout?)
         raise InvalidStateError.new("The Agent did not advertise logout")
       end
 
-      raw_result = send_request(Protocol::AgentMethod::LOGOUT, Protocol::LogoutParams.new)
-      result = decode_result(Protocol::LogoutResult, raw_result, Protocol::AgentMethod::LOGOUT)
+      result = send_exact_typed_request(Protocol::AgentMethod::LOGOUT, params, Protocol::LogoutResult)
 
       ClientLog.info { "Logged out" }
 
@@ -717,7 +726,7 @@ module ACP
         raise InvalidStateError.new("The Agent did not advertise auth.status")
       end
 
-      request_auth_status(params)
+      send_exact_typed_request(Protocol::AgentMethod::AUTH_STATUS, params, Protocol::AuthStatusResult)
     end
 
     # Lists the Agent's configurable model providers and current routing.
@@ -1563,9 +1572,8 @@ module ACP
       decode_typed_response(method, response, type)
     end
 
-    protected def request_auth_status(params : Protocol::AuthStatusParams) : Protocol::AuthStatusResult
-      method = Protocol::AgentMethod::AUTH_STATUS
-      decode_typed_response(method, send_exact_request(method, params), Protocol::AuthStatusResult)
+    protected def send_exact_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
+      decode_typed_response(method, send_exact_request(method, params), type)
     end
 
     private def send_exact_request(method : String, params : JSON::Serializable, *, on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
@@ -1574,7 +1582,7 @@ module ACP
       wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
       routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
       builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_view) }
-      send_and_await_response(method, builder, exact_response: true, wire_params: wire_params, on_response: on_response)
+      send_and_await_response(method, builder, exact_response: true, wire_params: wire_params, require_exact_params: true, on_response: on_response)
     end
 
     # Core implementation for sending a JSON-RPC request and awaiting
@@ -1589,6 +1597,7 @@ module ACP
     # - `on_response` — internal observer for a correlated response envelope.
     # - `validate_choice` — checks advertised choices just before a setter is written.
     # - `wire_params` — exact params to send alongside a separate JSON::Any routing view.
+    # - `require_exact_params` — refuses transports that cannot preserve wire params.
     #
     # Returns the correlated response envelope.
     # Raises `RequestTimeoutError` if the request times out.
@@ -1605,6 +1614,7 @@ module ACP
       exact_response : Bool = false,
       before_send : (-> Nil)? = nil,
       wire_params : Protocol::RawJson? = nil,
+      require_exact_params : Bool = false,
     ) : PendingResponse
       raise ConnectionClosedError.new if closed?
 
@@ -1632,8 +1642,7 @@ module ACP
             end
           end
         end
-        require_exact = method.in?(Protocol::AgentMethod::INITIALIZE, Protocol::AgentMethod::AUTH_STATUS)
-        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: require_exact)
+        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: require_exact_params)
       end
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
@@ -1921,10 +1930,6 @@ module ACP
     # `Client` method and break the library's contract that everything it
     # raises is an `ACP::Error`. Translate it into `ProtocolError`, keeping
     # the original as the cause.
-    private def decode_result(type : T.class, raw : JSON::Any, method : String) : T forall T
-      decode_result_json(type, raw.to_json, method)
-    end
-
     private def decode_result_json(type : T.class, json : String, method : String) : T forall T
       T.from_json(json)
     rescue ex : JSON::ParseException
