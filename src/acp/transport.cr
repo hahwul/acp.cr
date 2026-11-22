@@ -582,7 +582,8 @@ module ACP
       identity_result = result && (result.has_key?("sessionId") || result.has_key?("messageId"))
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
       response = envelope && envelope.has_key?("id") && !envelope.has_key?("method")
-      if exact_params || versioned_result || choices_result || state_result || session_list_result || identity_result || result_metadata ||
+      structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
+      if exact_params || versioned_result || choices_result || state_result || session_list_result || identity_result || result_metadata || structured_error ||
          (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?)
         Protocol::WireFrame.new(line, exact_params: true)
       else

@@ -176,7 +176,9 @@ module ACP
         end
 
         private def decode_initialization_response(response : PendingResponse) : {Wire::InitializeResult, Protocol::RawJson?}
-          raise response if response.is_a?(ProtocolError)
+          if response.is_a?(ProtocolError)
+            raise ProtocolError.new("Agent returned a malformed initialization response", response)
+          end
 
           wire = response.is_a?(Protocol::WireFrame) ? response.json : Protocol::WireFrame.encode(response)
           envelope = Protocol::RawJson.from_json(wire)
@@ -187,18 +189,13 @@ module ACP
           result = envelope.field("result")
           return {decode_initialization(result.json), result.field("capabilities")} if result && !error
 
-          code = error.try(&.field("code")).try(&.as_i64?)
+          code = JsonRpcError.int32_code(error.try(&.field("code")).try(&.as_i64?))
           message = error.try(&.field("message")).try(&.as_s?)
-          unless !result && code && (Int32::MIN..Int32::MAX).includes?(code) && message
+          unless !result && error && code && message
             raise ProtocolError.new("Agent returned a malformed initialization response")
           end
 
-          data = begin
-            error.try(&.field("data")).try(&.to_json_any)
-          rescue JSON::ParseException
-            nil
-          end
-          raise JsonRpcError.new(code.to_i32, message, data, received: true)
+          raise JsonRpcError.from_wire(error)
         end
 
         def submit_prompt(params : Protocol::RawJson, skill_names : Array(String)?) : Wire::SessionPromptResult
