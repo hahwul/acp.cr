@@ -10,15 +10,15 @@ module ACP
       # Presence advertises a skill capability with no named fields.
       struct SkillCapability
         include JSON::Serializable
+        include LosslessMetadata
         include LosslessUnmapped
 
-        # Extension metadata scoped to this capability.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Creates a support marker.
-        def initialize(@meta : Hash(String, JSON::Any)? = nil)
+        def initialize(meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @json_unmapped, @raw_fields, @exact_fields, metadata_comparison
       end
 
       # The client can present skill entries in the session's command list.
@@ -30,37 +30,37 @@ module ACP
       # Command variants a client can present in addition to slash commands.
       struct CommandsCapabilities
         include JSON::Serializable
+        include LosslessMetadata
         include LosslessUnmapped
 
         # Presence allows the Agent to advertise skill commands.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::CommandsSkillCapabilities))]
         getter skill : CommandsSkillCapabilities?
 
-        # Extension metadata scoped to the command capabilities.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Creates the optional command capability group.
-        def initialize(@skill : CommandsSkillCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@skill : CommandsSkillCapabilities? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @skill, @json_unmapped, @raw_fields, @exact_fields, metadata_comparison
       end
 
       # Skill references accepted by the Agent in a prompt.
       struct PromptSkillCapabilities
         include JSON::Serializable
+        include LosslessMetadata
         include LosslessUnmapped
 
         # Presence allows multiple skill references at any position.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::PromptSkillInlineCapabilities))]
         getter inline : PromptSkillInlineCapabilities?
 
-        # Extension metadata scoped to the skill prompt capability.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Creates a leading-skill capability with optional inline support.
-        def initialize(@inline : PromptSkillInlineCapabilities? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@inline : PromptSkillInlineCapabilities? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @inline, @json_unmapped, @raw_fields, @exact_fields, metadata_comparison
       end
 
       # A selectable Agent skill advertised as a session command.

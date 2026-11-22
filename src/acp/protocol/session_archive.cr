@@ -6,13 +6,11 @@ module ACP
     # Agent support for archiving, restoring, and listing archived sessions.
     struct SessionArchiveCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates the archive capability marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
@@ -29,6 +27,8 @@ module ACP
       def self.to_json(value : SessionArchiveCapabilities, builder : JSON::Builder) : Nil
         value.to_json(builder)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # :nodoc:

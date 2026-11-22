@@ -27,6 +27,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/file-system
     struct FsCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Whether the client can read text files on behalf of the agent.
       # Enables the `fs/read_text_file` method.
@@ -38,16 +39,15 @@ module ACP
       @[JSON::Field(key: "writeTextFile")]
       property? write_text_file : Bool = false
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @read_text_file : Bool = false,
         @write_text_file : Bool = false,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @read_text_file, @write_text_file, metadata_comparison
     end
 
     # Presence (`{}`) advertises that the client handles `compaction_update`
@@ -56,9 +56,13 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction
     struct CompactionCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      def initialize
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence (`{}`) advertises that the client handles `notice` session
@@ -66,9 +70,13 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-notices
     struct NoticeCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      def initialize
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence (`{}`) advertises that the client understands `type: "boolean"`
@@ -76,39 +84,41 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/session-config-options#boolean-config-options
     struct BooleanConfigOptionCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Config option types the client supports beyond the baseline `select`.
     struct SessionConfigOptionsCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # When present, the agent may send `type: "boolean"` config options.
       property boolean : BooleanConfigOptionCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @boolean : BooleanConfigOptionCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @boolean, metadata_comparison
     end
 
     # Presence advertises support for v1 cursor_update notifications.
     struct SessionCursorsCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Creates the cursor support marker.
-      def initialize
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
@@ -123,6 +133,8 @@ module ACP
       def self.to_json(value : SessionCursorsCapabilities, json : JSON::Builder) : Nil
         value.to_json(json)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Session-related client capabilities (`clientCapabilities.session`).
@@ -130,6 +142,7 @@ module ACP
     # MUST NOT send the corresponding updates or option types.
     struct ClientSessionCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Context compaction updates.
       property compaction : CompactionCapabilities?
@@ -149,32 +162,32 @@ module ACP
       @[JSON::Field(key: "promptSuggestions", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsCapabilities))]
       property prompt_suggestions : PromptSuggestionsCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @compaction : CompactionCapabilities? = nil,
         @config_options : SessionConfigOptionsCapabilities? = nil,
         @notices : NoticeCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @cursors : SessionCursorsCapabilities? = nil,
         @prompt_suggestions : PromptSuggestionsCapabilities? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @compaction, @config_options, @notices, @cursors, @prompt_suggestions,
+        metadata_comparison
     end
 
     # Presence (`{}`) of `form` / `url` in `ElicitationCapabilities`
     # advertises that elicitation mode.
     struct ElicitationModeCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Schema names for the two mode capability objects.
@@ -186,6 +199,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/elicitation#checking-support
     struct ElicitationCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Form mode support.
       property form : ElicitationFormCapabilities?
@@ -193,15 +207,12 @@ module ACP
       # URL mode support.
       property url : ElicitationUrlCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @form : ElicitationFormCapabilities? = nil,
         @url : ElicitationUrlCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the given `mode` ("form" or "url") is advertised.
@@ -212,33 +223,35 @@ module ACP
         else             false
         end
       end
+
+      def_equals_and_hash @form, @url, metadata_comparison
     end
 
     # Presence advertises support for identified plan updates and removals.
     # See: https://agentclientprotocol.com/protocol/v1/agent-plan#plan-operations
     struct PlanCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates the capability, optionally with extension metadata.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence advertises support for exposed child sessions.
     struct SubagentCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates the subagent capability.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence authorizes cancellation for an announced child session.
@@ -269,17 +282,17 @@ module ACP
     # Authentication flows the client can perform.
     struct ClientAuthCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Whether the client can run the configured agent in a terminal for login.
       property? terminal : Bool = false
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates the client's advertised authentication capabilities.
-      def initialize(@terminal : Bool = false, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@terminal : Bool = false, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @terminal, metadata_comparison
     end
 
     # The full set of capabilities the client advertises to the agent
@@ -291,6 +304,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#client-capabilities
     struct ClientCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # File-system access capabilities. Nil means no FS support.
       property fs : FsCapabilities?
@@ -317,21 +331,20 @@ module ACP
       # Authentication flows supported by this client.
       property auth : ClientAuthCapabilities?
 
-      # Extension metadata for custom capabilities.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @fs : FsCapabilities? = nil,
         @terminal : Bool = false,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @session : ClientSessionCapabilities? = nil,
         @elicitation : ElicitationCapabilities? = nil,
         @plan : PlanCapabilities? = nil,
         @subagents : SubagentCapabilities? = nil,
         @auth : ClientAuthCapabilities? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @fs, @terminal, @session, @elicitation, @plan, @subagents, @auth, metadata_comparison
     end
 
     # ─── Agent Capabilities ───────────────────────────────────────────
@@ -342,6 +355,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#prompt-capabilities
     struct PromptCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Whether the agent accepts image content blocks.
       @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
@@ -356,23 +370,23 @@ module ACP
       @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::CapabilityFlag)]
       property? embedded_context : Bool = false
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @image : Bool = false,
         @audio : Bool = false,
         @embedded_context : Bool = false,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @image, @audio, @embedded_context, metadata_comparison
     end
 
     # MCP transport capabilities supported by the agent.
     # See: https://agentclientprotocol.com/protocol/session-setup#checking-transport-support
     struct McpCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Whether the agent supports connecting to MCP servers over HTTP.
       @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
@@ -387,17 +401,16 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::CapabilityFlag)]
       property? acp : Bool = false
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @http : Bool = false,
         @sse : Bool = false,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @acp : Bool = false,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @http, @sse, @acp, metadata_comparison
     end
 
     # Capabilities for the session/list method.
@@ -406,15 +419,15 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#listing-sessions
     struct SessionListCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       def initialize(
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Capabilities for the session/resume method.
@@ -424,15 +437,15 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#resuming-sessions
     struct SessionResumeCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       def initialize(
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Capabilities for the session/close method.
@@ -442,15 +455,15 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions
     struct SessionCloseCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       def initialize(
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Capabilities for the session/delete method.
@@ -459,13 +472,13 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/session-delete
     struct SessionDeleteCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence of this object (even empty) indicates the agent accepts
@@ -474,45 +487,45 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/session-setup#additional-workspace-roots
     struct SessionAdditionalDirectoriesCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence advertises the `override` system prompt mode.
     struct SessionSystemPromptOverrideCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # System prompt modes the agent supports beyond the baseline `append`.
     struct SessionSystemPromptModeCapabilities
       include JSON::Serializable
+      include LosslessMetadata
       include LosslessUnmapped
 
       # When present, the agent accepts `mode: "override"`.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptOverrideCapabilities))]
       property override : SessionSystemPromptOverrideCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @override : SessionSystemPromptOverrideCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @override, @json_unmapped, @raw_fields, @exact_fields, metadata_comparison
     end
 
     # Interprets an extension-defined advertisement for a system prompt mode.
@@ -524,19 +537,17 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/session-setup#system-prompt
     struct SessionSystemPromptCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Additional modes the agent supports.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::SessionSystemPromptModeCapabilities))]
       property mode : SessionSystemPromptModeCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @mode : SessionSystemPromptModeCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the agent accepts `mode: "override"`.
@@ -557,6 +568,8 @@ module ACP
           !!(declared || resolve.try(&.call(name, self)))
         end
       end
+
+      def_equals_and_hash @mode, metadata_comparison
     end
 
     # Session capabilities supported by the agent.
@@ -565,6 +578,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#session-capabilities
     struct SessionCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # When present (non-null), indicates the agent supports `session/list`.
       # The value is a `SessionListCapabilities` object.
@@ -611,15 +625,11 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::SessionForkCapabilities)]
       property fork : SessionForkCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @list : SessionListCapabilities? = nil,
         @resume : SessionResumeCapabilities? = nil,
         @close : SessionCloseCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @delete : SessionDeleteCapabilities? = nil,
         @additional_directories : SessionAdditionalDirectoriesCapabilities? = nil,
         @system_prompt : SessionSystemPromptCapabilities? = nil,
@@ -629,6 +639,7 @@ module ACP
         @options : SessionOptionsCapabilities? = nil,
         @fork : SessionForkCapabilities? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the agent supports deleting sessions.
@@ -660,6 +671,9 @@ module ACP
       def close? : Bool
         !@close.nil?
       end
+
+      def_equals_and_hash @list, @resume, @close, @delete, @additional_directories, @system_prompt, @status,
+        @title, @archive, @options, @fork, metadata_comparison
     end
 
     # Presence of this object (even empty) indicates the agent supports
@@ -667,18 +681,19 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/authentication#logging-out
     struct LogoutCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Authentication-related agent capabilities (`agentCapabilities.auth`).
     struct AgentAuthCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # When present (non-null), the agent supports `logout`.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::LogoutCapabilities))]
@@ -688,21 +703,20 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::AuthStatusCapabilities)]
       property status : AuthStatusCapabilities?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @logout : LogoutCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @status : AuthStatusCapabilities? = nil,
       )
+        self.meta = meta
       end
 
       # Returns true if the agent supports `logout`.
       def logout? : Bool
         !@logout.nil?
       end
+
+      def_equals_and_hash @logout, @status, metadata_comparison
     end
 
     # The full set of capabilities the agent advertises to the client
@@ -710,6 +724,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#agent-capabilities
     struct AgentCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Whether the agent supports loading previous sessions via `session/load`.
       @[JSON::Field(key: "loadSession", converter: ::ACP::Protocol::CapabilityFlag)]
@@ -735,20 +750,20 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::ProvidersCapabilities))]
       property providers : ProvidersCapabilities?
 
-      # Extension metadata for custom capabilities.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @load_session : Bool = false,
         @prompt_capabilities : PromptCapabilities? = nil,
         @mcp_capabilities : McpCapabilities? = nil,
         @session_capabilities : SessionCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @auth : AgentAuthCapabilities? = nil,
         @providers : ProvidersCapabilities? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @load_session, @prompt_capabilities, @mcp_capabilities, @session_capabilities,
+        @auth, @providers, metadata_comparison
     end
 
     # ─── Info Structs ─────────────────────────────────────────────────

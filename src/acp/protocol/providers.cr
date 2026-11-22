@@ -1,4 +1,5 @@
 require "json"
+require "./raw_json"
 require "./optional_metadata"
 
 module ACP
@@ -12,14 +13,14 @@ module ACP
     # Presence advertises support for draft provider configuration.
     struct ProvidersCapabilities
       include JSON::Serializable
-
-      # Extension metadata for provider configuration.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates the provider configuration support marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Non-secret routing information for an enabled provider.
