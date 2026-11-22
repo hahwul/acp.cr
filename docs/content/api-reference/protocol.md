@@ -302,12 +302,21 @@ Child workspace values use absolute Agent-side paths.
 An explicit `null` restores inheritance for that workspace field, and an
 empty additional-directory list overrides inheritance. The cached
 `SubagentSession#meta_raw` exposes the exact association metadata after
-applying key-level patches. Inter-session messages retain their transcript
-links and open content.
+applying key-level patches.
+[ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
+
+Session-directed messages keep independent local IDs in each session.
+`sender_session_id`, `recipient_session_id`, `sender_message_id`, and
+`recipient_message_id` patch independently. A malformed or ambiguous optional
+field leaves the previous value in place. Chunk content appends in receive
+order, and a present `content` patch replaces or clears the accumulated list.
+Chunk metadata stays scoped to the chunk. Raw notifications retain the
+received content and its exact values.
+[ACP v2 session-directed messages](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-directed-messages)
+
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
 fields from clears and apply metadata patches by key. Compaction summary
 chunks reuse their wire-compatible `ACP::Protocol` types.
-[ACP v2 Subagents](https://agentclientprotocol.com/protocol/v2/subagents)
 
 V2 notices use `NoticeUpdate` and expose the original severity, the
 required title, and optional description. They are live events with no

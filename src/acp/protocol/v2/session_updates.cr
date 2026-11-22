@@ -63,6 +63,9 @@ module ACP
       struct SessionMessageUpdate
         include JSON::Serializable
 
+        # :nodoc:
+        WIRE_FIELDS = {"sessionUpdate", "messageId", "senderSessionId", "recipientSessionId", "senderMessageId", "recipientMessageId", "content", "_meta"}
+
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String = "session_message"
@@ -72,17 +75,29 @@ module ACP
         getter message_id : String
 
         # Links refer to the sender's and recipient's views of the same message.
-        PatchFields.define({
-          sender_session_id:    {String, "senderSessionId"},
-          recipient_session_id: {String, "recipientSessionId"},
-          sender_message_id:    {String, "senderMessageId"},
-          recipient_message_id: {String, "recipientMessageId"},
+        PatchFields.tolerant({
+          sender_session_id:    {String, "senderSessionId", OptionalCapabilityString},
+          recipient_session_id: {String, "recipientSessionId", OptionalCapabilityString},
+          sender_message_id:    {String, "senderMessageId", OptionalCapabilityString},
+          recipient_message_id: {String, "recipientMessageId", OptionalCapabilityString},
         })
         include MessageContentPatch
         include LosslessMetadataPatch
 
         # Creates an update for the specified transcript message.
         def initialize(@message_id : String)
+        end
+
+        # Reads a patch for an unambiguous local message and omits conflicting optional fields.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = RawJson.new(pull)
+          repeated = WireFrame.repeated_members(wire.json, *WIRE_FIELDS)
+          if repeated.includes?("sessionUpdate") || repeated.includes?("messageId")
+            raise JSON::ParseException.new("Ambiguous ACP session message ID or type", *location)
+          end
+          repeated.each { |field| wire = wire.without_field(field) }
+          previous_def(JSON::PullParser.new(wire.json))
         end
       end
 
