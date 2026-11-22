@@ -229,6 +229,7 @@ module ACP
       @block_sources : Hash(UInt64, ObjectSource)?
       @block_order : Array(UInt64?)?
       @object_source : ObjectSource?
+      @array_source : ArrayChild?
       @project_nested_objects = false
 
       def initialize(@value : JSON::Any)
@@ -252,8 +253,12 @@ module ACP
           end
         end
         @projected = @value.try { |value| WireFrame.encode(value) }
-        if @project_nested_objects && !project_array_objects && (view = @value.try(&.as_h?))
-          @object_source = ObjectSource.new(view, source, @projected.not_nil!, partial?, nested_object_views(view))
+        if @project_nested_objects && !project_array_objects && (value = @value)
+          if view = value.as_h?
+            @object_source = ObjectSource.new(view, source, @projected.not_nil!, partial?, nested_object_views(view))
+          elsif value.as_a?
+            @array_source = nested_view(value).as(ArrayChild)
+          end
         end
       end
 
@@ -516,6 +521,19 @@ module ACP
 
               baseline = JSON.parse(object.projected).as_h
               merged = patch_projected_object(source.json, baseline, object.view, object.nested_views)
+              return RawJson.new(JSON::PullParser.new(merged))
+            end
+            if array = @array_source
+              projected = @projected.not_nil!
+              return source if rendered.json == projected && array.same_tree?(value)
+
+              pull = JSON::PullParser.new(source.json)
+              original = read_wire_value(pull).as(WireArray)
+              baseline = JSON.parse(projected)
+              merged = JSON.build do |builder|
+                builder.max_nesting = pull.max_nesting
+                write_patched_child(original, baseline, array, builder)
+              end
               return RawJson.new(JSON::PullParser.new(merged))
             end
             return source if rendered.json == @projected

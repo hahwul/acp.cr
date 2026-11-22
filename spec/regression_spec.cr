@@ -1938,6 +1938,160 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact session setup requests" do
+  it "decodes extension metadata on every v1 and v2 session setup parameter type" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    params = %({"cwd":"/work","sessionId":"session","_meta":#{metadata}})
+    {
+      ACP::Protocol::SessionNewParams,
+      ACP::Protocol::SessionLoadParams,
+      ACP::Protocol::SessionResumeParams,
+      ACP::Protocol::SessionForkParams,
+      ACP::Protocol::V2::SessionNewParams,
+      ACP::Protocol::V2::SessionResumeParams,
+      ACP::Protocol::V2::SessionForkParams,
+    }.each do |type|
+      request = type.from_json(params)
+      ACP::Protocol::RawJson.from_json(request.to_json).field("_meta").not_nil!.json.should eq(metadata)
+    end
+  end
+
+  it "preserves exact numbers in system prompts sent during v1 session setup" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      caps = %({"sessionCapabilities":{"systemPrompt":{}}})
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":#{caps}}))
+      client.initialize_connection
+
+      metadata = %({"example.test/ratio":0.123456789012345678901})
+      prompt = ACP::Protocol::SystemPrompt.from_json(%({"mode":"append","content":[{"type":"text","text":"Notes","_meta":#{metadata}}],"_meta":#{metadata}}))
+      sent = capture_request_params(feed, outgoing, %({"sessionId":"session"}))
+      client.session_new("/work", system_prompt: prompt).session_id.should eq("session")
+      wire = next_permission_event(sent).field("systemPrompt").not_nil!
+      wire.field("_meta").not_nil!.json.should eq(metadata)
+      wire.field("content").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.json.should eq(metadata)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "sends v1 create, load, resume, and fork metadata and attaches their state" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      caps = %({"loadSession":true,"sessionCapabilities":{"resume":{},"fork":{},"options":{}}})
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":#{caps}}))
+      client.initialize_connection
+
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      fields = %("cwd":"/work","_meta":#{metadata},"configOptions":[{"configId":"mode","value":"default","_meta":#{metadata}}])
+      created = capture_request_params(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new(ACP::Protocol::SessionNewParams.from_json(%({#{fields}}))).session_id.should eq("root")
+      client.session_id.should eq("root")
+
+      loaded = capture_request_params(feed, outgoing, %({"configOptions":[]}))
+      client.session_load(ACP::Protocol::SessionLoadParams.from_json(%({"sessionId":"saved",#{fields}})))
+      client.session_id.should eq("saved")
+      client.session_config_options("saved").not_nil!.should be_empty
+
+      resumed = capture_request_params(feed, outgoing, %({"configOptions":[]}))
+      client.session_resume(ACP::Protocol::SessionResumeParams.from_json(%({"sessionId":"root",#{fields}})))
+      client.session_id.should eq("root")
+
+      fork = capture_request_params(feed, outgoing, %({"sessionId":"fork"}))
+      client.session_fork(ACP::Protocol::SessionForkParams.from_json(%({"sessionId":"root",#{fields}}))).session_id.should eq("fork")
+      client.session_id.should eq("fork")
+      client.session_workspace("fork").not_nil!.cwd.should eq("/work")
+
+      {created, loaded, resumed, fork}.each do |channel|
+        params = next_permission_event(channel)
+        params.field("_meta").not_nil!.json.should eq(metadata)
+        params.field("configOptions").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.json.should eq(metadata)
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "preserves v2 setup metadata, extension values, and cursor checks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      updates = Channel(Nil).new(1)
+      client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+        updates.send(nil)
+        nil
+      end
+      offer = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"fork":{},"options":{}}}})
+      answer_identity_request(feed, outgoing, offer)
+      client.initialize_connection
+
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      value = "18446744073709551615"
+      fields = %("cwd":"/work","_meta":#{metadata},"configOptions":[{"configId":"display","type":"_example.test/width","value":#{value},"_meta":#{metadata}}])
+      created = capture_request_params(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new(ACP::Protocol::V2::SessionNewParams.from_json(%({#{fields}}))).session_id.should eq("root")
+
+      resumed = capture_request_params(feed, outgoing, %({"configOptions":[]}))
+      resume = ACP::Protocol::V2::SessionResumeParams.from_json(%({"sessionId":"root","replayFrom":{"type":"start","_meta":#{metadata}},#{fields}}))
+      resume.replay_from.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      client.session_resume(resume)
+      client.session_config_options("root").not_nil!.should be_empty
+
+      params = ACP::Protocol::V2::SessionForkParams.from_json(%({"sessionId":"root","cursorId":"cursor",#{fields}}))
+      expect_raises(ACP::InvalidStateError, /Cursor/) { client.session_fork(params) }
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"cursor_update","cursorId":"cursor","capabilities":{"fork":{}}}}})
+      next_permission_event(updates)
+      fork = capture_request_params(feed, outgoing, %({"sessionId":"fork"}))
+      client.session_fork(params).session_id.should eq("fork")
+      client.session_workspace("fork").not_nil!.cwd.should eq("/work")
+
+      resume_wire = next_permission_event(resumed)
+      resume_wire.field("replayFrom").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+      {next_permission_event(created), resume_wire, next_permission_event(fork)}.each do |request|
+        request.field("_meta").not_nil!.json.should eq(metadata)
+        option = request.field("configOptions").not_nil!.elements?.not_nil!.first
+        option.field("value").not_nil!.json.should eq(value)
+        option.field("_meta").not_nil!.json.should eq(metadata)
+      end
+      resume.config_options.not_nil!.first.value_raw.json.should eq(value)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects ambiguous v2 replay and MCP fields before sending setup" do
+    with_v2_request_client(%({"mcp":{"stdio":{}}})) do |client, transport|
+      client.request_timeout = 0.05
+      cursor = ACP::Protocol::V2::ReplayFrom.new("start", {"type" => JSON::Any.new("start")})
+      resume = ACP::Protocol::V2::SessionResumeParams.new("session", "/work", replay_from: cursor)
+      expect_raises(ArgumentError, /unique JSON member names/) { client.session_resume(resume) }
+
+      server = ACP::Protocol::V2::McpServer.stdio(ACP::Protocol::McpServerStdio.new("server", "/fixture/server"))
+      server.json_unmapped["type"] = JSON::Any.new("stdio")
+      setup = ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [server])
+      expect_raises(ArgumentError, /unique JSON member names/) { client.session_new(setup) }
+      transport.sent_messages.size.should eq(1)
+    end
+  end
+
+  it "retains untouched array values when editing v2 setup extensions" do
+    decimal = "0.123456789012345678901"
+    type = ACP::Protocol::V2::InitialSessionConfigOption
+    option = type.from_json(%({"configId":"choice","type":"_example.test/value","value":[#{decimal},"old"]}))
+    option.value.as_a[1] = JSON::Any.new("new")
+    option.value_raw.json.should eq(%([#{decimal},"new"]))
+    first = type.from_json(%({"configId":"choice","type":"_example.test/value","value":{"count":18446744073709551615}}))
+    second = type.from_json(%({"configId":"choice","type":"_example.test/value","value":{"count":18446744073709551614}}))
+    first.should_not eq(second)
+
+    cursor = ACP::Protocol::V2::ReplayFrom.from_json(%({"type":"start","_meta":{"example.test/values":[#{decimal},"old"]}}))
+    cursor.json_unmapped["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("new")
+    cursor.meta_raw.not_nil!.field("example.test/values").not_nil!.json.should eq(%([#{decimal},"new"]))
+  end
+end
+
 describe "ACP exact prompt requests" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "0.123456789012345678901"}.each do |kind, number|
     it "keeps a #{kind} in v1 prompt content sent over stdio" do
@@ -1947,7 +2101,7 @@ describe "ACP exact prompt requests" do
         answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
         client.initialize_connection
         block = ACP::Protocol::ContentBlock.from_json(%({"type":"text","text":"Hello","_meta":{"example.test/value":#{number}}}))
-        sent = capture_prompt_reply(feed, outgoing, %({"stopReason":"end_turn"}))
+        sent = capture_request_params(feed, outgoing, %({"stopReason":"end_turn"}))
         client.session_prompt([block], "session").stop_reason.should eq("end_turn")
         params = next_permission_event(sent)
         params.field("prompt").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.field("example.test/value").not_nil!.json.should eq(number)
@@ -1985,7 +2139,7 @@ describe "ACP exact prompt requests" do
       blocks = [embedded, parsed] of ACP::Protocol::ContentBlock
       prompt = ACP::Protocol::SessionPromptParams.new("session", blocks)
       prompt.meta_raw = ACP::Protocol::RawJson.from_json(metadata)
-      sent = capture_prompt_reply(feed, outgoing, %({"stopReason":"end_turn"}))
+      sent = capture_request_params(feed, outgoing, %({"stopReason":"end_turn"}))
       client.session_prompt(prompt).stop_reason.should eq("end_turn")
 
       params = next_permission_event(sent)
@@ -2020,7 +2174,7 @@ describe "ACP exact prompt requests" do
       prompt.meta_raw = ACP::Protocol::RawJson.from_json(%({"example.test/count":18446744073709551615}))
       prompt.prompt.first["resource"]["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("new")
 
-      sent = capture_prompt_reply(feed, outgoing, %({"messageId":"message"}))
+      sent = capture_request_params(feed, outgoing, %({"messageId":"message"}))
       client.session_prompt(prompt).message_id.should eq("message")
       params = next_permission_event(sent)
       params.field("idempotencyKey").not_nil!.as_s?.should eq("original-key")
@@ -2045,7 +2199,7 @@ describe "ACP exact prompt requests" do
   end
 end
 
-private def capture_prompt_reply(feed : IO, outgoing : IO, result : String) : Channel(ACP::Protocol::RawJson)
+private def capture_request_params(feed : IO, outgoing : IO, result : String) : Channel(ACP::Protocol::RawJson)
   requests = Channel(ACP::Protocol::RawJson).new(1)
   spawn do
     next unless line = outgoing.gets

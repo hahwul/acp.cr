@@ -5,6 +5,7 @@ module ACP
     # :nodoc:
     struct ForkParams(Mcp, Option)
       include JSON::Serializable
+      include LosslessMetadata
 
       # Source session whose history should be copied.
       @[JSON::Field(key: "sessionId")]
@@ -33,10 +34,6 @@ module ACP
       @[JSON::Field(key: "configOptions")]
       getter config_options : Array(Option)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Builds a request for the whole session or an announced cursor.
       def initialize(
         @session_id : String,
@@ -47,9 +44,12 @@ module ACP
         @mcp_servers : Array(Mcp)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(Option)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @cwd, @cursor_id, @additional_directories, @mcp_servers, @system_prompt, @config_options, metadata_comparison
     end
 
     # Parameters for creating a v1 session from an existing session.

@@ -116,6 +116,7 @@ module ACP
     # A configuration choice to apply when setting up a v1 session.
     struct InitialSessionConfigOption
       include JSON::Serializable
+      include LosslessMetadata
 
       # ID of the configuration option to set.
       @[JSON::Field(key: "configId")]
@@ -128,13 +129,10 @@ module ACP
       # Value ID or boolean to propose to the Agent.
       getter value : String | Bool
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates an initial value, explicitly tagging boolean choices.
-      def initialize(@config_id : String, @value : String | Bool, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@config_id : String, @value : String | Bool, meta : Hash(String, JSON::Any)? = nil)
         @value_type = "boolean" if @value.is_a?(Bool)
+        self.meta = meta
       end
 
       private def after_initialize : Nil
@@ -143,6 +141,8 @@ module ACP
           raise JSON::ParseException.new("Initial v1 config value does not match its type", 0, 0)
         end
       end
+
+      def_equals_and_hash @config_id, @value_type, @value, metadata_comparison
     end
 
     # :nodoc:

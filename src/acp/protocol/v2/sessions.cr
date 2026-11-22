@@ -19,7 +19,10 @@ module ACP
       # An inclusive cursor for replaying session history.
       struct ReplayFrom
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessOpenObject
+
+        @[JSON::Field(ignore: true)]
+        @metadata_wire : PreservedJson?
 
         # Cursor discriminator. `start` replays from the earliest retained entry.
         @[JSON::Field(key: "type")]
@@ -35,6 +38,25 @@ module ACP
           fields["_meta"] = JSON::Any.new(meta) if meta
           new("start", fields)
         end
+
+        protected def on_unknown_json_attribute(pull, key, key_location)
+          return super unless key == "_meta"
+
+          wire = RawJson.new(pull)
+          metadata = PreservedMetadata.wrap(wire) if wire.object?
+          @metadata_wire = metadata.try(&.partial?) ? nil : metadata
+          retain_unmapped_json(key, wire.json, projection: @metadata_wire.try(&.value))
+        end
+
+        protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+          if key == "_meta" && (metadata = @metadata_wire) && (view = metadata.value.try(&.as_h?)) && value.as_h?.try(&.same?(view))
+            return metadata.raw.json
+          end
+
+          super
+        end
+
+        def_equals_and_hash @cursor_type, @json_unmapped, @raw_fields
       end
 
       # A v2 MCP server with an explicit transport discriminator. Future
@@ -88,6 +110,7 @@ module ACP
       # Parameters for creating a v2 session.
       struct SessionNewParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Absolute working directory for the session.
         property cwd : String
@@ -108,10 +131,6 @@ module ACP
         @[JSON::Field(key: "configOptions")]
         property config_options : Array(InitialSessionConfigOption)?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates new session parameters.
         def initialize(
           @cwd : String,
@@ -119,15 +138,19 @@ module ACP
           @additional_directories : Array(String)? = nil,
           @mcp_servers : Array(McpServer)? = nil,
           @system_prompt : Protocol::SystemPrompt? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @config_options : Array(InitialSessionConfigOption)? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @cwd, @additional_directories, @mcp_servers, @system_prompt, @config_options, metadata_comparison
       end
 
       # Parameters for attaching to an existing v2 session.
       struct SessionResumeParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Existing session ID.
         @[JSON::Field(key: "sessionId")]
@@ -156,10 +179,6 @@ module ACP
         @[JSON::Field(key: "configOptions")]
         property config_options : Array(InitialSessionConfigOption)?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates session resume parameters.
         def initialize(
           @session_id : String,
@@ -169,10 +188,13 @@ module ACP
           @additional_directories : Array(String)? = nil,
           @mcp_servers : Array(McpServer)? = nil,
           @system_prompt : Protocol::SystemPrompt? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @config_options : Array(InitialSessionConfigOption)? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @session_id, @cwd, @additional_directories, @mcp_servers, @replay_from, @system_prompt, @config_options, metadata_comparison
       end
 
       # Optional configuration and slash commands returned during session setup.
@@ -258,6 +280,7 @@ module ACP
       struct InitialSessionConfigOption
         include JSON::Serializable
         include LosslessUnmapped
+        include LosslessMetadata
 
         # ID of the configuration option to set.
         @[JSON::Field(key: "configId")]
@@ -267,15 +290,13 @@ module ACP
         @[JSON::Field(key: "type")]
         getter value_type : String
 
-        # Choice to propose to the Agent, including extension payloads.
-        getter value : JSON::Any
-
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
+        @[JSON::Field(key: "value", converter: ::ACP::Protocol::PreservedMetadata)]
+        @value_wire : PreservedJson
 
         # Creates an initial option with a built-in or extension value type.
-        def initialize(@config_id : String, @value_type : String, @value : JSON::Any, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@config_id : String, @value_type : String, value : JSON::Any | RawJson, meta : Hash(String, JSON::Any)? = nil)
+          @value_wire = value.is_a?(RawJson) ? PreservedMetadata.wrap(value) : PreservedJson.new(value)
+          self.meta = meta
           raise ArgumentError.new("Initial v2 config value does not match its type") unless valid_value?
         end
 
@@ -284,10 +305,34 @@ module ACP
           new(config_id, value.is_a?(Bool) ? "boolean" : "id", JSON::Any.new(value), meta)
         end
 
+        # The choice's JSON::Any view. Values outside its range use JSON null.
+        def value : JSON::Any
+          @value_wire.value || JSON::Any.new(nil)
+        end
+
+        # The exact choice, including opaque extension payloads.
+        def value_raw : RawJson
+          @value_wire.raw
+        end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
+        def_equals_and_hash @config_id, @value_type, value_comparison, @json_unmapped, @raw_fields, metadata_comparison
+
+        protected def value_comparison
+          if @value_wire.partial?
+            value_raw
+          else
+            @value_wire.value || value_raw
+          end
+        end
+
         private def valid_value? : Bool
           case @value_type
-          when "id"      then !@value.as_s?.nil?
-          when "boolean" then !@value.as_bool?.nil?
+          when "id"      then !value.as_s?.nil?
+          when "boolean" then !value.as_bool?.nil?
           else                true
           end
         end

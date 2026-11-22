@@ -599,6 +599,12 @@ client.session_load(
 
 Resumes a previous session by ID.
 
+Pass typed setup parameters to `session_new`, `session_load`,
+`session_resume`, or `session_fork` to attach extension metadata.
+Use `meta_raw` on setup parameters, system prompts, and initial configuration
+options for exact JSON numbers. V2 initial configuration options also expose
+`value_raw` for custom values.
+
 ### ACP v1 request validation
 
 The client checks the Agent's advertised capabilities before calling
