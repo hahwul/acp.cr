@@ -1829,11 +1829,11 @@ describe "ACP stdio messages with wide integers" do
   end
 end
 
-private def with_wide_stdio(&)
+private def with_wide_stdio(*, exact_frames : Bool = false, &)
   reader, feed = IO.pipe
   outgoing, writer = IO.pipe
   outgoing.read_timeout = 2.seconds
-  transport = ACP::StdioTransport.new(reader, writer)
+  transport = ACP::StdioTransport.new(reader, writer, exact_frames: exact_frames)
   yield transport, feed, outgoing
 ensure
   transport.try(&.close)
@@ -6958,5 +6958,280 @@ describe "ACP JSON-RPC response ID types" do
     client.session_state("saved").not_nil!.state.should eq("running")
   ensure
     client.try(&.close)
+  end
+end
+
+private class PendingMcpReplyTransport < ChoiceStateTransport
+  getter finishing = Channel(Nil).new(1)
+  getter release = Channel(Nil).new(1)
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    if message["id"]?.try(&.as_s?) == "finishing"
+      @finishing.send(nil)
+      @release.receive?
+    end
+    super
+  end
+end
+
+private class PausedMcpInvalidRequestStdio < ACP::StdioTransport
+  getter replying = Channel(Nil).new(1)
+  getter release = Channel(Nil).new(1)
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    if message["error"]?.try(&.["code"]?) == JSON::Any.new(ACP::JsonRpcError::INVALID_REQUEST.to_i64)
+      @replying.send(nil)
+      @release.receive?
+    end
+    super
+  end
+end
+
+describe "ACP cancellation request identities" do
+  it "requires one cancellation ID while tolerating optional metadata" do
+    type = ACP::Protocol::CancelRequestParams
+    expect_raises(JSON::ParseException) { type.from_json(%({})) }
+    expect_raises(JSON::ParseException) { type.from_json(%({"requestId":"one","requestId":"two"})) }
+    expect_raises(JSON::ParseException) { type.from_json(%({"requestId":17.0})) }
+    type.from_json(%({"requestId":null})).request_id.should be_nil
+    typed = type.from_json(%({"requestId":"17","_meta":false}))
+    typed.request_id.should eq("17")
+    typed.meta.should be_nil
+    precise = %({"wide":18446744073709551615,"fraction":0.1234567890123456789})
+    type.from_json(%({"requestId":17,"_meta":#{precise}})).meta_raw.not_nil!.json.should eq(precise)
+  end
+
+  it "cancels a v1 request despite malformed optional metadata over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      started = Channel(Nil).new(1)
+      release = Channel(Nil).new(1)
+      client.on_wait_for_terminal_exit = ->(_params : ACP::Protocol::WaitForTerminalExitParams) do
+        started.send(nil)
+        release.receive
+        ACP::Protocol::WaitForTerminalExitResult.new(exit_code: 0)
+      end
+      feed.puts %({"jsonrpc":"2.0","id":17,"method":"terminal/wait_for_exit","params":{"sessionId":"root","terminalId":"terminal"}})
+      next_permission_event(started)
+      feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":17,"_meta":false}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq(17)
+      reply["error"]["code"].should eq(ACP::JsonRpcError::REQUEST_CANCELLED)
+      release.send(nil)
+    ensure
+      release.try(&.close)
+      client.try(&.close)
+    end
+  end
+
+  it "cancels only the matching live v2 request with an exact stdio ID" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      started = Channel(Nil).new(2)
+      release = Channel(Nil).new(2)
+      barriers = Channel(Nil).new(1)
+      seen = [] of JSON::Any
+      client.on_request_permission = ->(_params : ACP::Protocol::V2::RequestPermissionParams) do
+        started.send(nil)
+        release.receive
+        ACP::Protocol::V2::RequestPermissionResult.selected("allow")
+      end
+      client.on_notification = ->(method : String, params : JSON::Any?) do
+        if method == "$/cancel_request"
+          seen << params.not_nil!
+        elsif method == "_barrier"
+          barriers.send(nil)
+        end
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+      permissions = %({"sessionId":"root","title":"Read","options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]})
+      {"17", %("17")}.each do |id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"session/request_permission","params":#{permissions}})
+        next_permission_event(started)
+      end
+
+      [
+        %("params":{"requestId":17,"requestId":"17"}),
+        %("params":{"requestId":17},"params":{"requestId":"17"}),
+        %("params":{"requestId":17.0000000000000001}),
+        %("params":{"requestId":"unknown"}),
+        %("params":{"requestId":"17"},"result":null),
+        %("params":{"requestId":"17"},"error":{"code":-32603,"message":"Mixed"}),
+      ].each do |fields|
+        feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request",#{fields}})
+      end
+      feed.puts %({"jsonrpc":"2.0","method":"_barrier"})
+      next_permission_event(barriers)
+      seen.should be_empty
+
+      feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"17","_meta":{"wide":18446744073709551615,"label":"visible"}}})
+      cancelled = JSON.parse(outgoing.gets.not_nil!)
+      cancelled["id"].as_s.should eq("17")
+      cancelled["result"]["outcome"]["outcome"].should eq("cancelled")
+
+      feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"17"}})
+      feed.puts %({"jsonrpc":"2.0","method":"_barrier"})
+      next_permission_event(barriers)
+      seen.size.should eq(1)
+      seen.first["requestId"].as_s.should eq("17")
+      seen.first["_meta"]["label"].should eq("visible")
+      seen.first["_meta"]["wide"]?.should be_nil
+
+      2.times { release.send(nil) }
+      kept = JSON.parse(outgoing.gets.not_nil!)
+      kept["id"].as_i64.should eq(17)
+      kept["result"]["outcome"]["optionId"].should eq("allow")
+    ensure
+      release.try(&.close)
+      client.try(&.close)
+    end
+  end
+
+  it "rejects noninteger or ambiguous Agent IDs before they can become cancellation targets" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      calls = 0
+      client.on_request_permission = ->(_params : ACP::Protocol::V2::RequestPermissionParams) do
+        calls += 1
+        ACP::Protocol::V2::RequestPermissionResult.selected("allow")
+      end
+      server = client.register_mcp_server("fixture") do |_context|
+        calls += 1
+        ACP::Protocol::MessageMcpResponse.success(JSON::Any.new(nil))
+      end
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [ACP::Protocol::V2::McpServer.acp(server)]))
+      requests = {
+        %("method":"session/request_permission","params":{"sessionId":"root","title":"Read","options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}),
+        %("method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":"m","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":#{ACP::MCP_PROTOCOL_VERSION.to_json},"io.modelcontextprotocol/clientCapabilities":{}}}}),
+      }
+      requests.each do |request|
+        { %("id":17.0000000000000001), %("id":17,"id":"17") }.each do |id_fields|
+          feed.puts %({"jsonrpc":"2.0",#{id_fields},#{request}})
+          reply = JSON.parse(outgoing.gets.not_nil!)
+          reply["id"].raw.should be_nil
+          reply["error"]["code"].should eq(ACP::JsonRpcError::INVALID_REQUEST)
+        end
+      end
+      calls.should eq(0)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps dispatch running while an ambiguous MCP request error waits for output" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedMcpInvalidRequestStdio.new(reader, writer)
+    client = ACP::V2::Client.new(transport)
+    checkpoint = Channel(Nil).new(1)
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      checkpoint.send(nil) if method == "_checkpoint"
+      nil
+    end
+    initialize_wide_v2(client, feed, outgoing)
+    feed.puts %({"jsonrpc":"2.0","id":17,"id":18,"method":"mcp/message","params":{}})
+    next_permission_event(transport.replying)
+
+    feed.puts %({"jsonrpc":"2.0","method":"_checkpoint"})
+    next_permission_event(checkpoint)
+
+    transport.release.send(nil)
+    error = JSON.parse(outgoing.gets.not_nil!)
+    error["id"].raw.should be_nil
+    error["error"]["code"].should eq(ACP::JsonRpcError::INVALID_REQUEST)
+  ensure
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "ignores a cancellation after the native MCP terminal reply is selected" do
+    transport = PendingMcpReplyTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    contexts = Channel(ACP::McpRequestContext).new(1)
+    cancellations = 0
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      cancellations += 1 if method == "$/cancel_request"
+      nil
+    end
+    server = client.register_mcp_server("fixture") do |context|
+      contexts.send(context)
+      ACP::Protocol::MessageMcpResponse.success(JSON::Any.new("selected"))
+    end
+    client.initialize_connection
+    next_answer(transport)["method"].should eq("initialize")
+    client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", mcp_servers: [ACP::Protocol::V2::McpServer.acp(server)]))
+    next_answer(transport)["method"].should eq("session/new")
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"finishing","method":"mcp/message","params":{"serverId":#{server.server_id.to_json},"requestId":"m","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":#{ACP::MCP_PROTOCOL_VERSION.to_json},"io.modelcontextprotocol/clientCapabilities":{}}}}}))
+    context = next_permission_event(contexts)
+    next_permission_event(transport.finishing)
+    transport.inject_raw(%({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"finishing"}}))
+    choice_state_barrier(client, transport)
+    next_answer(transport)["method"].should eq("_barrier")
+    cancellations.should eq(0)
+    context.cancelled?.should be_false
+
+    transport.release.send(nil)
+    reply = next_answer(transport)
+    reply["id"].should eq("finishing")
+    reply["result"]["result"].should eq("selected")
+  ensure
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+  end
+
+  it "ignores ambiguous plain and wrapped cancellations before translating their IDs" do
+    with_wide_stdio(exact_frames: true) do |client, client_send, client_read|
+      with_wide_stdio(exact_frames: true) do |proxy, proxy_send, proxy_read|
+        with_wide_stdio(exact_frames: true) do |agent, agent_send, agent_read|
+          relay = ACP::Conductor.new(client, agent, proxies: [proxy])
+          spawn relay.run
+          client_send.puts %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}})
+          proxy_init = JSON.parse(proxy_read.gets.not_nil!)
+          proxy_send.puts %({"jsonrpc":"2.0","id":"init","method":"proxy/successor","params":{"method":"initialize","params":{"protocolVersion":2}}})
+          agent_init = JSON.parse(agent_read.gets.not_nil!)
+          agent_send.puts %({"jsonrpc":"2.0","id":#{agent_init["id"]},"result":{"protocolVersion":2}})
+          JSON.parse(proxy_read.gets.not_nil!)["id"].should eq("init")
+          proxy_send.puts %({"jsonrpc":"2.0","id":#{proxy_init["id"]},"result":{"protocolVersion":2}})
+          JSON.parse(client_read.gets.not_nil!)["id"].should eq(1)
+
+          client_send.puts %({"jsonrpc":"2.0","id":4,"id":17,"method":"_inbound"})
+          ambiguous = JSON.parse(client_read.gets.not_nil!)
+          ambiguous["id"].raw.should be_nil
+          ambiguous["error"]["code"].should eq(ACP::JsonRpcError::INVALID_REQUEST)
+
+          client_send.puts %({"jsonrpc":"2.0","id":17,"method":"_inbound"})
+          inbound = JSON.parse(proxy_read.gets.not_nil!)
+          client_send.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":4,"requestId":17}})
+          client_send.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":4},"params":{"requestId":17}})
+          client_send.puts %({"jsonrpc":"2.0","method":"_checkpoint"})
+          JSON.parse(proxy_read.gets.not_nil!)["method"].should eq("_checkpoint")
+          client_send.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":17}})
+          JSON.parse(proxy_read.gets.not_nil!)["params"]["requestId"].should eq(inbound["id"])
+
+          proxy_send.puts %({"jsonrpc":"2.0","id":"17","method":"proxy/successor","params":{"method":"_outbound"}})
+          outbound = JSON.parse(agent_read.gets.not_nil!)
+          proxy_send.puts %({"jsonrpc":"2.0","method":"proxy/successor","params":{"method":"$/cancel_request","params":{"requestId":"wrong","requestId":"17"}}})
+          proxy_send.puts %({"jsonrpc":"2.0","method":"proxy/successor","params":{"method":"$/cancel_request","params":{"requestId":"wrong"},"params":{"requestId":"17"}}})
+          proxy_send.puts %({"jsonrpc":"2.0","method":"proxy/successor","params":{"method":"_checkpoint"}})
+          JSON.parse(agent_read.gets.not_nil!)["method"].should eq("_checkpoint")
+          proxy_send.puts %({"jsonrpc":"2.0","method":"proxy/successor","params":{"method":"$/cancel_request","params":{"requestId":"17"}}})
+          JSON.parse(agent_read.gets.not_nil!)["params"]["requestId"].should eq(outbound["id"])
+          agent_send.puts %({"jsonrpc":"2.0","id":#{outbound["id"]},"result":null})
+          JSON.parse(proxy_read.gets.not_nil!)["id"].should eq("17")
+        ensure
+          relay.try(&.close)
+        end
+      end
+    end
   end
 end

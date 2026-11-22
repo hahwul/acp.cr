@@ -1614,16 +1614,29 @@ module ACP
     # request: with a normal result or with `-32800` (Request cancelled).
     struct CancelRequestParams
       include JSON::Serializable
+      include LosslessMetadata
 
-      # The ID of the request to cancel (required; may be null on the wire).
-      @[JSON::Field(key: "requestId", emit_null: true)]
+      # The target request ID. ACP v1 permits null.
+      @[JSON::Field(key: "requestId", emit_null: true, presence: true)]
       property request_id : RequestId?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      @[JSON::Field(ignore: true)]
+      @request_id_present : Bool = false
 
-      def initialize(@request_id : RequestId?, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a request cancellation notification.
+      def initialize(@request_id : RequestId?, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
+      end
+
+      # Reads a cancellation with one unambiguous ID.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"requestId"}, optional: {"_meta"}))
+      end
+
+      private def after_initialize : Nil
+        unless @request_id_present
+          raise JSON::SerializableError.new("Missing requestId", to_s, "requestId", 1, 1, nil)
+        end
       end
     end
 

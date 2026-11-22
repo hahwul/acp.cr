@@ -572,7 +572,8 @@ module ACP
       envelope = value.as_h?
       method = envelope.try(&.["method"]?).try(&.as_s?)
       session_update = method == Protocol::AgentMethod::SESSION_UPDATE && envelope.try(&.["id"]?).try(&.raw).nil?
-      exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE, Protocol::ClientMethod::SESSION_REQUEST_PERMISSION)
+      exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE,
+        Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, Protocol::ProtocolMethod::CANCEL_REQUEST)
       result = envelope.try(&.["result"]?).try(&.as_h?)
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
@@ -581,10 +582,12 @@ module ACP
       session_list_result = result && (result.has_key?("sessions") || result.has_key?("nextCursor"))
       identity_result = result && (result.has_key?("sessionId") || result.has_key?("messageId"))
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
-      response = envelope && envelope.has_key?("id") && !envelope.has_key?("method")
+      has_id = envelope.try(&.has_key?("id"))
+      response = has_id && !envelope.try(&.has_key?("method"))
       structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
       if exact_params || versioned_result || choices_result || state_result || session_list_result || identity_result || result_metadata || structured_error ||
-         (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?)
+         (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?) ||
+         (has_id && method && !Protocol::WireFrame.repeated_members(line, "id").empty?)
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value

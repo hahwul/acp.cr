@@ -33,6 +33,11 @@ module ACP
         end
       end
 
+      # Reads a wrapper with one inner method and at most one parameter value.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "method", "params"))
+      end
+
       private def after_initialize : Nil
         normalize_params
         raise JSON::ParseException.new("Successor params must be an object or array", 1, 1) unless valid_params?

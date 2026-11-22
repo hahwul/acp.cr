@@ -1945,9 +1945,17 @@ module ACP
       end
 
       kind = Protocol.classify_message(msg)
-
+      ambiguous_id = kind.request? && wire_frame && !Protocol::WireFrame.repeated_members(wire_frame.json, "id").empty?
       if obj["method"]?.try(&.as_s?) == Protocol::ClientMethod::MCP_MESSAGE
-        handle_mcp_request(msg, wire_frame) if obj.has_key?("id")
+        if ambiguous_id
+          @mcp_provider.reject_invalid_envelope
+        elsif obj.has_key?("id")
+          handle_mcp_request(msg, wire_frame)
+        end
+        return false
+      end
+      if ambiguous_id
+        reject_invalid_request("Ambiguous JSON-RPC request id")
         return false
       end
 
@@ -1962,7 +1970,7 @@ module ACP
 
       if v2_wire? && kind != Protocol::MessageKind::Response && !v2_initialization_result
         if kind == Protocol::MessageKind::Request
-          respond_to_agent_error(Protocol.extract_id(msg), JsonRpcError::INVALID_REQUEST, "ACP v2 initialization is required")
+          respond_to_agent_error(agent_request_id(msg), JsonRpcError::INVALID_REQUEST, "ACP v2 initialization is required")
         end
         return false
       end
@@ -2006,9 +2014,16 @@ module ACP
       false
     end
 
+    # Retains the Agent's string or integer ID without numeric coercion.
+    private def agent_request_id(msg : JSON::Any) : Protocol::RequestId?
+      if value = msg["id"]?
+        value.as_i64? || value.as_s?
+      end
+    end
+
     # Handles the binding's request direction without blocking the dispatcher.
     private def handle_mcp_request(msg : JSON::Any, frame : Protocol::WireFrame?) : Nil
-      unless msg["jsonrpc"]?.try(&.as_s?) == "2.0" && (id = Protocol.extract_id(msg))
+      unless msg["jsonrpc"]?.try(&.as_s?) == "2.0" && (id = agent_request_id(msg))
         return @mcp_provider.reject_invalid_envelope
       end
 
@@ -2261,7 +2276,7 @@ module ACP
       # (fractional, out of range, bool, container). Echoing a coerced ID
       # would answer the wrong request, so the latter gets -32600 with
       # `"id": null`, as JSON-RPC 2.0 §5 requires.
-      id = Protocol.extract_id(msg)
+      id = agent_request_id(msg)
       unless id || msg["id"]?.try(&.raw).nil?
         ClientLog.warn { "Rejecting agent request with an unusable JSON-RPC id" }
         reject_invalid_request("request id must be a string, an integer, or null")
@@ -2541,18 +2556,34 @@ module ACP
     # dropped. Other requests are left to their handler, which still answers
     # them. The notification is then passed to `on_notification`, so the
     # application can stop the work.
-    private def handle_cancel_request(params : JSON::Any?) : Nil
-      id = params.try { |p| Protocol::CancelRequestParams.from_json(p.to_json).request_id rescue nil }
+    private def handle_cancel_request(params : JSON::Any?, params_json : String?) : Nil
+      cancellation = begin
+        json = params_json || params.try { |value| Protocol::WireFrame.encode(value) }
+        Protocol::CancelRequestParams.from_json(json) if json
+      rescue JSON::Error
+        nil
+      end
+      return unless cancellation
+
+      id = cancellation.request_id
       entry = nil
-      if id && !@mcp_provider.cancel(id)
-        entry = @pending_mutex.synchronize do
-          req = @in_flight[id]?
-          if req && CANCEL_ANSWERED_EARLY.includes?(req.method)
-            req.answered = true
-            @in_flight.delete(id)
+      active = false
+      if id
+        active = @mcp_provider.cancel(id)
+        unless active
+          active = @pending_mutex.synchronize do
+            req = @in_flight[id]?
+            next false unless req && !req.answered?
+
+            if CANCEL_ANSWERED_EARLY.includes?(req.method)
+              req.answered = true
+              entry = @in_flight.delete(id)
+            end
+            true
           end
         end
       end
+      return if v2_wire? && !active
 
       if id && entry
         ClientLog.info { "Agent cancelled request id=#{id} (#{entry.method})" }
@@ -2569,6 +2600,10 @@ module ACP
         end
       end
 
+      if @on_notification && params_json && !raw_notification_representable?(params_json)
+        wire = Protocol::RawJson.from_json(params_json)
+        params = Protocol::PreservedJson.new(wire, project_object_members: true, project_nested_objects: true).value
+      end
       deliver_raw_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, params)
     end
 
@@ -2645,7 +2680,7 @@ module ACP
 
       params = msg["params"]?
       params_json = frame.try(&.params_json)
-      if frame && !params_json && method_name == Protocol::AgentMethod::SESSION_UPDATE
+      if frame && !params_json && method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
         params_json = Protocol::WireFrame.field(frame.json, "params")
       end
       if params_json && !method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
@@ -2659,7 +2694,11 @@ module ACP
       when Protocol::AgentMethod::SESSION_UPDATE
         handle_session_update(params, params_json)
       when Protocol::ProtocolMethod::CANCEL_REQUEST
-        handle_cancel_request(params)
+        return unless msg["jsonrpc"]?.try(&.as_s?) == "2.0"
+        return if msg["result"]? || msg["error"]?
+        return if frame && !Protocol::WireFrame.repeated_members(frame.json, "jsonrpc", "method", "params").empty?
+
+        handle_cancel_request(params, params_json)
       when Protocol::ClientMethod::ELICITATION_COMPLETE
         handle_elicitation_complete(params)
       when Protocol::ClientMethod::AUTH_STATUS_UPDATE
@@ -2680,13 +2719,13 @@ module ACP
     end
 
     private def deliver_raw_session_update(params : JSON::Any?, params_json : String?) : Nil
-      return unless @on_notification && raw_session_update_representable?(params_json)
+      return unless @on_notification && raw_notification_representable?(params_json)
 
       deliver_raw_notification(Protocol::AgentMethod::SESSION_UPDATE, params)
     end
 
-    # A wide routing projection cannot be delivered as application data.
-    private def raw_session_update_representable?(params_json : String?) : Bool
+    # Whether the original notification parameters fit in JSON::Any.
+    private def raw_notification_representable?(params_json : String?) : Bool
       JSON.parse(params_json) if params_json
       true
     rescue JSON::ParseException
