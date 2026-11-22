@@ -135,9 +135,9 @@ module ACP
 
     # :nodoc:
     module ProjectedContent
-      def self.from_json(pull : JSON::PullParser) : PreservedJson
+      def self.from_json(pull : JSON::PullParser, *, project_nested_objects : Bool = false) : PreservedJson
         location = pull.location
-        content = PreservedJson.new(pull, project_object_members: true)
+        content = PreservedJson.new(RawJson.new(pull), project_object_members: true, project_nested_objects: project_nested_objects)
         unless content.value
           raise JSON::ParseException.new("Content must be representable or a JSON object", *location)
         end
@@ -177,7 +177,7 @@ module ACP
         unless pull.kind.begin_array?
           raise JSON::ParseException.new("Content blocks must be a JSON array", *pull.location)
         end
-        PreservedJson.new(pull, project_array_objects: true)
+        PreservedJson.new(RawJson.new(pull), project_array_objects: true, project_nested_objects: true)
       end
 
       def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
@@ -566,6 +566,7 @@ module ACP
     # Text-based resource contents embedded in a resource content block.
     struct TextResourceContents
       include JSON::Serializable
+      include LosslessMetadata
 
       # The URI identifying the resource.
       property uri : String
@@ -577,22 +578,23 @@ module ACP
       @[JSON::Field(key: "mimeType")]
       property mime_type : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates an embedded text resource.
       def initialize(
         @uri : String,
         @text : String,
         @mime_type : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @uri, @text, @mime_type, metadata_comparison
     end
 
     # Binary resource contents embedded in a resource content block.
     struct BlobResourceContents
       include JSON::Serializable
+      include LosslessMetadata
 
       # The URI identifying the resource.
       property uri : String
@@ -604,17 +606,17 @@ module ACP
       @[JSON::Field(key: "mimeType")]
       property mime_type : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates an embedded binary resource.
       def initialize(
         @uri : String,
         @blob : String,
         @mime_type : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @uri, @blob, @mime_type, metadata_comparison
     end
 
     # ─── Resource Content Block (Embedded Resource) ───────────────────
@@ -629,10 +631,21 @@ module ACP
       include JSON::Serializable
       include LosslessMetadata
 
+      # :nodoc:
+      module ResourceField
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          ProjectedContent.from_json(pull, project_nested_objects: true)
+        end
+
+        def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+          ProjectedContent.to_json(value, builder)
+        end
+      end
+
       # Always "resource" for this block type.
       getter type : String = "resource"
 
-      @[JSON::Field(key: "resource", converter: ::ACP::Protocol::ProjectedContent)]
+      @[JSON::Field(key: "resource", converter: ::ACP::Protocol::ResourceContentBlock::ResourceField)]
       @resource_wire : PreservedJson
 
       @[JSON::Field(ignore: true)]
@@ -649,6 +662,14 @@ module ACP
       )
         @type = "resource"
         @resource_wire = PreservedJson.new(resource)
+        self.meta = meta
+      end
+
+      # Embeds a typed resource, including its exact extension metadata.
+      def initialize(resource : TextResourceContents | BlobResourceContents, @annotations : Annotations? = nil,
+                     meta : Hash(String, JSON::Any)? = nil)
+        @type = "resource"
+        @resource_wire = ResourceField.from_json(JSON::PullParser.new(WireFrame.encode(resource)))
         self.meta = meta
       end
 

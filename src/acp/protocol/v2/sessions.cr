@@ -396,6 +396,7 @@ module ACP
       # Parameters for inserting a user prompt into a v2 session.
       struct SessionPromptParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Target session ID.
         @[JSON::Field(key: "sessionId")]
@@ -408,21 +409,19 @@ module ACP
         @[JSON::Field(key: "idempotencyKey")]
         property idempotency_key : String?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Builds a prompt with raw or extension content blocks.
         def initialize(
           @session_id : String,
           prompt : Array(JSON::Any),
           @idempotency_key : String? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
           @prompt_wire = PreservedJson.new(JSON::Any.new(prompt))
+          self.meta = meta
         end
 
-        private def initialize(@session_id : String, @prompt_wire : PreservedJson, @idempotency_key : String?, @meta : Hash(String, JSON::Any)?)
+        private def initialize(@session_id : String, @prompt_wire : PreservedJson, @idempotency_key : String?, meta : Hash(String, JSON::Any)?)
+          self.meta = meta
         end
 
         # Builds a prompt from typed v2 content and skill references.
@@ -447,6 +446,8 @@ module ACP
         def prompt_raw : RawJson
           @prompt_wire.raw
         end
+
+        def_equals_and_hash @session_id, @prompt_wire, @idempotency_key, metadata_comparison
       end
 
       # Acknowledges insertion into the transcript. Foreground state and stop

@@ -1938,6 +1938,127 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact prompt requests" do
+  {"wide integer" => "18446744073709551615", "precise decimal" => "0.123456789012345678901"}.each do |kind, number|
+    it "keeps a #{kind} in v1 prompt content sent over stdio" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::Client.new(transport)
+        client.request_timeout = client.prompt_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+        client.initialize_connection
+        block = ACP::Protocol::ContentBlock.from_json(%({"type":"text","text":"Hello","_meta":{"example.test/value":#{number}}}))
+        sent = capture_prompt_reply(feed, outgoing, %({"stopReason":"end_turn"}))
+        client.session_prompt([block], "session").stop_reason.should eq("end_turn")
+        params = next_permission_event(sent)
+        params.field("prompt").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.field("example.test/value").not_nil!.json.should eq(number)
+      ensure
+        client.try(&.close)
+      end
+    end
+
+    it "retains a #{kind} in top-level v1 and v2 prompt metadata" do
+      metadata = %({"example.test/value":#{number}})
+      wire = %({"sessionId":"session","prompt":[{"type":"text","text":"Hello"}],"_meta":#{metadata}})
+      {ACP::Protocol::SessionPromptParams, ACP::Protocol::V2::SessionPromptParams}.each do |type|
+        params = type.from_json(wire)
+        ACP::Protocol::RawJson.from_json(params.to_json).field("_meta").not_nil!.json.should eq(metadata)
+      end
+    end
+  end
+
+  it "sends v1 typed prompt metadata and embedded text resource metadata over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = client.prompt_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"embeddedContext":true}}}))
+      client.initialize_connection
+
+      decimal = "0.123456789012345678901"
+      metadata = %({"example.test/count":18446744073709551615,"example.test/values":[#{decimal},"old"]})
+      resource = ACP::Protocol::TextResourceContents.from_json(%({"uri":"file:///work/notes","text":"Notes","_meta":#{metadata}}))
+      resource.meta_raw.not_nil!.json.should eq(metadata)
+      embedded = ACP::Protocol::ResourceContentBlock.new(resource)
+      parsed = ACP::Protocol::ResourceContentBlock.from_json(embedded.to_json)
+      [embedded, parsed].each do |block|
+        block.resource["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("new")
+      end
+      blocks = [embedded, parsed] of ACP::Protocol::ContentBlock
+      prompt = ACP::Protocol::SessionPromptParams.new("session", blocks)
+      prompt.meta_raw = ACP::Protocol::RawJson.from_json(metadata)
+      sent = capture_prompt_reply(feed, outgoing, %({"stopReason":"end_turn"}))
+      client.session_prompt(prompt).stop_reason.should eq("end_turn")
+
+      params = next_permission_event(sent)
+      params.field("sessionId").not_nil!.as_s?.should eq("session")
+      params.field("_meta").not_nil!.json.should eq(metadata)
+      params.field("prompt").not_nil!.elements?.not_nil!.each do |block|
+        wire = block.field("resource").not_nil!.field("_meta").not_nil!
+        wire.field("example.test/count").not_nil!.json.should eq("18446744073709551615")
+        wire.field("example.test/values").not_nil!.json.should eq(%([#{decimal},"new"]))
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "sends v2 metadata with edited embedded resource content over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = client.prompt_timeout = 2.0
+      offer = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"prompt":{"embeddedContext":{}}}}})
+      answer_identity_request(feed, outgoing, offer)
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"session"}))
+      client.session_new("/work")
+
+      decimal = "0.123456789012345678901"
+      metadata = %({"example.test/values":[#{decimal},"old"]})
+      resource = ACP::Protocol::BlobResourceContents.from_json(%({"uri":"file:///work/notes","blob":"Tm90ZXM=","_meta":#{metadata}}))
+      resource.meta_raw.not_nil!.json.should eq(metadata)
+      blocks = [ACP::Protocol::ResourceContentBlock.new(resource)] of ACP::Protocol::ContentBlock
+      prompt = ACP::Protocol::V2::SessionPromptParams.new("session", blocks, idempotency_key: "original-key")
+      prompt.meta_raw = ACP::Protocol::RawJson.from_json(%({"example.test/count":18446744073709551615}))
+      prompt.prompt.first["resource"]["_meta"]["example.test/values"].as_a[1] = JSON::Any.new("new")
+
+      sent = capture_prompt_reply(feed, outgoing, %({"messageId":"message"}))
+      client.session_prompt(prompt).message_id.should eq("message")
+      params = next_permission_event(sent)
+      params.field("idempotencyKey").not_nil!.as_s?.should eq("original-key")
+      params.field("_meta").not_nil!.json.should eq(prompt.meta_raw.not_nil!.json)
+      block = params.field("prompt").not_nil!.elements?.not_nil!.first
+      block.field("resource").not_nil!.field("_meta").not_nil!.field("example.test/values").not_nil!.json.should eq(%([#{decimal},"new"]))
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects v2 prompts with metadata that a JSON::Any transport would round" do
+    with_v2_request_client do |client, transport|
+      params = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"session","prompt":[{"type":"text","text":"Hello"}],"_meta":{"example.test/ratio":0.123456789012345678901}}))
+      expect_raises(ACP::ProtocolError, /cannot preserve/) { client.session_prompt(params) }
+      transport.sent_messages.size.should eq(1)
+
+      params = ACP::Protocol::V2::SessionPromptParams.from_json(%({"sessionId":"session","prompt":[{"type":"resource_link","uri":"file:///work/notes","name":"Notes","size":-0,"_meta":{"example.test/ratio":0.123456789012345678901}}]}))
+      expect_raises(ACP::ProtocolError, /cannot preserve/) { client.session_prompt(params) }
+      transport.sent_messages.size.should eq(1)
+    end
+  end
+end
+
+private def capture_prompt_reply(feed : IO, outgoing : IO, result : String) : Channel(ACP::Protocol::RawJson)
+  requests = Channel(ACP::Protocol::RawJson).new(1)
+  spawn do
+    next unless line = outgoing.gets
+
+    request = ACP::Protocol::RawJson.from_json(line)
+    requests.send(request.field("params").not_nil!)
+    feed.puts %({"jsonrpc":"2.0","id":#{request.field("id").not_nil!.json},"result":#{result}})
+  rescue IO::Error
+    requests.close
+  end
+  requests
+end
+
 describe "ACP exact authentication replies" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "0.123456789012345678901"}.each do |kind, number|
     it "accepts a #{kind} in v1 login and logout results" do

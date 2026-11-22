@@ -179,7 +179,9 @@ return the same form replies as a typed handler. Invalid submissions return
 [ACP v1 Elicitation](https://agentclientprotocol.com/protocol/v1/elicitation)
 
 For `session_prompt`, supply at least one content block. An optional
-`idempotency_key` must contain 1 to 255 characters. Session setup requires
+`idempotency_key` must contain 1 to 255 characters. Set `meta_raw` on
+`ACP::Protocol::V2::SessionPromptParams` to send exact extension metadata.
+Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable
 path for each stdio server. Invalid arguments raise `ArgumentError` before
 the client sends the request.
@@ -721,7 +723,10 @@ client.session_prompt(
 ) : ACP::Protocol::SessionPromptResult
 ```
 
-Sends content blocks as a prompt to the active session.
+Sends content blocks as a prompt to the active session. Pass
+`ACP::Protocol::SessionPromptParams` to specify a session and include
+extension metadata. Set `meta_raw` to keep exact JSON numbers. Stdio
+preserves these values, and custom transports can implement `send_wire`.
 
 ### `#session_prompt_text`
 
