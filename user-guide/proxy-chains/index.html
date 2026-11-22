@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Connect ACP clients and agents through one or more draft proxy components">
+  <title>Proxy Chains - acp.cr</title>
+  <script>(function(){try{var t=localStorage.getItem("hwaro-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}})()</script>
+  <meta property="og:title" content="Proxy Chains">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://acp.cr.hahwul.com/user-guide/proxy-chains/">
+  <meta property="og:description" content="Connect ACP clients and agents through one or more draft proxy components">
+  <meta property="og:image" content="https://acp.cr.hahwul.com/og-images/user-guide-proxy-chains.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Proxy Chains">
+  <meta name="twitter:description" content="Connect ACP clients and agents through one or more draft proxy components">
+  <meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/user-guide-proxy-chains.png">
+  <link rel="canonical" href="https://acp.cr.hahwul.com/user-guide/proxy-chains/">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  
+  <meta name="apple-mobile-web-app-title" content="acp.cr">
+
+</head>
+<body data-section="user-guide">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="docs-header">
+  <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+  </button>
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav class="header-nav" aria-label="Sections">
+    <a href="https://acp.cr.hahwul.com/user-guide/" class="active">User Guide</a><a href="https://acp.cr.hahwul.com/api-reference/">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" type="button" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>&#8984;K</kbd>
+    </button>
+    <button class="theme-toggle" type="button" data-mode="auto" aria-label="Theme: auto" title="Theme: auto">
+      <svg class="tt-auto" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.75a6.25 6.25 0 0 1 0 12.5z" fill="currentColor"/></svg>
+      <svg class="tt-light" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 .9v2M8 13.1v2M.9 8h2M13.1 8h2M2.98 2.98l1.42 1.42M11.6 11.6l1.42 1.42M13.02 2.98L11.6 4.4M4.4 11.6l-1.42 1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <svg class="tt-dark" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 9.9A5.8 5.8 0 0 1 6.1 2.6a5.8 5.8 0 1 0 7.3 7.3z" fill="currentColor"/></svg>
+    </button>
+    <a class="gh-link" href="https://github.com/hahwul/acp.cr" aria-label="GitHub repository">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" id="searchInput" aria-label="Search" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+<aside class="docs-sidebar" id="sidebar">
+
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">User Guide</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/user-guide/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/proxy-chains/" class="active" aria-current="page">Proxy Chains</a></li>
+      
+    </ul>
+  </div>
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">API Reference</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/api-reference/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/client/">Client</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      
+    </ul>
+  </div>
+  
+</aside>
+<div class="sidebar-scrim"></div>
+  <main id="main" class="docs-main">
+    <h1>Proxy Chains</h1>
+    <p class="lede">Connect ACP clients and agents through one or more draft proxy components</p>
+    <p><code>ACP::Conductor</code> and <code>ACP::Proxy</code> implement the draft
+<a href="https://agentclientprotocol.com/rfds/proxy-chains">Proxy Chains RFD</a> for ACP v1
+and v2 Preview. A terminal conductor accepts <code>initialize</code>, sends
+<code>proxy/initialize</code> to each proxy, and sends <code>initialize</code> to the final agent.
+The chain negotiates one protocol version.</p>
+<h2 id="run-a-proxy-component">Run a proxy component</h2>
+<p>Compile this program and pass its executable to a conductor. The default proxy
+forwards ordinary requests and notifications in both directions, including
+extension methods.</p>
+<pre><code class="language-crystal hljs"><span class="hljs-keyword">require</span> <span class="hljs-string">&quot;acp&quot;</span>
+
+<span class="hljs-variable constant_">ACP::Proxy</span>.new(<span class="hljs-variable constant_">STDIN</span>, <span class="hljs-variable constant_">STDOUT</span>).run
+</code></pre>
+<p>Set <code>on_message</code> before <code>run</code> to forward a modified
+<code>Protocol::ProxySuccessorMessage</code>, return a local <code>Protocol::ProxyReply</code>, or
+return <code>nil</code> to drop a notification or answer a request with method not found.
+The handler receives the direction and a boolean indicating whether the message
+is a request. It runs on the routing fiber, so keep it short. Use
+<code>on_initialize_result</code> to transform the successor's advertised fields while
+keeping its <code>protocolVersion</code>.</p>
+<h2 id="run-a-conductor">Run a conductor</h2>
+<pre><code class="language-crystal hljs"><span class="hljs-keyword">require</span> <span class="hljs-string">&quot;acp&quot;</span>
+
+client <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::StdioTransport</span>.new(<span class="hljs-variable constant_">STDIN</span>, <span class="hljs-variable constant_">STDOUT</span>, exact_frames: <span class="hljs-literal">true</span>)
+proxy <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::ProcessTransport</span>.new(<span class="hljs-string">&quot;./my-proxy&quot;</span>, exact_frames: <span class="hljs-literal">true</span>)
+agent <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::ProcessTransport</span>.new(<span class="hljs-string">&quot;my-agent&quot;</span>, [<span class="hljs-string">&quot;--stdio&quot;</span>], exact_frames: <span class="hljs-literal">true</span>)
+
+<span class="hljs-variable constant_">ACP::Conductor</span>.new(client, agent, proxies: [proxy]).run
+</code></pre>
+<p>List proxies in order from the client to the agent. Pass <code>nil</code> for the agent
+to run a nested conductor that receives <code>proxy/initialize</code> and connects to its
+successor through its parent conductor. Use <code>versions: [1_u16]</code> or
+<code>versions: [2_u16]</code> to restrict local protocol negotiation.</p>
+<p>A conductor owns its transports and closes the chain when a component
+disconnects. For stdio and process transports, use <code>exact_frames: true</code>. A
+custom transport can preserve exact payloads by implementing
+<code>Transport#receive_frame</code> and <code>Transport#send_wire</code>.</p>
+<p>The relay assigns request IDs independently at each hop and translates
+<code>$/cancel_request</code> to the next hop's ID. It retains exact JSON in parameters,
+results, and errors, including unknown fields, explicit nulls, and large
+numbers. <code>_meta</code> on a <code>proxy/successor</code> wrapper applies to that hop.</p>
+
+    
+    <nav class="page-nav" aria-label="Adjacent pages">
+      
+      <a class="page-nav-link page-nav-prev" href="https://acp.cr.hahwul.com/user-guide/error-handling/" rel="prev">
+        <span class="page-nav-label">Previous</span>
+        <span class="page-nav-title">Error Handling</span>
+      </a>
+      
+      
+      <a class="page-nav-link page-nav-next" href="https://acp.cr.hahwul.com/api-reference/" rel="next">
+        <span class="page-nav-label">Next</span>
+        <span class="page-nav-title">API Reference</span>
+      </a>
+      
+    </nav>
+    
+    <div class="docs-footer">
+      <p>acp.cr documentation</p>
+      <div class="docs-footer-links">
+        <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+        <a href="https://github.com/hahwul/hwaro">Built with Hwaro</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+<script>
+(function () {
+  var KEY = "hwaro-theme";
+  var MODES = ["auto", "light", "dark"];
+  var root = document.documentElement;
+  var btn = document.querySelector(".theme-toggle");
+  if (!btn) return;
+  function apply(mode) {
+    if (mode === "auto") {
+      root.removeAttribute("data-theme");
+      try { localStorage.removeItem(KEY); } catch (e) {}
+    } else {
+      root.setAttribute("data-theme", mode);
+      try { localStorage.setItem(KEY, mode); } catch (e) {}
+    }
+    btn.setAttribute("data-mode", mode);
+    btn.setAttribute("aria-label", "Theme: " + mode);
+    btn.title = "Theme: " + mode;
+  }
+  var stored = "auto";
+  try { var t = localStorage.getItem(KEY); if (t === "light" || t === "dark") stored = t; } catch (e) {}
+  btn.addEventListener("click", function () {
+    apply(MODES[(MODES.indexOf(btn.getAttribute("data-mode")) + 1) % MODES.length]);
+  });
+  apply(stored);
+})();
+(function () {
+  var btn = document.querySelector(".nav-toggle");
+  var scrim = document.querySelector(".sidebar-scrim");
+  var sidebar = document.getElementById("sidebar");
+  if (!btn) return;
+  function set(open) {
+    document.body.classList.toggle("nav-open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  btn.addEventListener("click", function () {
+    set(!document.body.classList.contains("nav-open"));
+  });
+  if (scrim) scrim.addEventListener("click", function () { set(false); });
+  if (sidebar) sidebar.addEventListener("click", function (e) {
+    if (e.target.closest("a")) set(false);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") set(false);
+  });
+})();
+</script>
+
+</body>
+</html>

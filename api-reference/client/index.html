@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Core ACP client for protocol communication">
+  <title>Client - acp.cr</title>
+  <script>(function(){try{var t=localStorage.getItem("hwaro-theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}})()</script>
+  <meta property="og:title" content="Client">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://acp.cr.hahwul.com/api-reference/client/">
+  <meta property="og:description" content="Core ACP client for protocol communication">
+  <meta property="og:image" content="https://acp.cr.hahwul.com/og-images/api-reference-client.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Client">
+  <meta name="twitter:description" content="Core ACP client for protocol communication">
+  <meta name="twitter:image" content="https://acp.cr.hahwul.com/og-images/api-reference-client.png">
+  <link rel="canonical" href="https://acp.cr.hahwul.com/api-reference/client/">
+  <link rel="stylesheet" href="https://acp.cr.hahwul.com/css/style.css">
+  
+  <meta name="apple-mobile-web-app-title" content="acp.cr">
+
+</head>
+<body data-section="api-reference">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="docs-header">
+  <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h12M2 8h12M2 11.5h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+  </button>
+  <a href="https://acp.cr.hahwul.com/" class="logo">acp.cr <span>Documentation</span></a>
+  <nav class="header-nav" aria-label="Sections">
+    <a href="https://acp.cr.hahwul.com/user-guide/">User Guide</a><a href="https://acp.cr.hahwul.com/api-reference/" class="active">API Reference</a>
+  </nav>
+  <div class="header-right">
+    <button class="search-trigger" type="button" onclick="openSearch()" title="Search (⌘K)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span>Search</span>
+      <kbd>&#8984;K</kbd>
+    </button>
+    <button class="theme-toggle" type="button" data-mode="auto" aria-label="Theme: auto" title="Theme: auto">
+      <svg class="tt-auto" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.75a6.25 6.25 0 0 1 0 12.5z" fill="currentColor"/></svg>
+      <svg class="tt-light" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 .9v2M8 13.1v2M.9 8h2M13.1 8h2M2.98 2.98l1.42 1.42M11.6 11.6l1.42 1.42M13.02 2.98L11.6 4.4M4.4 11.6l-1.42 1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <svg class="tt-dark" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 9.9A5.8 5.8 0 0 1 6.1 2.6a5.8 5.8 0 1 0 7.3 7.3z" fill="currentColor"/></svg>
+    </button>
+    <a class="gh-link" href="https://github.com/hahwul/acp.cr" aria-label="GitHub repository">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a>
+  </div>
+</header>
+<div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" id="searchInput" aria-label="Search" placeholder="Search documentation..." autocomplete="off">
+      <kbd onclick="closeSearch()">ESC</kbd>
+    </div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
+</div>
+<div class="docs-container">
+<aside class="docs-sidebar" id="sidebar">
+
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">User Guide</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/user-guide/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/getting-started/">Getting Started</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/basic-usage/">Basic Usage</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/streaming/">Streaming</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/prompt-builder/">Prompt Builder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/error-handling/">Error Handling</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/user-guide/proxy-chains/">Proxy Chains</a></li>
+      
+    </ul>
+  </div>
+  
+  <div class="sidebar-section">
+    <div class="sidebar-title">API Reference</div>
+    <ul class="sidebar-links">
+      <li><a href="https://acp.cr.hahwul.com/api-reference/">Overview</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/client/" class="active" aria-current="page">Client</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/session/">Session</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/transport/">Transport</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/protocol/">Protocol Types</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/prompt-builder/">PromptBuilder</a></li>
+      
+      <li><a href="https://acp.cr.hahwul.com/api-reference/errors/">Errors</a></li>
+      
+    </ul>
+  </div>
+  
+</aside>
+<div class="sidebar-scrim"></div>
+  <main id="main" class="docs-main">
+    <h1>Client</h1>
+    <p class="lede">Core ACP client for protocol communication</p>
+    <h2 id="overview">Overview</h2>
+<p><code>ACP::Client</code> manages the ACP v1 lifecycle. It handles request correlation and dispatches incoming messages via a background fiber.</p>
+<h2 id="acp-v2-preview">ACP v2 Preview</h2>
+<p>Use <code>ACP::V2::Client</code> with an existing transport, or <code>ACP::V2.connect</code> to start
+and initialize an Agent subprocess. Use <code>ACP::Client</code> or <code>ACP.connect</code> for
+v1 Agents. A v2 connection raises <code>VersionMismatchError</code> when the Agent
+selects a different version.</p>
+<pre><code class="language-crystal hljs">client <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::Client</span>.new(<span class="hljs-variable constant_">ACP::ProcessTransport</span>.new(<span class="hljs-string">&quot;my-agent&quot;</span>))
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(note : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  <span class="hljs-keyword">if</span> chunk <span class="hljs-operator">=</span> note.update.typed.<span class="hljs-keyword">as?</span>(<span class="hljs-variable constant_">ACP::Protocol::V2::MessageChunkUpdate</span>)
+    print chunk.to_content_chunk.try(<span class="hljs-operator">&amp;</span>.text)
+  <span class="hljs-keyword">end</span>
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+<span class="hljs-keyword">begin</span>
+  client.initialize_connection
+  session <span class="hljs-operator">=</span> client.session_new(<span class="hljs-variable constant_">Dir</span>.current)
+  inserted <span class="hljs-operator">=</span> client.session_prompt_text(session.session_id, <span class="hljs-string">&quot;Summarize this project&quot;</span>)
+  puts <span class="hljs-string">&quot;Inserted message </span><span class="hljs-subst">#{</span>inserted.message_id<span class="hljs-subst">}</span><span class="hljs-string">&quot;</span>
+  <span class="hljs-comment"># Continue reading session updates until your application is done.</span>
+<span class="hljs-keyword">ensure</span>
+  client.close
+<span class="hljs-keyword">end</span>
+</code></pre>
+<p>The prompt response acknowledges insertion and carries the inserted user
+message's ID. Foreground completion arrives in an idle <code>state_update</code>.
+Keep <code>on_update</code> callbacks short because they run on the dispatcher fiber.
+<a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#2-prompt-accepted">ACP v2 prompt acceptance</a></p>
+<p>For <code>initialize_connection</code> in either protocol version, pass <code>meta:</code> as a
+<code>Hash(String, JSON::Any)</code> or a <code>Protocol::RawJson</code> object. Use <code>meta_raw</code> on
+the implementation info to supply exact <code>_meta</code> values there as well. Stdio
+preserves the original numbers on the wire. Capability objects also expose
+<code>meta_raw</code> for exact extension values on either side of the handshake.
+When repeating the v2 handshake, omitting <code>meta:</code> reuses the last successful
+offer and <code>meta: nil</code> clears it.
+<a href="https://agentclientprotocol.com/protocol/v2/initialization">ACP v2 Initialization</a></p>
+<p>Session creation and fork responses in both versions, and v2 prompt
+acknowledgements, expose exact extension metadata via <code>meta_raw</code>. An
+ambiguous returned ID or repeated JSON-RPC <code>result</code> raises <code>ProtocolError</code>.
+New sessions must also have IDs distinct from existing sessions.
+<a href="https://agentclientprotocol.com/protocol/v1/session-setup#creating-a-session">ACP v1 session setup</a>
+<a href="https://agentclientprotocol.com/protocol/v2/session-setup#creating-a-session">ACP v2 session setup</a></p>
+<p>ACP v2 prompts accept baseline text and resource links. Images, audio,
+embedded resources, and skill references require their respective grants.
+For custom content, set <code>client.on_prompt_content_type</code> to check the
+Agent’s advertised <code>capabilities</code> against the extension’s documented rules.
+The callback receives the custom type and the Agent’s capability object.
+Stdio preserves the exact JSON values in the advertisement.</p>
+<pre><code class="language-crystal hljs">client.on_prompt_content_type <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(<span class="hljs-keyword">type</span> : <span class="hljs-variable constant_">String</span>, agent : <span class="hljs-variable constant_">ACP::Protocol::RawJson</span>) <span class="hljs-keyword">do</span>
+  meta <span class="hljs-operator">=</span> agent.field(<span class="hljs-string">&quot;session&quot;</span>).try(<span class="hljs-operator">&amp;</span>.field(<span class="hljs-string">&quot;prompt&quot;</span>)).try(<span class="hljs-operator">&amp;</span>.field(<span class="hljs-string">&quot;_meta&quot;</span>))
+  <span class="hljs-keyword">type</span> <span class="hljs-operator">==</span> <span class="hljs-string">&quot;_example.test/diagram&quot;</span> <span class="hljs-operator">&amp;&amp;</span> meta.try(<span class="hljs-operator">&amp;</span>.field(<span class="hljs-string">&quot;example.test/diagrams&quot;</span>)).try(<span class="hljs-operator">&amp;</span>.json) <span class="hljs-operator">==</span> <span class="hljs-string">&quot;true&quot;</span>
+<span class="hljs-keyword">end</span>
+</code></pre>
+<p>This example uses an extension that advertises a boolean under prompt
+capability metadata. The extension defines its own key, location, and
+value. Return <code>true</code> only when the Agent advertises support for that type.
+<a href="https://agentclientprotocol.com/protocol/v2/content#content-types">ACP v2 Prompt Content</a></p>
+<p>Use <code>note.raw</code> from the v2 update callback to store or forward notification
+parameters. It preserves unknown fields and exact JSON numbers over stdio,
+including in updates whose <code>typed</code> accessor returns <code>nil</code>. The notification's
+<code>meta</code> exposes fields representable as <code>JSON::Any</code>. Use <code>meta_raw</code> for the
+whole metadata object. Custom transports can supply <code>Protocol::WireFrame</code>
+from <code>receive_frame</code> to retain exact values.
+<a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-updates">ACP v2 Session Updates</a></p>
+<p>Use <code>session_state(session_id)</code> to read the latest foreground and background
+snapshot for an attached root session. A new session starts at <code>idle</code> until
+the Agent reports activity. A resume uses the Agent's current snapshot.
+A newly attached session with no usable resume snapshot reports <code>unknown</code>.
+<code>background</code> is <code>nil</code> when unreported and empty when the Agent reports no
+background work. Check <code>idle?</code> before interpreting a stop reason. Use
+<code>subagent(session_id)</code> for a child session's state.</p>
+<p>The snapshot is available from <code>on_update</code> once its session is attached.
+<code>session_state_raw(session_id)</code> preserves extension fields and exact JSON
+numbers over stdio. Closing or deleting the session clears the snapshot.
+<a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-states">ACP v2 Session States</a></p>
+<p>The v2 client supports session creation, listing, resume and replay, prompts,
+configuration changes, close and delete. Register <code>on_request_permission</code>
+and <code>on_create_elicitation</code> to handle Agent requests. Authentication is
+available through <code>auth_login</code>, <code>auth_logout</code>, and <code>authenticate_terminal</code>.
+Pass <code>Protocol::V2::AuthLoginParams</code> or <code>Protocol::V2::AuthLogoutParams</code>
+to send authentication request metadata. Set <code>meta_raw</code> on the parameters
+or read it on the result to preserve exact JSON values.
+Use <code>meta_raw</code> on the initialize result or an advertised authentication
+method to read exact extension values from the Agent.
+Use <code>tool_call_cancel</code> and <code>terminal_cancel</code> when the entity announces a
+current cancel capability. <a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle">ACP v2 Prompt Lifecycle</a></p>
+<p>Return <code>RequestPermissionResult.selected(option_id)</code> for an option from the
+request or <code>RequestPermissionResult.cancelled</code> when no option was chosen.
+An invalid result or selection returns JSON-RPC <code>-32603</code> to the Agent.
+Over stdio, repeated permission option fields return <code>-32602</code> before the
+callback runs. Set <code>outcome_raw</code> for a custom or future outcome with exact JSON
+and <code>meta_raw</code> for exact metadata on the result.
+<a href="https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission">ACP v2 Permissions</a></p>
+<p><code>on_elicitation_complete</code> fires once for each accepted URL elicitation on the
+connection. A completion that arrives before the <code>accept</code> reply is sent
+is held until the reply is written successfully. Completion callbacks run
+on the dispatcher. If no typed handler is set, matching notifications that
+fit in <code>JSON::Any</code> go to <code>on_notification</code>. The typed completion exposes
+exact metadata through <code>meta_raw</code>.
+<a href="https://agentclientprotocol.com/protocol/v2/elicitation#url-completion">ACP v2 URL Completion</a></p>
+<p>Both protocol versions require an elicitation scope and a message. URL
+mode also requires an absolute URL and an opaque <code>elicitationId</code>. The
+client returns JSON-RPC <code>-32602</code> for invalid requests before calling the
+handler. ACP v1 accepts an explicit <code>null</code> request ID for request scope.
+<a href="https://agentclientprotocol.com/protocol/v1/elicitation#creating-an-elicitation">ACP v1 Elicitation Scope</a></p>
+<p>Typed form and URL requests expose exact extension metadata through
+<code>meta_raw</code>. Use <code>CreateElicitationResult#meta_raw=</code> to return exact metadata
+or copy it from a request. The <code>meta</code> accessor provides editable JSON
+object fields. Edits to objects and arrays preserve untouched wire values,
+including nested entries moved within an array. Scalar matches prefer their
+original positions. Use <code>meta_raw=</code> to distinguish numbers that project to
+the same value or to replace an array that contains unrepresentable scalars.
+Stdio supports exact replies. A custom transport that cannot preserve an
+exact reply returns JSON-RPC <code>-32603</code> to the Agent.
+<a href="https://agentclientprotocol.com/protocol/v2/extensibility">ACP Extension Metadata</a></p>
+<p>An ACP v2 elicitation with <code>request_id</code> belongs to an outstanding Client request
+on the same connection. The client rejects a request-scoped elicitation
+with <code>toolCallId</code>. The callback's local <code>cancellation</code> channel closes when
+the elicitation is cancelled, its originating request ends before an input
+reply is sent, or the connection closes. Use the channel to dismiss a form
+or URL consent prompt that is still open.
+<a href="https://agentclientprotocol.com/protocol/v2/elicitation#creating-an-elicitation">ACP v2 Elicitation</a></p>
+<p>For v2 form elicitations, <code>requested_schema</code> contains the supported
+controls. An optional control of an unsupported type is omitted.
+A form with a missing or unsupported required control, or a malformed
+standard control, returns JSON-RPC <code>-32602</code> before the callback runs.
+Use <code>requested_schema_raw</code> for the original schema. In both versions,
+the typed schema, properties, and choices expose exact <code>meta_raw</code>.
+Numeric fields expose <code>minimum_raw</code>, <code>maximum_raw</code>, and <code>default_raw</code>
+alongside the ordinary numeric accessors.
+Render text fields with unrecognized <code>format</code> values as plain text.
+<a href="https://agentclientprotocol.com/protocol/v2/elicitation#form-mode">ACP v2 Form Mode</a></p>
+<p>For accepted forms, the client checks submitted field names, required
+fields, types, choices, bounds, and the <code>email</code>, <code>uri</code>, <code>date</code>, and
+<code>date-time</code> string formats against the original schema. Format checks
+are local syntax checks. Leap seconds are checked for possible placement at
+the end of a UTC month. A callback that supplies invalid form content
+causes a JSON-RPC <code>-32603</code> reply to the Agent.
+Use <code>CreateElicitationResult.accept_raw</code> with a <code>Protocol::RawJson</code> content
+object to submit exact numbers in either version or values for declared
+custom fields in v2. Stdio supports exact frames. Custom transports can
+override <code>send_wire</code> to add that support.
+<a href="https://agentclientprotocol.com/protocol/v2/elicitation#responses">ACP v2 Elicitation Responses</a></p>
+<p>ACP v1 form callbacks also validate submissions against the original schema.
+The schema type and property map retain their v1 defaults. V1 <code>date-time</code>
+uses ISO 8601. V1 <code>pattern</code> translates common ECMAScript character classes and
+Unicode escapes and uses Crystal's regex engine with bounded matching.
+A v1 client using its generic Agent request callback can
+return the same form replies as a typed handler. Invalid submissions return
+<code>-32603</code> to the Agent.
+<a href="https://agentclientprotocol.com/protocol/v1/elicitation">ACP v1 Elicitation</a></p>
+<p>For <code>session_prompt</code>, supply at least one content block. An optional
+<code>idempotency_key</code> must contain 1 to 255 characters. Set <code>meta_raw</code> on
+<code>ACP::Protocol::V2::SessionPromptParams</code> to send exact extension metadata.
+Session setup requires
+absolute Agent paths, unique MCP server names, and an absolute executable
+path for each stdio server. Invalid arguments raise <code>ArgumentError</code> before
+the client sends the request.
+<a href="https://agentclientprotocol.com/protocol/v2/session-setup">ACP v2 Session Setup</a></p>
+<p>Read the latest configuration with <code>session_config_options(session_id)</code>.
+It returns an empty list when an attached session offers no options, and
+<code>nil</code> when the client has no snapshot for that session. Use
+<code>session_config_options_raw(session_id)</code> for the exact option list, including
+extension fields and precise numbers. <code>session_set_config_option</code> checks the
+Agent's current option IDs and advertised select values before sending.
+<a href="https://agentclientprotocol.com/protocol/v2/session-config-options">ACP v2 Session Config Options</a></p>
+<p>Read the current command list with <code>session_available_commands(session_id)</code>.
+Filter by <code>slash_command?</code> to build slash command completion. The list is
+empty when the session has no commands and <code>nil</code> when the client has no
+snapshot for the session. Ambiguous command names are omitted from the
+typed list. Setup responses and <code>available_commands_update</code>
+notifications replace the list. Read it inside <code>on_update</code> to see the
+latest live replacement. With the stdio transport,
+<code>session_available_commands_raw(session_id)</code> retains extension variants and
+exact numeric values. After a close, archive, or delete timeout, the list
+is unavailable until the Agent confirms the request failed or a successful
+resume supplies a new list.
+<a href="https://agentclientprotocol.com/protocol/v2/slash-commands">ACP v2 Slash Commands</a></p>
+<p>In a permission callback, <code>typed_subject</code> exposes the optional tool-call
+patch or command details. Use <code>subject_raw</code> for exact JSON, including future
+subjects and values outside <code>JSON::Any</code>. The request, subject, and command
+details expose exact extension metadata through <code>meta_raw</code>. Tool-call
+patches also expose <code>raw_input_raw</code>, <code>raw_output_raw</code>, and <code>meta_raw</code>. Changes
+to a <code>JSON::Any</code> array are serialized from that view at its numeric precision. A tool-call
+patch from a permission request reaches <code>on_update</code> in receive order before
+the permission handler runs. Use the callback's <code>request_id</code> to match
+<code>$/cancel_request</code> notifications delivered through <code>on_notification</code>.
+<a href="https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission">ACP v2 Permission Requests</a></p>
+<h3 id="session-info-and-usage">Session info and usage</h3>
+<p>Use a <code>SessionDetailsStore</code> per connection to retain the session info and
+context-window usage reported through <code>on_update</code>.</p>
+<pre><code class="language-crystal hljs">details <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::SessionDetailsStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  details.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+info <span class="hljs-operator">=</span> details.session_info(session_id)
+usage <span class="hljs-operator">=</span> details.session_usage(session_id)
+</code></pre>
+<p>Both lookups return <code>nil</code> until their first usable update. Session info
+patches the title, RFC 3339 activity time, and metadata. Usage updates
+replace the token counts and patch the cumulative cost and usage metadata.
+<code>cost_raw</code> preserves the Agent's exact JSON amount. <code>cost</code> provides a
+<code>Float64</code> projection. A parent's reported cost already includes its
+descendants' cost.</p>
+<p>The store defaults to 128 sessions and 64 KiB of retained detail data per
+session. Adjust <code>session_limit:</code> and <code>session_byte_limit:</code>, or pass <code>nil</code>
+to remove a limit. The store keeps the latest token counts and applies
+cost and usage metadata that fit. It preserves explicit clears when a
+different usage field exceeds the budget.</p>
+<p>When the Agent sends current details on resume, it sends them after any
+requested replay. Use <code>forget_session</code> when you stop retaining details
+for a session. <a href="https://agentclientprotocol.com/protocol/v2/session-list#updating-session-metadata">ACP v2 session info</a> · <a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-usage-updates">ACP v2 usage</a> · <a href="https://agentclientprotocol.com/protocol/v2/session-setup#current-state-synchronization">Current-state synchronization</a></p>
+<h3 id="session-compaction">Session compaction</h3>
+<p>Feed each connection's v2 session updates to a <code>CompactionStore</code> in
+receive order. Compaction updates are available without a v2 capability.</p>
+<pre><code class="language-crystal hljs">compactions <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::CompactionStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  compactions.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+snapshot <span class="hljs-operator">=</span> compactions.compaction(session_id, compaction_id)
+</code></pre>
+<p><code>compactions(session_id)</code> lists retained entries in first-seen order. The
+snapshot has the current status, error, and exact <code>meta_raw</code>. Read
+<code>summary_raw</code> for exact blocks or <code>summary_blocks</code> for usable display
+blocks. A summary replacement clears or replaces the accumulated blocks.
+Chunk metadata stays on the incoming <code>CompactionSummaryChunkUpdate</code>.</p>
+<p>The store defaults to 128 compactions across sessions and 256 KiB per entry.
+Adjust <code>compaction_limit:</code> and <code>compaction_byte_limit:</code>, or pass <code>nil</code> to
+remove a limit. <code>summary_incomplete?</code> flags a gap caused by the byte limit.
+An accepted summary replacement clears the gap and resumes appending chunks.
+When a replacement summary exceeds the budget, the store can still retain
+the status, error, and metadata that fit. An update can also retain a new
+status and summary with earlier details if the new error or metadata
+would exceed the budget.</p>
+<p>Use <code>forget_session</code> to discard one session's compactions. To reconstruct a
+view from full replay, collect its updates in a fresh store and use each
+session's own <code>replay_complete</code> to track delivery. The configured limits
+apply to replayed updates. <a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-compaction">ACP v2 session compaction</a> · <a href="https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete">Replay completion</a></p>
+<h3 id="transcript-messages">Transcript messages</h3>
+<p>Feed each connection's v2 session updates to a <code>MessageStore</code> in receive
+order. User, Agent, thought, and session-directed messages have independent
+ID scopes within each session.</p>
+<pre><code class="language-crystal hljs">transcript <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::MessageStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  transcript.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+message <span class="hljs-operator">=</span> transcript.message(session_id, <span class="hljs-variable constant_">ACP::V2::MessageKind::Agent</span>, message_id)
+</code></pre>
+<p><code>messages(session_id)</code> lists retained messages in first-seen order. Use
+<code>content_raw</code> for exact blocks, <code>content_blocks</code> to decode usable display
+blocks, and <code>skill_references</code> for draft skill references in user messages.
+Message updates patch <code>meta_raw</code> by key. Chunk metadata remains available
+on the incoming <code>MessageChunkUpdate</code>. Session-directed messages expose the
+reported sender and recipient session and message IDs.</p>
+<p>The store defaults to 512 messages across sessions and 256 KiB per message
+for IDs, links, metadata, content, and streamed block storage. Adjust
+<code>message_limit:</code> and <code>message_byte_limit:</code>, or pass <code>nil</code> to remove a limit.
+At the message count limit, <code>observe</code> returns <code>false</code> for a new message ID.
+<code>observe</code> returns <code>true</code> when an update applies or records a content gap.
+Use <code>content_incomplete?</code> to show that content exceeded the byte limit.
+An oversized replacement clears earlier content, and an oversized chunk
+leaves the retained prefix. A full content replacement clears the gap
+and resumes appending chunks. A replacement can fit while new links or
+metadata exceed the remaining budget. In that case the new content is
+retained with the previous links and metadata.</p>
+<p>For a full replay, use <code>forget_session</code> on the affected sessions or collect
+replay into a fresh store. Each session's <code>replay_complete</code> marks the end of
+the Agent's replay delivery. The store's configured limits still apply
+to those updates. <a href="https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#message-ids">ACP v2 message updates</a> · <a href="https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete">Replay completion</a></p>
+<h3 id="plan-state">Plan state</h3>
+<p>Feed each connection's v2 session updates to a <code>PlanStore</code> in receive order.
+A <code>plan_update</code> replaces the complete plan with that ID in its session.</p>
+<pre><code class="language-crystal hljs">plans <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::PlanStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  plans.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+snapshot <span class="hljs-operator">=</span> plans.plan(session_id, plan_id)
+current <span class="hljs-operator">=</span> snapshot.try(<span class="hljs-operator">&amp;</span>.plan.typed)
+</code></pre>
+<p><code>plans(session_id)</code> lists retained snapshots. <code>plan_raw</code> keeps exact JSON
+for checklist, Markdown, and extension plans. <code>meta_raw</code> holds metadata
+from the update envelope. A removal deletes the corresponding snapshot.</p>
+<p>The store defaults to 128 plans across sessions and 256 KiB of serialized
+state per plan. Set <code>plan_limit:</code> or <code>plan_byte_limit:</code> to change a limit,
+or pass <code>nil</code> to remove it. <code>observe</code> returns <code>true</code> when an update stores
+or discards a snapshot. An oversized replacement discards any previous
+snapshot with that ID so the display can clear outdated content.</p>
+<p>Use <code>forget_session</code> to discard one session's plan state. To rebuild from
+full replay while keeping the current view available, feed the replay into
+a fresh store and switch each session's view after its own <code>replay_complete</code>.
+<a href="https://agentclientprotocol.com/protocol/v2/agent-plan#updating-plans">ACP v2 plan updates</a> · <a href="https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete">Replay completion</a></p>
+<h3 id="tool-call-state">Tool-call state</h3>
+<p>Create a <code>ToolCallStore</code> per connection and feed it v2 session updates in
+receive order. The client sends permission tool-call patches through the
+same <code>on_update</code> callback before it calls <code>on_request_permission</code>.</p>
+<pre><code class="language-crystal hljs">tool_calls <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::ToolCallStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  tool_calls.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+call <span class="hljs-operator">=</span> tool_calls.tool_call(session_id, tool_call_id)
+</code></pre>
+<p>Snapshots contain the current fields, exact JSON for raw input and output,
+and detached content in receive order. A content patch replaces the list.
+Chunks append to it. Content-item metadata stays on the item. Read
+chunk-scoped metadata from <code>ToolCallContentChunk#meta_raw</code> in the callback.
+Use the snapshot for display and <code>client.tool_call_cancel</code> for live
+cancellation checks. When presenting a permission prompt, use the
+<code>RequestPermissionParams</code> delivered to that permission callback.</p>
+<p>By default, the store retains up to 128 calls across sessions and up to
+1 MiB of serialized state per call. Set <code>call_limit:</code> or <code>call_byte_limit:</code>
+to change the corresponding limit, or pass <code>nil</code> to remove it. <code>observe</code>
+returns <code>false</code> when an update would exceed either limit or a tool-call patch
+repeats a recognized field. The stored state remains intact in either case.</p>
+<p>Use <code>forget_session</code> to discard one session's tool-call history. For full
+replay of a session tree, clear all affected sessions first or use a fresh
+store. <a href="https://agentclientprotocol.com/protocol/v2/tool-calls#streaming-content">ACP v2 tool-call updates</a></p>
+<h3 id="display-only-terminal-state">Display-only terminal state</h3>
+<p>Create a <code>TerminalStore</code> per connection and feed it v2 session updates in
+receive order. Look up terminals by the reporting session and terminal IDs.</p>
+<pre><code class="language-crystal hljs">terminals <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::V2::TerminalStore</span>.new
+client.on_update <span class="hljs-operator">=</span> <span class="hljs-operator">-&gt;</span>(update : <span class="hljs-variable constant_">ACP::Protocol::V2::SessionUpdateParams</span>) <span class="hljs-keyword">do</span>
+  terminals.observe(update)
+  <span class="hljs-literal">nil</span>
+<span class="hljs-keyword">end</span>
+
+<span class="hljs-comment"># Read this after the terminal has sent an update.</span>
+snapshot <span class="hljs-operator">=</span> terminals.terminal(session_id, terminal_id)
+output <span class="hljs-operator">=</span> snapshot.try(<span class="hljs-operator">&amp;</span>.output)
+</code></pre>
+<p>The store keeps the newest 1 MiB of output per terminal by default. Set
+<code>output_byte_limit:</code> to choose a different byte budget, or zero to keep
+terminal state without output bytes. <code>output</code> is a detached byte slice when
+output is available. It can begin in the middle of a UTF-8 character or
+terminal sequence when the limit discards earlier bytes. Apply your display
+policy before rendering it. <code>output_meta_raw</code> describes the latest replacement
+snapshot. Chunk metadata is available on each <code>TerminalOutputChunk</code> update.</p>
+<p>The default <code>terminal_limit:</code> is 128 across all sessions. At capacity,
+<code>observe</code> returns <code>false</code> for new terminal IDs. The default
+<code>terminal_metadata_byte_limit:</code> is 64 KiB per terminal. A top-level <code>_meta</code>
+patch that would exceed this limit leaves the stored metadata unchanged.</p>
+<p>Use <code>forget_session</code> to discard one session's display history. For full
+replay of a session tree, clear the parent and each affected child first,
+or rebuild the display state in a fresh store. Stored capabilities reflect
+the reported display state. Use <code>client.terminal_cancel</code> for current
+cancellation checks. <a href="https://agentclientprotocol.com/protocol/v2/tool-calls#display-only-terminals">ACP v2 display-only terminals</a></p>
+<h3 id="repeat-initialization">Repeat initialization</h3>
+<p>On a v2 connection, call <code>initialize_connection</code> again before your first
+other request. Wait for each initialization to return before calling it
+again. Use the optional <code>info</code>, <code>capabilities</code>, and <code>meta</code> arguments to
+update what you advertise. Omitted arguments reuse the last successful
+offer. Pass <code>meta: nil</code> to clear the initialization metadata.</p>
+<p>The latest successful handshake takes effect on the connection. A JSON-RPC
+error from the Agent leaves the previous successful handshake active. A
+timeout or malformed response closes the connection because the Agent may
+have already applied the new handshake.
+<a href="https://agentclientprotocol.com/protocol/v2/initialization#repeating-initialization">ACP v2 Repeating Initialization</a></p>
+<h2 id="automatic-version-negotiation">Automatic version negotiation</h2>
+<p>Use <code>ACP.connect_negotiated</code> to try ACP v2 Preview first. If the Agent
+selects v1, the connector closes the first connection and starts a fresh
+one with the v1 handshake. An initialization error or unknown version
+is returned to the caller.</p>
+<pre><code class="language-crystal hljs">client <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP</span>.connect_negotiated(<span class="hljs-string">&quot;my-agent&quot;</span>, [<span class="hljs-string">&quot;--stdio&quot;</span>])
+<span class="hljs-keyword">begin</span>
+  <span class="hljs-keyword">case</span> client
+  <span class="hljs-keyword">when</span> <span class="hljs-variable constant_">ACP::V2::Client</span>
+    puts client.initialization_result.not_nil!.info.name
+  <span class="hljs-keyword">when</span> <span class="hljs-variable constant_">ACP::Client</span>
+    puts client.agent_info.try(<span class="hljs-operator">&amp;</span>.name) <span class="hljs-operator">||</span> <span class="hljs-string">&quot;ACP v1 Agent&quot;</span>
+  <span class="hljs-keyword">end</span>
+<span class="hljs-keyword">ensure</span>
+  client.close
+<span class="hljs-keyword">end</span>
+</code></pre>
+<p>The optional <code>info</code> applies to both handshakes. Advertise capabilities
+through <code>v1_capabilities</code> and <code>v2_capabilities</code>. To negotiate over a custom
+transport, pass a block to <code>ACP.connect_negotiated</code> that opens a fresh
+transport each time it is called.
+<a href="https://agentclientprotocol.com/protocol/v2/initialization#protocol-version">ACP Initialization</a></p>
+<h2 id="constructor">Constructor</h2>
+<h3 id="new"><code>.new</code></h3>
+<pre><code class="language-crystal hljs"><span class="hljs-variable constant_">ACP::Client</span>.new(
+  transport : <span class="hljs-variable constant_">ACP::Transport</span>,
+  client_name : <span class="hljs-variable constant_">String</span> <span class="hljs-operator">=</span> <span class="hljs-string">&quot;acp-crystal&quot;</span>,
+  client_version : <span class="hljs-variable constant_">String</span> <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::VERSION</span>,
+  client_capabilities : <span class="hljs-variable constant_">ACP::Protocol::ClientCapabilities</span> <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::Protocol::ClientCapabilities</span>.new,
+  client_info : <span class="hljs-variable constant_">ACP::Protocol::ClientInfo</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>transport</code></td>
+<td><code>Transport</code></td>
+<td>--</td>
+<td>The transport layer to use</td>
+</tr>
+<tr>
+<td><code>client_name</code></td>
+<td><code>String</code></td>
+<td><code>&quot;acp-crystal&quot;</code></td>
+<td>Client application name</td>
+</tr>
+<tr>
+<td><code>client_version</code></td>
+<td><code>String</code></td>
+<td><code>ACP::VERSION</code></td>
+<td>Client version string</td>
+</tr>
+<tr>
+<td><code>client_capabilities</code></td>
+<td><code>ClientCapabilities</code></td>
+<td><code>ClientCapabilities.new</code></td>
+<td>Advertised client capabilities</td>
+</tr>
+<tr>
+<td><code>client_info</code></td>
+<td><code>ClientInfo?</code></td>
+<td><code>nil</code></td>
+<td>Optional full implementation info, including display title and <code>_meta</code></td>
+</tr>
+</tbody>
+</table>
+<p>When supplied, <code>client_info</code> supplies the name and version sent in the
+handshake. The same keyword is available on <code>ACP.connect</code>.</p>
+<p>Use the <code>Transport</code> interface to instrument or substitute the wire connection.
+Typed client methods can handle responses directly in the dispatcher.</p>
+<h2 id="lifecycle-methods">Lifecycle Methods</h2>
+<h3 id="initialize-connection"><code>#initialize_connection</code></h3>
+<pre><code class="language-crystal hljs">client.initialize_connection : <span class="hljs-variable constant_">ACP::Protocol::InitializeResult</span>
+</code></pre>
+<p>Performs the ACP handshake with the agent. Transitions state from <code>Created</code> to <code>Initialized</code>. Returns agent info and capabilities.</p>
+<h3 id="authenticate"><code>#authenticate</code></h3>
+<pre><code class="language-crystal hljs">client.authenticate(method_id : <span class="hljs-variable constant_">String</span>) : <span class="hljs-variable constant_">Nil</span>
+client.authenticate(params : <span class="hljs-variable constant_">ACP::Protocol::AuthenticateParams</span>) : <span class="hljs-variable constant_">ACP::Protocol::AuthenticateResult</span>
+</code></pre>
+<p>Authenticates with the agent using an advertised Agent-managed method. Call
+after <code>initialize_connection</code> if authentication is required. Use
+<code>client.typed_auth_methods</code> to inspect the available flows.
+Pass typed parameters to send request metadata and receive the Agent's result.
+Set <code>meta_raw</code> on the parameters or read it on the result for exact JSON values.</p>
+<h3 id="authenticate-terminal"><code>#authenticate_terminal</code></h3>
+<p><code>client.authenticate_terminal(method_id) { |method| ... }</code> runs an advertised
+terminal login before session setup. Set
+<code>auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true)</code> in the
+client capabilities when your <code>ProcessTransport</code> can run the configured
+agent directly in an interactive terminal. The block receives
+<code>TerminalAuthMethod#args</code> and <code>#env</code>. Present them to the user and return true
+to approve the invocation.</p>
+<p>Use the returned <code>Client</code> for subsequent calls. It connects with the original
+process configuration, initializes, and carries over the previous callbacks
+and timeouts. A declined or unsuccessful login raises
+<code>ACP::AuthenticationError</code> and leaves the original connection available.
+See <a href="https://agentclientprotocol.com/protocol/v1/authentication#terminal-authentication">ACP Terminal Authentication</a>.</p>
+<h3 id="logout"><code>#logout</code></h3>
+<pre><code class="language-crystal hljs">client.logout(params : <span class="hljs-variable constant_">ACP::Protocol::LogoutParams</span> <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::Protocol::LogoutParams</span>.new) : <span class="hljs-variable constant_">ACP::Protocol::LogoutResult</span>
+</code></pre>
+<p>Ends the authenticated state (<code>logout</code>). Only call it when <code>agent_capabilities.try(&amp;.auth).try(&amp;.logout?)</code> is true. Active sessions may start failing with auth errors afterwards.
+Pass <code>LogoutParams</code> to attach request metadata. Both the parameters and result
+expose <code>meta_raw</code> for exact JSON values.</p>
+<h3 id="auth-status-draft"><code>#auth_status</code> (draft)</h3>
+<p>On v1 and v2, <code>client.auth_status</code> reads the Agent's authentication state
+when the <code>auth.status</code> capability is advertised. Register
+<code>on_auth_status_update</code> to receive changes from the Agent. <code>state</code> maps
+future values to <code>unknown</code>, and <code>raw_state</code> preserves the wire value.
+<code>accounts</code> describes the accounts for display and skips invalid entries.
+Use <code>meta_raw</code> on the status snapshot or an individual account to read
+extension metadata without rounding numbers. To attach exact metadata to
+the query, set <code>AuthStatusParams#meta_raw=</code>. Compare exact JSON values via
+<code>meta_raw</code> when differences beyond <code>JSON::Any</code> precision matter.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/get-auth-state.mdx">ACP Authentication State Proposal</a></p>
+<h3 id="close"><code>#close</code></h3>
+<pre><code class="language-crystal hljs">client.close : <span class="hljs-variable constant_">Nil</span>
+</code></pre>
+<p>Closes the connection, stops the dispatcher fiber, and cleans up resources. Transitions state to <code>Closed</code>.</p>
+<h2 id="session-methods">Session Methods</h2>
+<h3 id="session-new"><code>#session_new</code></h3>
+<pre><code class="language-crystal hljs">client.session_new(
+  cwd : <span class="hljs-variable constant_">String</span>,
+  mcp_servers : <span class="hljs-variable constant_">Array</span>(<span class="hljs-variable constant_">JSON::Any</span>) <span class="hljs-operator">=</span> <span class="hljs-operator">[]</span> <span class="hljs-keyword">of</span> <span class="hljs-variable constant_">JSON::Any</span>,
+  <span class="hljs-operator">*</span>,
+  additional_directories : <span class="hljs-variable constant_">Array</span>(<span class="hljs-variable constant_">String</span>)? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>,
+  system_prompt : <span class="hljs-variable constant_">ACP::Protocol::SystemPrompt</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">ACP::Protocol::SessionNewResult</span>
+</code></pre>
+<p>Creates a new session. Transitions state to <code>SessionActive</code>.</p>
+<p><code>additional_directories</code> (extra absolute workspace roots) and <code>system_prompt</code> (e.g. <code>ACP::Protocol::SystemPrompt.append(&quot;...&quot;)</code>) are omitted from the request when nil. Only pass them when the agent advertises <code>sessionCapabilities.additionalDirectories?</code> / <code>sessionCapabilities.system_prompt?</code>, and only use an <code>override</code> prompt when <code>system_prompt.override?</code> is true. <code>session_load</code> and <code>session_resume</code> take the same two keyword arguments; send the full root list and the original prompt again, since neither is restored implicitly.</p>
+<h3 id="session-load"><code>#session_load</code></h3>
+<pre><code class="language-crystal hljs">client.session_load(
+  session_id : <span class="hljs-variable constant_">String</span>,
+  cwd : <span class="hljs-variable constant_">String</span>,
+  mcp_servers : <span class="hljs-variable constant_">Array</span>(<span class="hljs-variable constant_">JSON::Any</span>) <span class="hljs-operator">=</span> <span class="hljs-operator">[]</span> <span class="hljs-keyword">of</span> <span class="hljs-variable constant_">JSON::Any</span>,
+  <span class="hljs-operator">*</span>,
+  additional_directories : <span class="hljs-variable constant_">Array</span>(<span class="hljs-variable constant_">String</span>)? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>,
+  system_prompt : <span class="hljs-variable constant_">ACP::Protocol::SystemPrompt</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">ACP::Protocol::SessionLoadResult</span>
+</code></pre>
+<p>Resumes a previous session by ID.</p>
+<p>Pass typed setup parameters to <code>session_new</code>, <code>session_load</code>,
+<code>session_resume</code>, or <code>session_fork</code> to attach extension metadata.
+Use <code>meta_raw</code> on setup parameters, system prompts, and initial configuration
+options for exact JSON numbers. V2 initial configuration options also expose
+<code>value_raw</code> for custom values.</p>
+<p>MCP declarations, HTTP headers, and environment variables also expose
+<code>meta_raw</code>. Use <code>mcp_servers_raw</code> on v1 setup parameters to read or replace
+the exact server list. The existing <code>mcp_servers</code> accessor provides an
+editable <code>JSON::Any</code> view.</p>
+<h3 id="acp-v1-request-validation">ACP v1 request validation</h3>
+<p>The client checks the Agent's advertised capabilities before calling
+<code>session/load</code>, <code>session/resume</code>, <code>session/list</code>, <code>session/close</code>, or
+<code>session/delete</code>. Images, audio, and embedded resources in prompts also require
+the matching capability. Text and resource links are available by default.</p>
+<p>Use absolute paths in the Agent's filesystem for session directories and MCP
+stdio executables. Additional roots, system prompts, and HTTP or SSE MCP
+servers require the Agent to advertise support. A system prompt accepts
+non-empty text content and uses <code>append</code> or a mode advertised by the Agent.
+For extensions that advertise custom modes through metadata, set
+<code>client.on_system_prompt_mode</code> to interpret the extension's declaration.
+The resolver receives the mode name and the Agent's system-prompt capability.</p>
+<p>The client raises <code>InvalidStateError</code> for missing capabilities and
+<code>ArgumentError</code> for invalid paths or content.
+<a href="https://agentclientprotocol.com/protocol/v1/session-setup">ACP v1 Session Setup</a>
+<a href="https://agentclientprotocol.com/protocol/v1/prompt-turn">ACP v1 Prompt Turn</a></p>
+<p>The v1 and v2 clients accept typed parameters for session list, options,
+status, title, archive, unarchive, close, and delete requests. Set
+<code>meta_raw</code> on these parameters to send exact extension values.</p>
+<h3 id="session-status-draft"><code>#session_status</code> (draft)</h3>
+<p>Call <code>client.session_status(session_id)</code> to query a session without attaching
+to it. The Agent advertises support through <code>sessionCapabilities.status</code> in v1
+or <code>session.status</code> in v2. <code>Session#status</code> queries the wrapped v1 session ID.
+Pass <code>meta:</code> to include extension metadata in the request.</p>
+<p><code>status</code> returns <code>open</code> for a session in memory and <code>saved</code> for a persisted
+session or a future status. <code>raw_status</code> preserves the Agent's value. In v2,
+<code>state</code> can also carry a foreground snapshot. A missing snapshot leaves the
+foreground state unknown. An unknown session ID raises an <code>ACP::JsonRpcError</code>
+with code <code>-32002</code>.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-status.mdx">ACP Session Status Proposal</a></p>
+<h3 id="session-options-draft"><code>#session_options</code> (draft)</h3>
+<p>Call <code>client.session_options(cwd)</code> to preview configuration for a new session.
+For a saved session, use <code>SessionOptionsParams.new(cwd, session_id: id)</code>.
+The Agent advertises this feature through <code>sessionCapabilities.options</code> in v1
+or <code>session.options</code> in v2. V1 previews include modes when available. V2
+previews can also include advisory slash commands.</p>
+<p>Pass chosen values as an ordered <code>config_options:</code> array of
+<code>InitialSessionConfigOption</code> values on <code>session/new</code>, v1 <code>session/load</code>,
+or <code>session/resume</code>. Use the protocol version's namespace. In v1, boolean choices require
+the Client's <code>session.configOptions.boolean</code> capability. Read the resulting
+configuration and, in v2, the available commands from the setup response.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-options.mdx">ACP Session Options Proposal</a></p>
+<h3 id="session-fork-draft"><code>#session_fork</code> (draft)</h3>
+<p>Call <code>client.session_fork(source_id, cwd)</code> when the Agent advertises
+<code>sessionCapabilities.fork</code> in v1 or <code>session.fork</code> in v2. The returned
+<code>session_id</code> identifies the new active session. V1 also exposes
+<code>Session#fork(cwd)</code>, which returns a wrapper for the fork.</p>
+<p>Use <code>SessionForkParams</code> in the protocol version's namespace to supply extra
+workspace roots, MCP servers, a system prompt, or ordered initial settings.
+For a custom system prompt mode, check the Agent's extension advertisement
+before supplying the mode.
+Pass <code>cursor_id:</code> to fork at a cursor reported as forkable on the source
+session on this connection. A <code>-32602</code> reply retires the fork grant used by
+that request. A later announcement can grant fork access again.
+The source session keeps its history and its other cursors.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-fork.mdx">ACP Session Fork Proposal</a></p>
+<h3 id="session-set-title-draft"><code>#session_set_title</code> (draft)</h3>
+<p>Call <code>client.session_set_title(session_id, title)</code> on v1 or v2 when the Agent
+advertises <code>sessionCapabilities.title</code> or <code>session.title</code>, respectively.
+The session can be inactive on the connection. Use <code>result.title</code> for display
+because the Agent can normalize the title before storing it.
+<code>Session#set_title</code> uses the wrapped v1 session ID.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/session-set-title.mdx">ACP Session Title Proposal</a></p>
+<h3 id="session-archive-and-session-unarchive-draft"><code>#session_archive</code> and <code>#session_unarchive</code> (draft)</h3>
+<p>Call <code>client.session_archive(session_id)</code> to close a session and hide it from
+the default list while retaining its ID and saved conversation. Call
+<code>client.session_unarchive(session_id)</code> to restore it to the default list. Load
+or resume it separately before prompting. Both operations require the Agent's
+<code>sessionCapabilities.archive</code> capability in v1 or <code>session.archive</code> in v2.
+A missing session produces JSON-RPC error <code>-32002</code>. The v1 <code>Session</code> wrapper
+also exposes <code>archive</code> and <code>unarchive</code>.</p>
+<p>If a request times out, the Agent may still commit the change. Check the
+session's archive state in a later list response.</p>
+<h3 id="session-list"><code>#session_list</code></h3>
+<p>Both protocol versions return usable sessions in the Agent's order, even when
+some entries are malformed. V2 entries use absolute workspace roots and RFC
+3339 timestamps. The page and each entry expose exact extension metadata via
+<code>meta_raw</code>.</p>
+<p>Use <code>has_more?</code> to check for another page. An empty cursor is valid. Pass
+<code>next_cursor</code> and the original filters in the next request.
+<a href="https://agentclientprotocol.com/protocol/v1/session-list">ACP v1 session list</a>
+<a href="https://agentclientprotocol.com/protocol/v2/session-list">ACP v2 session list</a></p>
+<p>Use <code>client.session_list(archived: &quot;only&quot;)</code> in v1 or pass
+<code>ACP::Protocol::V2::SessionListParams.new(archived: &quot;only&quot;)</code> in v2 to list
+archived sessions. Use <code>&quot;include&quot;</code> to list both archived and unarchived
+sessions. Preserve the filter when following <code>next_cursor</code>. The Agent reports
+the archive state as <code>SessionInfo#archived</code>.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-archive.mdx">ACP Session Archive Proposal</a></p>
+<h3 id="session-delete"><code>#session_delete</code></h3>
+<pre><code class="language-crystal hljs">client.session_delete(session_id : <span class="hljs-variable constant_">String</span>) : <span class="hljs-variable constant_">ACP::Protocol::SessionDeleteResult</span>
+</code></pre>
+<p>Removes a session from the agent's <code>session/list</code> results. Only call it when <code>sessionCapabilities.delete?</code> is true. A <code>-32002</code> answer counts as success. The client's cached active session is left alone; call <code>forget_session</code> if you deleted it.</p>
+<h3 id="session-prompt"><code>#session_prompt</code></h3>
+<pre><code class="language-crystal hljs">client.session_prompt(
+  blocks : <span class="hljs-variable constant_">Array</span>(<span class="hljs-variable constant_">ACP::Protocol::ContentBlock</span>),
+  session_id : <span class="hljs-variable constant_">String</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">ACP::Protocol::SessionPromptResult</span>
+</code></pre>
+<p>Sends content blocks as a prompt to the active session. Pass
+<code>ACP::Protocol::SessionPromptParams</code> to specify a session and include
+extension metadata. Set <code>meta_raw</code> to keep exact JSON numbers. Stdio
+preserves these values, and custom transports can implement <code>send_wire</code>.</p>
+<h3 id="session-prompt-text"><code>#session_prompt_text</code></h3>
+<pre><code class="language-crystal hljs">client.session_prompt_text(
+  text : <span class="hljs-variable constant_">String</span>,
+  session_id : <span class="hljs-variable constant_">String</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">ACP::Protocol::SessionPromptResult</span>
+</code></pre>
+<p>Convenience method to send a single text prompt.</p>
+<h3 id="session-cancel"><code>#session_cancel</code></h3>
+<pre><code class="language-crystal hljs">client.session_cancel(session_id : <span class="hljs-variable constant_">String</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>) : <span class="hljs-variable constant_">Nil</span>
+</code></pre>
+<p>Cancels an in-progress generation. Pass <code>ACP::Protocol::SessionCancelParams</code>
+and set <code>meta_raw</code> to send exact JSON metadata in v1 or v2.
+V2 <code>tool_call_cancel</code> and <code>terminal_cancel</code> also accept their typed
+cancellation parameters with exact metadata.</p>
+<h3 id="session-set-mode"><code>#session_set_mode</code></h3>
+<pre><code class="language-crystal hljs">client.session_set_mode(
+  mode_id : <span class="hljs-variable constant_">String</span>,
+  session_id : <span class="hljs-variable constant_">String</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">Nil</span>
+</code></pre>
+<p>Switches the session to an advertised mode. Read the available modes and
+the current selection with <code>client.session_modes(session_id)</code>. Omit the
+session ID to read or change the active session.
+Pass <code>ACP::Protocol::SessionSetModeParams</code> to include exact extension
+metadata with <code>meta_raw</code> and receive the Agent's acknowledgement.
+<a href="https://agentclientprotocol.com/protocol/v1/session-modes">ACP v1 Session Modes</a></p>
+<h3 id="session-set-config-option"><code>#session_set_config_option</code></h3>
+<pre><code class="language-crystal hljs">client.session_set_config_option(
+  config_id : <span class="hljs-variable constant_">String</span>,
+  value : <span class="hljs-variable constant_">String</span> <span class="hljs-operator">|</span> <span class="hljs-variable constant_">Bool</span>,
+  session_id : <span class="hljs-variable constant_">String</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">ACP::Protocol::SessionSetConfigOptionResult</span>
+</code></pre>
+<p>Changes an option in the given or active session. Read the latest list with
+<code>client.session_config_options(session_id)</code>. Pass an advertised value ID for
+a <code>select</code> option. To pass a <code>Bool</code> for a <code>boolean</code> option, advertise
+<code>session.configOptions.boolean</code> when initializing the client.
+Pass typed configuration parameters and set <code>meta_raw</code> to include exact
+extension metadata. V2 exposes <code>value_raw</code> to read or replace a custom value.</p>
+<p>Setup responses and configuration updates replace the session's option list
+as the client receives them. A successful configuration change also returns
+a complete list. Choice state is available until the session closes or the
+client forgets it. After a timed-out load, wait for the Agent's response or
+reconnect before requesting another load of the same session.
+<a href="https://agentclientprotocol.com/protocol/v1/session-config-options">ACP v1 Session Config Options</a></p>
+<h3 id="cancel-request"><code>#cancel_request</code></h3>
+<pre><code class="language-crystal hljs">client.cancel_request(request_id : <span class="hljs-variable constant_">ACP::Protocol::RequestId</span>) : <span class="hljs-variable constant_">Nil</span>
+</code></pre>
+<p>Sends <code>$/cancel_request</code> for one of the client's outstanding requests. The agent still answers it, usually with a <code>-32800</code> error (<code>JsonRpcError#request_cancelled?</code>). A request that hits its timeout is cancelled this way automatically. Use <code>session_cancel</code> to cancel a prompt turn.
+Pass <code>ACP::Protocol::CancelRequestParams</code> to include extension metadata.</p>
+<h2 id="extension-methods">Extension Methods</h2>
+<h3 id="ext-method"><code>#ext_method</code></h3>
+<pre><code class="language-crystal hljs">client.ext_method(
+  method : <span class="hljs-variable constant_">String</span>,
+  params : <span class="hljs-variable constant_">Hash</span>(<span class="hljs-variable constant_">String</span>, <span class="hljs-variable constant_">JSON::Any::Type</span>)? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>,
+  timeout : <span class="hljs-variable constant_">Float64</span>? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">JSON::Any</span>
+</code></pre>
+<p>Sends a custom extension request to the agent.</p>
+<h3 id="ext-notification"><code>#ext_notification</code></h3>
+<pre><code class="language-crystal hljs">client.ext_notification(
+  method : <span class="hljs-variable constant_">String</span>,
+  params : <span class="hljs-variable constant_">Hash</span>(<span class="hljs-variable constant_">String</span>, <span class="hljs-variable constant_">JSON::Any::Type</span>)? <span class="hljs-operator">=</span> <span class="hljs-literal">nil</span>
+) : <span class="hljs-variable constant_">Nil</span>
+</code></pre>
+<p>Sends a custom extension notification (no response expected).</p>
+<h2 id="state-inspection">State &amp; Inspection</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>state</code></td>
+<td><code>ClientState</code></td>
+<td>Current state (<code>Created</code>, <code>Initialized</code>, <code>SessionActive</code>, <code>Closed</code>)</td>
+</tr>
+<tr>
+<td><code>closed?</code></td>
+<td><code>Bool</code></td>
+<td>Whether the client is closed</td>
+</tr>
+<tr>
+<td><code>session_active?</code></td>
+<td><code>Bool</code></td>
+<td>Whether a session is active</td>
+</tr>
+<tr>
+<td><code>session_id</code></td>
+<td><code>String?</code></td>
+<td>Current session ID</td>
+</tr>
+<tr>
+<td><code>agent_capabilities</code></td>
+<td><code>AgentCapabilities?</code></td>
+<td>Negotiated agent capabilities</td>
+</tr>
+<tr>
+<td><code>agent_info</code></td>
+<td><code>AgentInfo?</code></td>
+<td>Agent metadata</td>
+</tr>
+<tr>
+<td><code>auth_methods</code></td>
+<td><code>Array(JSON::Any)?</code></td>
+<td>Editable view of the advertised methods</td>
+</tr>
+<tr>
+<td><code>auth_methods_raw</code></td>
+<td><code>Protocol::RawJson?</code></td>
+<td>Exact advertised methods and extension metadata</td>
+</tr>
+<tr>
+<td><code>typed_auth_methods</code></td>
+<td><code>Array(AuthenticationMethod)</code></td>
+<td>Supported protocol and terminal descriptors</td>
+</tr>
+<tr>
+<td><code>negotiated_protocol_version</code></td>
+<td><code>UInt16?</code></td>
+<td>Negotiated protocol version</td>
+</tr>
+</tbody>
+</table>
+<h2 id="configuration">Configuration</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request_timeout</code></td>
+<td><code>Float64?</code></td>
+<td><code>30.0</code></td>
+<td>Default request timeout in seconds</td>
+</tr>
+<tr>
+<td><code>prompt_timeout</code></td>
+<td><code>Float64?</code></td>
+<td><code>300.0</code></td>
+<td>Prompt-specific timeout (5 minutes)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="callbacks">Callbacks</h2>
+<table>
+<thead>
+<tr>
+<th>Callback</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_update</code></td>
+<td><code>UpdateHandler?</code></td>
+<td>Handle streaming session updates</td>
+</tr>
+<tr>
+<td><code>on_request_permission</code></td>
+<td><code>RequestPermissionHandler?</code></td>
+<td>Handle v1 permission requests with exact tool data</td>
+</tr>
+<tr>
+<td><code>on_agent_request</code></td>
+<td><code>AgentRequestHandler?</code></td>
+<td>Handle agent-initiated requests</td>
+</tr>
+<tr>
+<td><code>on_notification</code></td>
+<td><code>NotificationHandler?</code></td>
+<td>Handle non-update notifications</td>
+</tr>
+<tr>
+<td><code>on_disconnect</code></td>
+<td><code>(-&gt; Nil)?</code></td>
+<td>Called on connection loss</td>
+</tr>
+</tbody>
+</table>
+<p>Return <code>Protocol::RequestPermissionResult.selected(option_id)</code> or
+<code>Protocol::RequestPermissionResult.cancelled</code> from <code>on_request_permission</code>.
+The callback receives <code>RequestPermissionParams</code> with the original request ID.
+The tool call exposes <code>raw_input_raw</code>, <code>raw_output_raw</code>, <code>content_raw</code>, and
+<code>locations_raw</code> for values that need exact JSON. Its <code>meta_raw</code> accessor also
+preserves exact extension values, as do those on the request and its options.
+A selected ID must appear in the Agent's original options. Invalid results or
+selections return JSON-RPC <code>-32603</code>. Set <code>meta_raw</code> for exact metadata on the
+result or <code>outcome_raw</code> for an exact decision object. Over stdio, repeated
+permission option fields return <code>-32602</code> before the callback runs.</p>
+<p>With <code>on_request_permission</code> unset, <code>on_agent_request</code> handles representable
+permission requests and returns the JSON form of the same result. Without a
+registered handler, the client returns a cancelled outcome.
+<a href="https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission">ACP v1 Permissions</a></p>
+<p>For an accepted URL elicitation, <code>on_elicitation_complete</code> receives the
+matching completion once. If no typed handler is set, the matching
+notification goes to <code>on_notification</code>.
+<a href="https://agentclientprotocol.com/protocol/v1/elicitation#url-completion">ACP v1 URL Completion</a></p>
+<p>For v1 compaction updates, advertise <code>session.compaction</code> in the client
+capabilities. Read <code>CompactionUpdate#summary_raw</code> for exact replacement
+content and <code>typed_summary</code> for usable blocks. The <code>summary_present?</code> flag
+distinguishes an omitted summary from an explicit clear. On a
+<code>CompactionSummaryChunkUpdate</code>, the exact appended block is in
+<code>content_raw</code>, and the chunk's own metadata is in <code>meta_raw</code>.
+<a href="https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction">ACP v1 session compaction</a></p>
+<h2 id="subagent-sessions">Subagent Sessions</h2>
+<p>Set <code>subagents: ACP::Protocol::SubagentCapabilities.new</code> in the client
+capabilities before initialization to receive child session announcements and
+session-directed messages. Use the outer <code>params.session_id</code> for updates and
+request attribution, and <code>SubagentUpdate#session_id</code> for the announced child.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>subagent(session_id)</code></td>
+<td>Current child state and permissions, or <code>nil</code></td>
+</tr>
+<tr>
+<td><code>subagents(parent_id)</code></td>
+<td>Immediate children announced under that parent</td>
+</tr>
+<tr>
+<td><code>session_workspace(session_id)</code></td>
+<td>Effective working directory and additional directories, or <code>nil</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>SubagentSession#cancel?</code> indicates when <code>session_cancel(child_id)</code> is
+available. Other requests for the child raise <code>ACP::InvalidStateError</code>.
+Agent requests still reach their existing handlers with their original
+session IDs. Apply your workspace and permission policy to those requests.</p>
+<p>Use <code>subagent(id)</code> for confirmed state. During <code>session/load</code>, typed callbacks
+have <code>before_load_response?</code> set for the parent and its descendants. Treat
+child state, capabilities, and configuration in those updates as history.
+During <code>session/resume</code>, updates may arrive before the response. The client
+publishes effective state and cancellation permission when the resume succeeds.</p>
+<p>In v1, <code>SessionMessageUpdate</code> reports a message between sessions, and
+<code>SessionMessageChunkUpdate</code> appends one content block. Both expose exact
+extension metadata through <code>meta_raw</code>. On message updates, an omitted
+<code>_meta</code> leaves the stored metadata in place, <code>null</code> clears it, and an object
+replaces it. Check <code>meta_present?</code> to distinguish the updates.
+<a href="https://agentclientprotocol.com/protocol/v1/subagents">ACP v1 Subagents</a></p>
+<h2 id="mcp-over-acp-draft">MCP-over-ACP (draft)</h2>
+<p>Register an MCP handler on an initialized ACP client and include its
+declaration in session setup. The Agent must advertise <code>mcpCapabilities.acp</code>
+in v1 or <code>session.mcp.acp</code> in v2. A registration can be declared in multiple
+sessions on the same connection.</p>
+<pre><code class="language-crystal hljs">server <span class="hljs-operator">=</span> client.register_mcp_server(<span class="hljs-string">&quot;workspace-tools&quot;</span>) <span class="hljs-keyword">do</span> <span class="hljs-operator">|</span>context<span class="hljs-operator">|</span>
+  handle_workspace_mcp_request(context)
+<span class="hljs-keyword">end</span>
+
+<span class="hljs-comment"># With ACP::V2::Client</span>
+wire_server <span class="hljs-operator">=</span> <span class="hljs-variable constant_">ACP::Protocol::V2::McpServer</span>.acp(server)
+session <span class="hljs-operator">=</span> client.session_new(<span class="hljs-variable constant_">ACP::Protocol::V2::SessionNewParams</span>.new(
+  <span class="hljs-variable constant_">Dir</span>.current, mcp_servers: [wire_server]))
+</code></pre>
+<p>With <code>ACP::Client</code> v1, pass <code>[server.to_json_any]</code> as the <code>mcp_servers</code> list.
+The Agent can call a registered handler before the session setup response
+arrives. The handler receives <code>ACP::McpRequestContext</code> and returns a
+<code>MessageMcpResponse.success(result)</code> or <code>.failure(mcp_error)</code>. Use
+<code>McpJson.from_json</code> to pass exact JSON for arguments, results, or opaque
+multi-round-trip state.</p>
+<p>Handlers implement the MCP methods they expose and apply authorization and
+subscription filters. The binding validates the MCP 2026-07-28 request
+metadata, routes <code>context.notify</code> to the active operation, and preserves
+inner MCP errors separately from ACP binding failures. Use
+<code>context.cancellation</code> or <code>context.cancelled?</code> to stop work and finish cleanup
+before returning. Unregistering a server or closing its connection signals
+cancellation to the affected handlers.</p>
+<p>Set <code>mcp_request_limit:</code> on either client to change the default of 32 active
+operations. The binding limits individual frames to 16 MiB, outer ACP IDs
+to 1 KiB, and retained input and queued output to 32 MiB each. A handler may
+have one notification waiting to write at a time. The connection closes
+if its bounded rejection queue fills. Stdio preserves exact JSON frames.
+Custom transports can return <code>WireFrame</code> with <code>exact_params: true</code> and
+override <code>send_wire</code> to preserve exact JSON in both directions.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/mcp-over-acp.mdx">MCP-over-ACP Proposal</a></p>
+<h2 id="model-providers-draft">Model providers (draft)</h2>
+<p>After initialization, call <code>providers_list</code> if the Agent advertises
+<code>agentCapabilities.providers</code> in v1 or <code>capabilities.providers</code> in v2.
+Each entry reports the provider ID, its supported API protocols, whether
+the Agent requires it, and its current routing. A missing <code>current</code> value
+indicates a disabled provider. The routing summary carries the protocol
+and base URL.</p>
+<p>Call <code>providers_set(SetProviderParams.new(provider_id, api_type, base_url, headers: headers))</code> to replace a provider's full configuration. Use the
+wire types in the protocol version's namespace. Supply the full intended
+header map with each replacement. The Agent owns routing and decides when
+changes apply to existing sessions.</p>
+<p><code>providers_disable(provider_id)</code> queries the Agent's current provider list
+and rejects the operation if that provider is required. These methods apply
+to the Agent process. Built-in stdio frame logs redact provider parameters and
+their replies, including late or repeated replies. Once the log keeps track
+of more than 256 provider request IDs, it redacts all response payloads for
+that connection.
+Applications receive the Agent's JSON-RPC errors, including any data the
+Agent returns.
+Provider requests, replies, list entries, and routing summaries expose
+<code>meta</code> for values representable as <code>JSON::Any</code> and <code>meta_raw</code> for the
+original metadata, including full numeric precision. To send metadata
+outside the range or precision of <code>JSON::Any</code>, set <code>meta_raw</code> on the
+request and use a transport that supports exact JSON frames.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v1/schema.unstable.json">ACP v1 draft schema</a> · <a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/schema/v2/schema.unstable.json">ACP v2 draft schema</a></p>
+<h2 id="agent-skills-v2-draft">Agent Skills (v2 draft)</h2>
+<p>Advertise <code>commands: CommandsCapabilities.new(skill: CommandsSkillCapabilities.new)</code>
+on <code>Protocol::V2::ClientSessionCapabilities</code> and pass it as <code>session:</code> on
+the v2 client capabilities. Read negotiated skills with
+<code>session_available_commands(session_id).try(&amp;.compact_map(&amp;.skill))</code>. Setup
+responses, command updates, and <code>session_options</code> previews also expose
+<code>typed_available_skills</code>. Each skill has a name, description, and optional
+path on the Agent's filesystem.</p>
+<p>When the user selects a skill, put its name in
+<code>Protocol::V2::SkillReference.new(name)</code> and send it through
+<code>SessionPromptParams.new</code>. Use <code>Array(Protocol::V2::PromptContentBlock)</code> to
+mix references with other typed content. An Agent that advertises
+<code>session.prompt.skill</code> accepts one reference as the first block. With
+<code>session.prompt.skill.inline</code>, references can appear anywhere.</p>
+<p>The client checks the session's current list before sending a new skill
+reference. To retry a keyed submission, call
+<code>session_prompt(original_params, retry_submission: true)</code> with the same
+prompt and <code>idempotency_key</code>. The Agent can then acknowledge an earlier
+submission after the command list has changed.
+In user-message updates, <code>skill_references</code> and <code>skill_reference</code> expose
+references in full messages and chunks, including during replay. Use
+<code>meta_raw</code> to read or set exact metadata on a skill reference. It stays
+with the reference when submitted as typed prompt content.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/agent-skills.mdx">ACP Agent Skills Proposal</a></p>
+<h2 id="prompt-suggestions-draft">Prompt suggestions (draft)</h2>
+<p>Opt in by setting <code>prompt_suggestions: PromptSuggestionsCapabilities.new</code>
+on the <code>ClientSessionCapabilities</code> for your protocol version. Pass that group
+as <code>session:</code> on <code>ClientCapabilities</code>. An empty prompt suggestion capability
+supports text and resource links. Add the <code>image:</code>, <code>audio:</code>, or
+<code>embedded_context:</code> markers to offer those content types when the Agent also
+supports them.</p>
+<p>In v1, read <code>Protocol::PromptSuggestionsUpdate</code> from <code>on_update</code>. In v2, read
+<code>Protocol::V2::PromptSuggestionsUpdate</code> from <code>note.update.typed</code>. Treat the
+list as a replacement for that session's current suggestions. An empty
+list withdraws the previous suggestions. Typed updates keep compatible
+candidates in the Agent's order and skip entire unusable candidates. Start
+with an empty list when you open or restore a session.</p>
+<p>After the user accepts a suggestion, pass its <code>prompt</code> to <code>session_prompt</code>
+in v1. In v2, pass <code>prompt_raw</code> to
+<code>Protocol::V2::SessionPromptParams.new(session_id, suggestion.prompt_raw)</code>
+to retain the original block fields and exact numbers. Call the request
+outside the dispatcher callback. Both versions expose exact update and
+suggestion metadata through <code>meta_raw</code>. The generic <code>on_notification</code>
+callback only offers candidates whose prompt fits in <code>JSON::Any</code>. Use
+the typed <code>on_update</code> callback to receive the full list with exact values.
+<a href="https://agentclientprotocol.com/rfds/prompt-suggestions">ACP Prompt Suggestions Proposal</a></p>
+<h2 id="session-cursors-draft">Session cursors (draft)</h2>
+<p>On v1, opt in with
+<code>ClientSessionCapabilities.new(cursors: SessionCursorsCapabilities.new)</code>
+in the client's session capabilities. On v2, cursor updates are available
+automatically. They arrive through <code>on_update</code> as <code>Protocol::CursorUpdate</code>
+in v1 and through <code>update.typed</code> in v2.</p>
+<p>Use <code>client.session_cursor(session_id, cursor_id)</code> or
+<code>client.session_cursors(session_id)</code> to read the current snapshots.
+Their IDs are opaque and session-scoped. Each snapshot keeps the first
+reported anchor and the latest capabilities. Use <code>anchor.known_position?</code>
+and the transcript's entity IDs to decide where to display a cursor.</p>
+<p>Full replays rebuild the stored cursors, including announced child sessions.
+In v1, new snapshots become available when <code>session/load</code> succeeds. In v2,
+each session's <code>replay_complete</code> publishes its snapshots and starts applying
+live cursor updates. Until those boundaries, lookups return the previous
+snapshots. Use <code>raw_meta_field</code> for exact metadata values outside the range
+of <code>JSON::Any</code>.
+Full replays can supply updated entity IDs for existing cursor anchors.
+Closing a session or resuming without replay preserves its cursors.
+<a href="https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/session-cursors.mdx">ACP Session Cursors Proposal</a></p>
+<h2 id="typed-client-method-handlers">Typed Client Method Handlers</h2>
+<p>For ACP v1, advertise file reads, file writes, and terminal support before
+initialization. The client handles <code>fs/read_text_file</code> and
+<code>fs/write_text_file</code> according to their separate capability flags.
+<code>clientCapabilities.terminal</code> enables the terminal methods as a group.
+Requests outside the advertisement return <code>-32601</code> before reaching either
+the typed handler or <code>on_agent_request</code>.</p>
+<p>File paths and any supplied terminal working directory must be absolute
+in POSIX or Windows syntax.
+File reads use one-based line numbers. Terminal environment entries
+require string <code>name</code> and <code>value</code> fields.
+Malformed parameters return <code>-32602</code> before either callback. Typed request
+parameters provide exact extension metadata through <code>meta_raw</code>, and
+<code>CreateTerminalParams#env_raw</code> retains the complete environment array.
+<a href="https://agentclientprotocol.com/protocol/v1/file-system#checking-support">ACP v1 File System</a>
+<a href="https://agentclientprotocol.com/protocol/v1/terminals#checking-support">ACP v1 Terminals</a></p>
+<p>Call <code>client.session_workspace(params.session_id)</code> to look up the Agent-side
+<code>cwd</code> and <code>additional_directories</code> in either callback. ACP v1 records the roots from
+successful new, load, resume, and fork replies, including raw requests and
+sessions without subagents. A successful reattachment replaces the root set.
+A reattachment timeout clears the lookup until a setup succeeds. A confirmed
+close or archive, local <code>forget_session</code>, and disconnection also clear it.
+The lookup returns <code>nil</code> when the workspace is unknown. Announced subagents can
+inherit roots from their parent.</p>
+<p>Apply your application's access policy using these roots. The ACP file system
+spec recommends checking resolved paths at the time of use and comparing
+them by path component.
+<a href="https://agentclientprotocol.com/protocol/v1/session-setup#workspace-root-security">ACP v1 Workspace Root Security</a></p>
+<p>Use <code>meta_raw=</code> to attach exact JSON metadata to typed file and terminal
+results, including <code>TerminalExitStatus</code>. Stdio preserves the original
+number tokens. Custom transports that cannot preserve an exact reply
+return <code>-32603</code> to the Agent.
+<a href="https://agentclientprotocol.com/protocol/v1/extensibility#the-_meta-field">ACP v1 Extension Metadata</a></p>
+<p>For ACP v1 file and terminal methods, <code>on_agent_request</code> must return a
+result object with the method's required fields. Return <code>{}</code> for an
+empty successful acknowledgement. Malformed results return <code>-32603</code>.
+Additional result fields and explicit <code>ACP::JsonRpcError</code> replies pass
+through.</p>
+<p>Return a fresh <code>terminalId</code> for every successful <code>terminal/create</code> on the
+connection. Subsequent terminal requests must use that ID with its creating
+session. With a handler registered, unknown, retired, and other-session IDs
+return <code>-32002</code> before dispatch. A duplicate creation ID returns <code>-32603</code> and
+invalidates that ID for the connection.
+<code>terminal/kill</code> keeps the terminal available for output and exit status.
+Your release callback must stop the command if it is still running and free
+its resources. Successful release invalidates the ID. A confirmed session
+close or archive, or a local <code>forget_session</code>, also clears the retired
+attachment's terminal bindings. The application owns terminal processes and
+their cleanup, including cleanup when a creation reply cannot be delivered.
+<a href="https://agentclientprotocol.com/protocol/v1/terminals#releasing-terminals">ACP v1 Terminals</a></p>
+<p>The client applies the original <code>terminal/create</code> output byte limit to typed
+and generic <code>terminal/output</code> replies. It replaces invalid UTF-8 bytes with
+replacement characters, then keeps the newest complete characters that fit.
+When the client records truncation from a validated output snapshot, later
+snapshots of that terminal keep <code>truncated</code> set to true.
+The application controls its terminal capture buffer and can enforce the same
+limit while collecting output.
+<a href="https://agentclientprotocol.com/protocol/v1/terminals#executing-commands">ACP v1 Terminal Output Limit</a></p>
+<table>
+<thead>
+<tr>
+<th>Handler</th>
+<th>Params Type</th>
+<th>Result Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>on_read_text_file</code></td>
+<td><code>ReadTextFileParams</code></td>
+<td><code>ReadTextFileResult</code></td>
+<td>Handle <code>fs/read_text_file</code></td>
+</tr>
+<tr>
+<td><code>on_write_text_file</code></td>
+<td><code>WriteTextFileParams</code></td>
+<td><code>WriteTextFileResult</code></td>
+<td>Handle <code>fs/write_text_file</code></td>
+</tr>
+<tr>
+<td><code>on_create_terminal</code></td>
+<td><code>CreateTerminalParams</code></td>
+<td><code>CreateTerminalResult</code></td>
+<td>Handle <code>terminal/create</code></td>
+</tr>
+<tr>
+<td><code>on_terminal_output</code></td>
+<td><code>TerminalOutputParams</code></td>
+<td><code>TerminalOutputResult</code></td>
+<td>Handle <code>terminal/output</code></td>
+</tr>
+<tr>
+<td><code>on_release_terminal</code></td>
+<td><code>ReleaseTerminalParams</code></td>
+<td><code>ReleaseTerminalResult</code></td>
+<td>Handle <code>terminal/release</code></td>
+</tr>
+<tr>
+<td><code>on_wait_for_terminal_exit</code></td>
+<td><code>WaitForTerminalExitParams</code></td>
+<td><code>WaitForTerminalExitResult</code></td>
+<td>Handle <code>terminal/wait_for_exit</code></td>
+</tr>
+<tr>
+<td><code>on_kill_terminal</code></td>
+<td><code>KillTerminalParams</code></td>
+<td><code>KillTerminalResult</code></td>
+<td>Handle <code>terminal/kill</code></td>
+</tr>
+<tr>
+<td><code>on_create_elicitation</code></td>
+<td><code>CreateElicitationParams</code></td>
+<td><code>CreateElicitationResult</code></td>
+<td>Handle <code>elicitation/create</code></td>
+</tr>
+<tr>
+<td><code>on_elicitation_complete</code></td>
+<td><code>CompleteElicitationParams</code></td>
+<td><code>Nil</code></td>
+<td>Handle the <code>elicitation/complete</code> notification (else <code>on_notification</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Set <code>client_capabilities.elicitation</code> to the modes <code>on_create_elicitation</code> handles. A request for a mode that isn't advertised there is answered with <code>-32602</code> and never reaches the handler.</p>
+<p>Each agent request runs its handler in its own fiber, so a handler may block (e.g. waiting on the user) without holding up responses or notifications, but request handlers may run concurrently with each other and with notification callbacks. <code>on_update</code> / <code>on_notification</code> still run in arrival order on the dispatcher fiber, so they must not wait on a request of their own (for example <code>session_set_mode</code>): its response can't be read until the callback returns, so the call times out (or, with a nil timeout, hangs for good). Make such calls from another fiber (<code>spawn</code>). A request with no matching handler, including an unknown <code>_</code>-prefixed extension method, is answered with <code>-32601 Method not found</code>. A handler that raises <code>ACP::JsonRpcError</code> is answered with that error's code, message and data (for example <code>-32002</code> for a missing file or unknown terminal); any other exception becomes <code>-32603</code>.</p>
+<p>When the Agent cancels a permission request, the Client answers with the
+<code>cancelled</code> outcome. A cancelled v2 elicitation gets the <code>cancel</code> action.
+Other requests that only read or wait, such as <code>fs/read_text_file</code>,
+<code>terminal/output</code>, and <code>terminal/wait_for_exit</code>, are answered with <code>-32800</code>.
+Those handlers' late answers are dropped. Handlers for writes, terminal
+creation, and extension requests still answer the original request.</p>
+<p>Valid cancellations are also passed to <code>on_notification</code> so the application
+can stop the work. ACP v2 delivers this callback for outstanding requests
+from the Agent. Cancellation IDs retain their number or string type, and
+ambiguous IDs are ignored. Use <code>CancelRequestParams#meta_raw</code> when decoding
+the notification JSON directly.
+<a href="https://agentclientprotocol.com/protocol/v2/cancellation">ACP v2 request cancellation</a></p>
+
+    
+    <nav class="page-nav" aria-label="Adjacent pages">
+      
+      <a class="page-nav-link page-nav-prev" href="https://acp.cr.hahwul.com/api-reference/" rel="prev">
+        <span class="page-nav-label">Previous</span>
+        <span class="page-nav-title">API Reference</span>
+      </a>
+      
+      
+      <a class="page-nav-link page-nav-next" href="https://acp.cr.hahwul.com/api-reference/session/" rel="next">
+        <span class="page-nav-label">Next</span>
+        <span class="page-nav-title">Session</span>
+      </a>
+      
+    </nav>
+    
+    <div class="docs-footer">
+      <p>acp.cr documentation</p>
+      <div class="docs-footer-links">
+        <a href="https://github.com/hahwul/acp.cr">GitHub</a>
+        <a href="https://github.com/hahwul/hwaro">Built with Hwaro</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="https://acp.cr.hahwul.com/js/search.js"></script>
+<script>
+(function () {
+  var KEY = "hwaro-theme";
+  var MODES = ["auto", "light", "dark"];
+  var root = document.documentElement;
+  var btn = document.querySelector(".theme-toggle");
+  if (!btn) return;
+  function apply(mode) {
+    if (mode === "auto") {
+      root.removeAttribute("data-theme");
+      try { localStorage.removeItem(KEY); } catch (e) {}
+    } else {
+      root.setAttribute("data-theme", mode);
+      try { localStorage.setItem(KEY, mode); } catch (e) {}
+    }
+    btn.setAttribute("data-mode", mode);
+    btn.setAttribute("aria-label", "Theme: " + mode);
+    btn.title = "Theme: " + mode;
+  }
+  var stored = "auto";
+  try { var t = localStorage.getItem(KEY); if (t === "light" || t === "dark") stored = t; } catch (e) {}
+  btn.addEventListener("click", function () {
+    apply(MODES[(MODES.indexOf(btn.getAttribute("data-mode")) + 1) % MODES.length]);
+  });
+  apply(stored);
+})();
+(function () {
+  var btn = document.querySelector(".nav-toggle");
+  var scrim = document.querySelector(".sidebar-scrim");
+  var sidebar = document.getElementById("sidebar");
+  if (!btn) return;
+  function set(open) {
+    document.body.classList.toggle("nav-open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  btn.addEventListener("click", function () {
+    set(!document.body.classList.contains("nav-open"));
+  });
+  if (scrim) scrim.addEventListener("click", function () { set(false); });
+  if (sidebar) sidebar.addEventListener("click", function (e) {
+    if (e.target.closest("a")) set(false);
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") set(false);
+  });
+})();
+</script>
+
+</body>
+</html>
