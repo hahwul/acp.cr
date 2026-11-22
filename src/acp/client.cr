@@ -3038,8 +3038,8 @@ module ACP
       end
       schema = input.requested_schema_raw
       result = handler.call(input)
-      if result.content_raw && !(form && v2)
-        raise ArgumentError.new("Exact elicitation content requires an ACP v2 form")
+      if result.content_raw && !form
+        raise ArgumentError.new("Exact elicitation content requires a form")
       end
       if schema
         result.content = nil if result.action.in?("decline", "cancel")

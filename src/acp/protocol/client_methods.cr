@@ -467,9 +467,37 @@ module ACP
     # ═══════════════════════════════════════════════════════════════════
     # See: https://agentclientprotocol.com/protocol/v1/elicitation
 
+    # :nodoc:
+    module ElicitationNumber
+      def self.project(wire : RawJson, *, integer : Bool = false) : Int64 | Float64 | Nil
+        case wire.json[0]
+        when '0'..'9', '-'
+          if number = wire.as_i64?
+            return number
+          end
+
+          wire.json.to_f64?.try { |number| number if number.finite? } unless integer
+        end
+      end
+
+      def self.from_json(pull : JSON::PullParser) : RawJson?
+        location = pull.location
+        wire = RawJson.new(pull)
+        return if wire.null?
+        return wire if project(wire)
+
+        raise JSON::ParseException.new("Expected a finite form bound", *location)
+      end
+
+      def self.to_json(value : RawJson, builder : JSON::Builder) : Nil
+        value.to_json(builder)
+      end
+    end
+
     # One choice of an enum-valued elicitation property (`EnumOption`).
     struct EnumOption
       include JSON::Serializable
+      include LosslessMetadata
 
       # The value submitted when this option is chosen (required).
       @[JSON::Field(key: "const")]
@@ -481,23 +509,23 @@ module ACP
       # Optional longer description.
       property description : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @const_value : String,
         @title : String,
         @description : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @const_value, @title, @description, metadata_comparison
     end
 
     # The `items` of an `array` (multi-select) elicitation property: either
     # untitled (`type: "string"` + `enum`) or titled (`anyOf` options).
     struct MultiSelectItems
       include JSON::Serializable
+      include LosslessMetadata
 
       # "string" for untitled items; absent for titled ones.
       @[JSON::Field(key: "type")]
@@ -511,17 +539,16 @@ module ACP
       @[JSON::Field(key: "anyOf")]
       property any_of : Array(EnumOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @items_type : String? = nil,
         @enum_values : Array(String)? = nil,
         @any_of : Array(EnumOption)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @items_type, @enum_values, @any_of, metadata_comparison
     end
 
     # One property of a form elicitation's `requestedSchema`
@@ -532,6 +559,7 @@ module ACP
     # `property_type`; fields that don't apply to a variant are nil.
     struct ElicitationPropertySchema
       include JSON::Serializable
+      include LosslessMetadata
 
       # "string", "number", "integer", "boolean", "array", or a future type
       # (required).
@@ -544,9 +572,32 @@ module ACP
       # Longer description.
       property description : String?
 
-      # Default value (a string, number, boolean or string array, matching
-      # the type).
-      property default : JSON::Any?
+      @[JSON::Field(key: "default")]
+      @default_wire : PreservedJson?
+
+      # Default value represented as a string, number, boolean, or string array.
+      def default : JSON::Any?
+        return unless wire = @default_wire
+
+        wire.value || (ElicitationNumber.project(wire.raw).try { |value| JSON::Any.new(value) } if @property_type == "number")
+      end
+
+      # Replaces the default with a JSON::Any value.
+      def default=(value : JSON::Any?) : JSON::Any?
+        @default_wire = value.try { |json| PreservedJson.new(json) }
+        value
+      end
+
+      # Exact default, including the original numeric token.
+      def default_raw : RawJson?
+        @default_wire.try(&.raw)
+      end
+
+      # Replaces the exact default, or clears it when passed nil.
+      def default_raw=(value : RawJson?) : RawJson?
+        @default_wire = value.try { |wire| PreservedJson.new(wire, project_nested_objects: true) }
+        value
+      end
 
       # `string`: length bounds. Schema `uint32`.
       @[JSON::Field(key: "minLength")]
@@ -570,11 +621,37 @@ module ACP
       @[JSON::Field(key: "oneOf")]
       property one_of : Array(EnumOption)?
 
-      # `number` / `integer`: inclusive bounds. Integers stay `Int64`.
-      property minimum : Int64 | Float64?
+      private macro numeric_bound(name)
+        # Exact number supplied for this bound.
+        @[JSON::Field(key: {{name.stringify}}, converter: ::ACP::Protocol::ElicitationNumber)]
+        getter {{name}}_raw : RawJson?
 
-      # :ditto:
-      property maximum : Int64 | Float64?
+        # Inclusive bound as Int64 or Float64.
+        def {{name}} : Int64 | Float64 | Nil
+          @{{name}}_raw.try { |wire| ElicitationNumber.project(wire) }
+        end
+
+        # Replaces the inclusive bound.
+        def {{name}}=(value : Int64 | Float64 | Nil) : Int64 | Float64 | Nil
+          @{{name}}_raw = value.try { |number| RawJson.new(JSON::Any.new(number)) }
+          value
+        end
+
+        # Replaces the bound with an exact number, or clears it with nil or JSON null.
+        def {{name}}_raw=(value : RawJson?) : RawJson?
+          if value && !value.null?
+            raise ArgumentError.new("Expected a finite form bound") unless ElicitationNumber.project(value)
+
+            @{{name}}_raw = value
+          else
+            @{{name}}_raw = nil
+          end
+          value
+        end
+      end
+
+      numeric_bound minimum
+      numeric_bound maximum
 
       # `array`: selection count bounds. Schema `uint64`.
       @[JSON::Field(key: "minItems")]
@@ -587,28 +664,35 @@ module ACP
       # `array`: the selectable values (required for `array`).
       property items : MultiSelectItems?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @property_type : String,
         @title : String? = nil,
         @description : String? = nil,
-        @default : JSON::Any? = nil,
+        default : JSON::Any? = nil,
         @min_length : UInt32? = nil,
         @max_length : UInt32? = nil,
         @pattern : String? = nil,
         @format : String? = nil,
         @enum_values : Array(String)? = nil,
         @one_of : Array(EnumOption)? = nil,
-        @minimum : Int64 | Float64? = nil,
-        @maximum : Int64 | Float64? = nil,
+        minimum : Int64 | Float64? = nil,
+        maximum : Int64 | Float64? = nil,
         @min_items : UInt64? = nil,
         @max_items : UInt64? = nil,
         @items : MultiSelectItems? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.default = default
+        self.minimum = minimum
+        self.maximum = maximum
+        self.meta = meta
+      end
+
+      def_equals_and_hash @property_type, @title, @description, default_comparison, @min_length, @max_length,
+        @pattern, @format, @enum_values, @one_of, minimum, maximum, @min_items, @max_items, @items, metadata_comparison
+
+      protected def default_comparison
+        default_raw.try { |wire| wire.to_json_any? || wire }
       end
     end
 
@@ -616,6 +700,7 @@ module ACP
     # primitive and enum properties.
     struct ElicitationSchema
       include JSON::Serializable
+      include LosslessMetadata
 
       # Always "object".
       @[JSON::Field(key: "type")]
@@ -633,19 +718,18 @@ module ACP
       # Names of the properties the user must fill in.
       property required : Array(String)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @properties : Hash(String, ElicitationPropertySchema) = {} of String => ElicitationPropertySchema,
         @required : Array(String)? = nil,
         @title : String? = nil,
         @description : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @schema_type = "object"
+        self.meta = meta
       end
+
+      def_equals_and_hash @schema_type, @title, @description, @properties, @required, metadata_comparison
     end
 
     # ─── elicitation/create ───────────────────────────────────────────
@@ -801,7 +885,7 @@ module ACP
         new("accept", content)
       end
 
-      # Accepts an ACP v2 form with exact JSON content, including custom values.
+      # Accepts a form with exact JSON content, including v2 custom values.
       # Content must be an object or null.
       def self.accept_raw(content : RawJson) : CreateElicitationResult
         raise ArgumentError.new("Elicitation content must be an object or null") unless content.object? || content.null?
