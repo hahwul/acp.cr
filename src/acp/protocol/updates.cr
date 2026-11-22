@@ -2,7 +2,7 @@
 #
 # Typed accessor support:
 #   `ToolCallUpdate` and `ToolCallStatusUpdate` store `content` and
-#   `locations` as `Array(JSON::Any)?` for wire compatibility. The
+#   `locations` as editable `Array(JSON::Any)?` views. The
 #   helper methods `typed_content` and `typed_locations` attempt to
 #   parse these into `Array(ToolCallContent)` and
 #   `Array(ToolCallLocation)` respectively, silently skipping entries
@@ -371,6 +371,8 @@ module ACP
     struct ToolCallUpdate < SessionUpdate
       include JSON::Serializable
       include ToolCallRawPayloads
+      include ToolCallCollections
+      include LosslessMetadata
 
       # Unique identifier for this tool call within the session (required).
       @[JSON::Field(key: "toolCallId")]
@@ -387,12 +389,6 @@ module ACP
       # Current execution status: pending, in_progress, completed, failed.
       property status : String?
 
-      # Content produced by the tool call.
-      property content : Array(JSON::Any)?
-
-      # File locations affected by this tool call.
-      property locations : Array(JSON::Any)?
-
       # The name of the tool being invoked (non-standard, backward compat).
       @[JSON::Field(key: "toolName")]
       property tool_name : String?
@@ -400,32 +396,33 @@ module ACP
       # The name of the tool being invoked.
       property name : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @tool_call_id : String,
         @title : String,
         @kind : String? = nil,
         @status : String? = "pending",
-        @content : Array(JSON::Any)? = nil,
-        @locations : Array(JSON::Any)? = nil,
+        content : Array(JSON::Any)? = nil,
+        locations : Array(JSON::Any)? = nil,
         raw_input : JSON::Any? = nil,
         raw_output : JSON::Any? = nil,
         @tool_name : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @name : String? = nil,
       )
         @session_update = "tool_call"
+        self.content = content
+        self.locations = locations
         self.raw_input = raw_input
         self.raw_output = raw_output
+        self.meta = meta
       end
 
-      def_equals_and_hash @session_update, @tool_call_id, @title, @kind, @status, @content, @locations,
-        raw_input_comparison, raw_output_comparison, @tool_name, @name, @meta
+      def_equals_and_hash @session_update, @tool_call_id, @title, @kind, @status, content_comparison, locations_comparison,
+        raw_input_comparison, raw_output_comparison, @tool_name, @name, metadata_comparison
 
-      include ToolCallContentHelper
+      protected def metadata_comparison
+        meta_raw.try { |wire| wire.to_json_any? || wire }
+      end
     end
 
     # Backward-compatible alias.
@@ -440,6 +437,8 @@ module ACP
     struct ToolCallStatusUpdate < SessionUpdate
       include JSON::Serializable
       include ToolCallRawPayloads
+      include ToolCallCollections
+      include LosslessMetadata
 
       # The ID of the tool call being updated (required).
       @[JSON::Field(key: "toolCallId")]
@@ -454,40 +453,35 @@ module ACP
       # Update the tool kind.
       property kind : String?
 
-      # Replace the content collection.
-      property content : Array(JSON::Any)?
-
-      # Replace the locations collection.
-      property locations : Array(JSON::Any)?
-
       # Update the tool name.
       property name : String?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @tool_call_id : String,
         @status : String? = nil,
         @title : String? = nil,
         @kind : String? = nil,
-        @content : Array(JSON::Any)? = nil,
-        @locations : Array(JSON::Any)? = nil,
+        content : Array(JSON::Any)? = nil,
+        locations : Array(JSON::Any)? = nil,
         raw_input : JSON::Any? = nil,
         raw_output : JSON::Any? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @name : String? = nil,
       )
         @session_update = "tool_call_update"
+        self.content = content
+        self.locations = locations
         self.raw_input = raw_input
         self.raw_output = raw_output
+        self.meta = meta
       end
 
-      def_equals_and_hash @session_update, @tool_call_id, @status, @title, @kind, @content, @locations,
-        raw_input_comparison, raw_output_comparison, @name, @meta
+      def_equals_and_hash @session_update, @tool_call_id, @status, @title, @kind, content_comparison, locations_comparison,
+        raw_input_comparison, raw_output_comparison, @name, metadata_comparison
 
-      include ToolCallContentHelper
+      protected def metadata_comparison
+        meta_raw.try { |wire| wire.to_json_any? || wire }
+      end
     end
 
     # ─── Plan Update ───────────────────────────────────────────────────
