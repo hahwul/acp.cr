@@ -583,7 +583,7 @@ module ACP
       result = envelope.try(&.["result"]?).try(&.as_h?)
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION
-      choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
+      choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands") || result.has_key?("modes"))
       state_result = result && result.has_key?("status") && result.has_key?("state")
       turn_usage_result = result && result.has_key?("stopReason") && result.has_key?("usage")
       session_list_result = result && (result.has_key?("sessions") || result.has_key?("nextCursor"))

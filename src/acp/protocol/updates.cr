@@ -697,17 +697,17 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-modes#from-the-agent
     struct CurrentModeUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The ID of the current mode.
       @[JSON::Field(key: "currentModeId")]
       property current_mode_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@current_mode_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a notification of the new current mode.
+      def initialize(@current_mode_id : String, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "current_mode_update"
+        self.meta = meta
       end
 
       # Backward-compatible alias.
@@ -723,7 +723,7 @@ module ACP
     struct ConfigOptionUpdate < SessionUpdate
       include JSON::Serializable
       include LosslessMetadata
-      include ConfigOptionEquality
+      include WireValueEquality
 
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
       @config_options_wire = PreservedJson.new(JSON::Any.new([] of JSON::Any))
