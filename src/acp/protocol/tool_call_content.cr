@@ -17,7 +17,6 @@
 
 require "json"
 require "./content_block"
-require "./optional_metadata"
 require "./raw_json"
 
 module ACP

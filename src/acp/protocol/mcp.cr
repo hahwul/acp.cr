@@ -1,6 +1,5 @@
 require "./optional_capability"
 require "./raw_json"
-require "./optional_metadata"
 
 module ACP
   module Protocol

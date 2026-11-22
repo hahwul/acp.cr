@@ -210,9 +210,10 @@ resume supplies a new list.
 
 In a permission callback, `typed_subject` exposes the optional tool-call
 patch or command details. Use `subject_raw` for exact JSON, including future
-subjects and values outside `JSON::Any`. Tool-call patches also expose
-`raw_input_raw`, `raw_output_raw`, and `meta_raw`. Changes to a `JSON::Any`
-array are serialized from that view at its numeric precision. A tool-call
+subjects and values outside `JSON::Any`. The request, subject, and command
+details expose exact extension metadata through `meta_raw`. Tool-call
+patches also expose `raw_input_raw`, `raw_output_raw`, and `meta_raw`. Changes
+to a `JSON::Any` array are serialized from that view at its numeric precision. A tool-call
 patch from a permission request reaches `on_update` in receive order before
 the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
@@ -1011,7 +1012,9 @@ reference. To retry a keyed submission, call
 prompt and `idempotency_key`. The Agent can then acknowledge an earlier
 submission after the command list has changed.
 In user-message updates, `skill_references` and `skill_reference` expose
-references in full messages and chunks, including during replay.
+references in full messages and chunks, including during replay. Use
+`meta_raw` to read or set exact metadata on a skill reference. It stays
+with the reference when submitted as typed prompt content.
 [ACP Agent Skills Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/agent-skills.mdx)
 
 ## Prompt suggestions (draft)
