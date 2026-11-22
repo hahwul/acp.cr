@@ -298,7 +298,7 @@ module ACP
           true
         end
 
-        private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?) : (-> AgentReply)?
+        private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?, entry : InFlightRequest) : (-> AgentReply)?
           return super unless method_name == ClientMethod::SESSION_REQUEST_PERMISSION
 
           input = Wire::RequestPermissionParams.from_json(params_json || params.to_json)
@@ -340,8 +340,7 @@ module ACP
         end
 
         private def route_agent_request(method_name : String, params : JSON::Any?, params_json : String?) : JSON::Any | Protocol::JsonRpcErrorObject
-          if method_name == Protocol::V2::ClientMethod::ELICITATION_CREATE ||
-             Protocol::ExtensionMethod.extension?(method_name)
+          if Protocol::ExtensionMethod.extension?(method_name)
             return super
           end
 

@@ -439,19 +439,37 @@ describe "ACP elicitation" do
 
   it "delivers elicitation/complete to on_elicitation_complete, else to on_notification" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    elicitation = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: elicitation))
+    client.on_create_elicitation = ->(_p : ACP::Protocol::CreateElicitationParams) { ACP::Protocol::CreateElicitationResult.accept }
     raw = Channel(String).new(1)
     client.on_notification = ->(m : String, _p : JSON::Any?) { raw.send(m); nil }
+    request = ->(id : Int32) { %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"sessionId":"s1","mode":"url","message":"Authorize","elicitationId":"github-oauth-001","url":"https://example.test/connect"}}) }
     note = %({"jsonrpc":"2.0","method":"elicitation/complete","params":{"elicitationId":"github-oauth-001"}})
 
+    transport.inject_raw(request.call(1))
+    wait_for_sent(transport) { |m| m["id"]? == 1 }
     transport.inject_raw(note)
-    raw.receive.should eq("elicitation/complete")
+    select
+    when method = raw.receive
+      method.should eq("elicitation/complete")
+    when timeout(2.seconds)
+      fail "missing raw URL completion"
+    end
 
     typed = Channel(String).new(1)
     client.on_elicitation_complete = ->(p : ACP::Protocol::CompleteElicitationParams) { typed.send(p.elicitation_id); nil }
+    transport.inject_raw(request.call(2))
+    wait_for_sent(transport) { |m| m["id"]? == 2 }
     transport.inject_raw(note)
-    typed.receive.should eq("github-oauth-001")
-    client.close
+    select
+    when id = typed.receive
+      id.should eq("github-oauth-001")
+    when timeout(2.seconds)
+      fail "missing typed URL completion"
+    end
+  ensure
+    client.try(&.close)
   end
 
   it "parses a request-scoped URL elicitation" do

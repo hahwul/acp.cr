@@ -236,8 +236,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/elicitation
     property on_create_elicitation : CreateElicitationHandler?
 
-    # Handler for the `elicitation/complete` notification (URL mode). If
-    # unset, the notification goes to `on_notification`.
+    # Handler for completion of an accepted URL elicitation. If unset,
+    # matching notifications go to `on_notification`.
     property on_elicitation_complete : ElicitationCompleteHandler?
 
     # ─── Internal State ─────────────────────────────────────────────
@@ -318,13 +318,29 @@ module ACP
 
     @terminal_auth_running = Atomic(Bool).new(false)
 
+    private record ElicitationCompletion, typed : Protocol::CompleteElicitationParams, params : JSON::Any?
+
+    # Kept on this connection from a valid URL offer until its completion,
+    # rejection, or cancellation. Access is guarded by @pending_mutex.
+    private class UrlElicitation
+      getter id : String
+      property? accepted : Bool = false
+      property completion : ElicitationCompletion?
+
+      def initialize(@id : String)
+      end
+    end
+
+    @url_elicitations = {} of String => UrlElicitation
+
     # An agent request whose handler hasn't answered yet. Compared by
     # identity, so a duplicate ID can't claim another request's answer.
     private class InFlightRequest
       getter method : String
       getter session_id : String?
+      property url_elicitation : UrlElicitation?
 
-      # Set (under `@pending_mutex`) when a cancel answered the request.
+      # Set (under `@pending_mutex`) once the request's terminal reply is claimed.
       property? answered : Bool = false
 
       def initialize(@method : String, @session_id : String?)
@@ -347,6 +363,9 @@ module ACP
       Protocol::ClientMethod::TERMINAL_OUTPUT,
       Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT,
     }
+
+    # Remote frames and deferred URL completions share one callback lane.
+    @dispatch_events = Channel(Transport::IncomingFrame | ElicitationCompletion | Nil).new
 
     # Whether the dispatcher fiber is running.
     @dispatcher_running : Bool = false
@@ -1233,9 +1252,8 @@ module ACP
       # Cut off all pending requests; their callers raise ConnectionClosedError.
       drain_pending_requests
 
-      # Close the transport. This is also what stops the dispatcher: the
-      # transport's `receive` returns nil once it is closed, which breaks
-      # the dispatcher loop.
+      # Detach the callback lane and unblock the transport receiver.
+      @dispatch_events.close
       @transport.close
 
       @dispatcher_running = false
@@ -1723,6 +1741,7 @@ module ACP
       else
         write_client_message(message)
       end
+    ensure
       if claimed = pending
         answer_cancelled_session_inputs(claimed)
       end
@@ -1782,6 +1801,8 @@ module ACP
         @pending.each_value { |request| request.response.close }
         @pending.clear
         @late_session_retirements.clear
+        @url_elicitations.each_value { |elicitation| elicitation.completion = nil }
+        @url_elicitations.clear
         @initialize_request = nil
         @known_session_ids.clear
         @session_choices.clear
@@ -1864,8 +1885,24 @@ module ACP
       return if @dispatcher_running
       @dispatcher_running = true
 
-      spawn(name: "acp-client-dispatcher") do
-        dispatcher_loop
+      spawn(name: "acp-client-receiver") { receive_dispatch_frames }
+      spawn(name: "acp-client-dispatcher") { dispatcher_loop }
+    end
+
+    private def receive_dispatch_frames : Nil
+      while @dispatcher_running && !@transport.closed?
+        break unless frame = @transport.receive_frame
+        @dispatch_events.send(frame)
+      end
+    rescue Channel::ClosedError
+      # The client detached the dispatcher.
+    rescue ex
+      ClientLog.error { "Error receiving ACP frames: #{ex.message}" }
+    ensure
+      begin
+        @dispatch_events.send(nil)
+      rescue Channel::ClosedError
+        # The dispatcher is already stopped.
       end
     end
 
@@ -1874,16 +1911,16 @@ module ACP
     private def dispatcher_loop
       loop do
         break unless @dispatcher_running
-        break if @transport.closed?
-
-        frame = @transport.receive_frame
-        break if frame.nil?
+        break unless frame = @dispatch_events.receive?
 
         begin
           # An agent request's outcome is recorded by its handler fiber.
           handling_request = case frame
                              in Protocol::WireFrame then dispatch_message(frame.project_for_routing, frame)
                              in JSON::Any           then dispatch_message(frame)
+                             in ElicitationCompletion
+                               deliver_elicitation_completion(frame) unless v2_wire? && @v2_contract_unknown.get
+                               next
                              end
           @consecutive_dispatch_errors.set(0) unless handling_request
         rescue ex
@@ -1892,6 +1929,7 @@ module ACP
       end
 
       @dispatcher_running = false
+      @dispatch_events.close
 
       # Notify pending requests that the connection is lost.
       drain_pending_requests(abort_mcp_writes: true)
@@ -1925,6 +1963,7 @@ module ACP
       ClientLog.error { "Reached #{MAX_CONSECUTIVE_DISPATCH_ERRORS} consecutive dispatch errors, possible protocol corruption; closing connection" }
       @state = ClientState::Closed
       @dispatcher_running = false
+      @dispatch_events.close
       @transport.close
     end
 
@@ -2292,6 +2331,11 @@ module ACP
         end
         # v1 handlers take a JSON::Any projection. v2 decodes the exact fields.
         params_json = v2_wire? ? exact_params : (params_json unless wire_frame.representable)
+      elsif wire_frame && method_name == Protocol::ClientMethod::ELICITATION_CREATE
+        if !Protocol::WireFrame.repeated_members(wire_frame.json, "method", "params").empty?
+          rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous elicitation request fields")
+        end
+        params_json ||= Protocol::WireFrame.field(wire_frame.json, "params")
       end
 
       ClientLog.debug { "Agent request: method=#{method_name} id=#{id}" }
@@ -2301,20 +2345,32 @@ module ACP
       # A null-id request isn't tracked: every such request would share the
       # one `nil` key, and all but one would go unanswered.
       entry = nil
-      if id && !rejection
+      reply_id = id
+      unless rejection
         session_id = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
         entry = InFlightRequest.new(method_name, session_id)
-        @pending_mutex.synchronize { @in_flight[id] = entry }
+      end
+      if id && !track_agent_request(id, method_name, entry)
+        rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_REQUEST, "Request ID is already outstanding")
+        reply_id = nil
+        entry = nil
       end
 
-      prepared = prepare_agent_request(id, method_name, params, params_json) unless rejection
+      prepared = entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
       spawn(name: "acp-agent-request") do
         reply = rejection || (prepared ? prepared.call : route_agent_request(method_name, params, params_json))
         if claim_agent_request(id, entry)
-          case reply
-          in Protocol::JsonRpcErrorObject then respond_to_agent_error(id, reply.code, reply.message, reply.data)
-          in JSON::Any                    then respond_to_agent(id, reply)
+          sent : AgentReply? = nil
+          begin
+            case reply
+            in Protocol::JsonRpcErrorObject then respond_to_agent_error(reply_id, reply.code, reply.message, reply.data)
+            in JSON::Any                    then respond_to_agent(reply_id, reply)
+            end
+            sent = reply
+          ensure
+            completion = settle_elicitation_reply(id, entry, sent)
           end
+          enqueue_elicitation_completion(completion) if completion
         end
         @consecutive_dispatch_errors.set(0)
       rescue ex
@@ -2329,6 +2385,17 @@ module ACP
         end
       end
       true
+    end
+
+    # Keep an active elicitation cancellable if its request ID is reused.
+    private def track_agent_request(id : Protocol::RequestId, method : String, entry : InFlightRequest?) : Bool
+      @pending_mutex.synchronize do
+        existing = @in_flight[id]?
+        next false if existing && {method, existing.method}.includes?(Protocol::ClientMethod::ELICITATION_CREATE)
+
+        @in_flight[id] = entry if entry
+        true
+      end
     end
 
     # Check the exact offer before JSON::Any or typed decoding can collapse duplicates.
@@ -2355,8 +2422,11 @@ module ACP
 
     # Allows version-specific request handling to observe wire-ordered state
     # on the dispatcher before running the user handler on its own fiber.
-    private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?) : (-> AgentReply)?
-      nil
+    private def prepare_agent_request(id : Protocol::RequestId?, method_name : String, params : JSON::Any?, params_json : String?, entry : InFlightRequest) : (-> AgentReply)?
+      return unless method_name == Protocol::ClientMethod::ELICITATION_CREATE
+
+      rejection = validate_elicitation_request(params, params_json, entry)
+      -> { rejection || run_elicitation_handler(params, params_json) }
     end
 
     # Runs the handler for an agent request and returns its answer; the
@@ -2379,43 +2449,105 @@ module ACP
         handle_typed_client_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name, params_json)
       when Protocol::ClientMethod::TERMINAL_KILL
         handle_typed_client_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name, params_json)
-      when Protocol::ClientMethod::ELICITATION_CREATE
-        # elicitation#url-completion: "Requests using a mode the Client has
-        # not advertised produce JSON-RPC -32602 (Invalid params)."
-        fields = params.try(&.as_h?)
-        mode = fields.try(&.["mode"]?).try(&.as_s?)
-        unless @client_capabilities.elicitation.try(&.supports?(mode))
-          code = v2_wire? && !@client_capabilities.elicitation ? JsonRpcError::METHOD_NOT_FOUND : JsonRpcError::INVALID_PARAMS
-          return Protocol::JsonRpcErrorObject.new(code,
-            "Elicitation mode not advertised by the client: #{mode.inspect}")
-        end
-        if v2_wire? && fields
-          session = fields["sessionId"]?
-          request = fields["requestId"]?
-          valid_scope = if session
-                          !request && !session.as_s?.nil?
-                        elsif request
-                          !request.as_s?.nil? || !request.as_i64?.nil?
-                        else
-                          false
-                        end
-          unless valid_scope
-            return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
-              "ACP v2 elicitation requires exactly one sessionId or requestId")
-          end
-          valid_mode = if mode == "form"
-                         fields["requestedSchema"]?.try(&.as_h?)
-                       else
-                         fields["elicitationId"]?.try(&.as_s?) && fields["url"]?.try(&.as_s?)
-                       end
-          unless valid_mode
-            return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS,
-              "Missing ACP v2 elicitation fields for #{mode.inspect}")
-          end
-        end
-        handle_typed_client_method(params, @on_create_elicitation, Protocol::CreateElicitationParams, method_name, params_json)
       else
         handle_unknown_agent_request(method_name, params, params_json)
+      end
+    end
+
+    # Runs in receive order before the app handles the user interaction.
+    private def validate_elicitation_request(params : JSON::Any?, params_json : String?, entry : InFlightRequest) : Protocol::JsonRpcErrorObject?
+      fields = params.try(&.as_h?)
+      mode = fields.try(&.["mode"]?).try(&.as_s?)
+      unless @client_capabilities.elicitation.try(&.supports?(mode))
+        code = v2_wire? && !@client_capabilities.elicitation ? JsonRpcError::METHOD_NOT_FOUND : JsonRpcError::INVALID_PARAMS
+        return Protocol::JsonRpcErrorObject.new(code, "Elicitation mode not advertised by the client: #{mode.inspect}")
+      end
+      if params_json && !Protocol::WireFrame.repeated_members(params_json, "mode", "sessionId", "requestId", "toolCallId", "url", "elicitationId", "message", "requestedSchema").empty?
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous elicitation request fields")
+      end
+
+      fields = fields.not_nil!
+      if v2_wire?
+        session = fields["sessionId"]?
+        request = fields["requestId"]?
+        valid_scope = if session
+                        !request && !session.as_s?.nil?
+                      elsif request
+                        !request.as_s?.nil? || !request.as_i64?.nil?
+                      else
+                        false
+                      end
+        unless valid_scope
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "ACP v2 elicitation requires exactly one sessionId or requestId")
+        end
+        if mode == "form" && !fields["requestedSchema"]?.try(&.as_h?)
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Missing ACP v2 form elicitation schema")
+        end
+      end
+      return unless mode == "url"
+
+      id = fields["elicitationId"]?.try(&.as_s?)
+      unless id && fields["url"]?.try(&.as_s?) && fields["message"]?.try(&.as_s?)
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation requires an elicitationId, url, and message")
+      end
+      @pending_mutex.synchronize do
+        if @url_elicitations.has_key?(id)
+          next Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation ID is already outstanding")
+        end
+        if @disconnected || entry.answered?
+          next Protocol::JsonRpcErrorObject.new(JsonRpcError::REQUEST_CANCELLED, "Request cancelled")
+        end
+
+        entry.url_elicitation = @url_elicitations[id] = UrlElicitation.new(id)
+        nil
+      end
+    end
+
+    private def run_elicitation_handler(params : JSON::Any?, params_json : String?) : AgentReply
+      method = Protocol::ClientMethod::ELICITATION_CREATE
+      handler = @on_create_elicitation
+      unless handler
+        return handle_unknown_agent_request(method, params, (params_json unless raw_notification_representable?(params_json)))
+      end
+
+      handle_typed_client_method(params, handler, Protocol::CreateElicitationParams, method, params_json)
+    end
+
+    # Commits only the reply that won against cancellation. Completion can
+    # arrive while the user callback is still returning its decision.
+    private def settle_elicitation_reply(id : Protocol::RequestId?, entry : InFlightRequest?, reply : AgentReply?) : ElicitationCompletion?
+      return unless entry && entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+
+      @pending_mutex.synchronize do
+        @in_flight.delete(id) if id && @in_flight[id]?.try(&.same?(entry))
+        elicitation = entry.url_elicitation
+        next unless elicitation && @url_elicitations[elicitation.id]?.try(&.same?(elicitation))
+
+        accepted = reply.is_a?(JSON::Any) && reply.as_h?.try(&.["action"]?).try(&.as_s?) == "accept"
+        completion = elicitation.completion if accepted
+        if accepted && !completion
+          elicitation.accepted = true
+        else
+          abandon_url_elicitation(entry)
+        end
+        completion
+      end
+    end
+
+    private def enqueue_elicitation_completion(completion : ElicitationCompletion) : Nil
+      @dispatch_events.send(completion)
+    rescue Channel::ClosedError
+      # The connection closed before the deferred callback could run.
+    end
+
+    # Removes the reservation and buffered notification. The caller holds @pending_mutex.
+    private def abandon_url_elicitation(entry : InFlightRequest) : Nil
+      if elicitation = entry.url_elicitation
+        if @url_elicitations[elicitation.id]?.try(&.same?(elicitation))
+          @url_elicitations.delete(elicitation.id)
+        end
+        elicitation.completion = nil
+        entry.url_elicitation = nil
       end
     end
 
@@ -2557,15 +2689,20 @@ module ACP
       pending = @in_flight.select do |_id, req|
         method = req.method
         session = req.session_id
-        session && session_ids.includes?(session) &&
+        !req.answered? && session && session_ids.includes?(session) &&
           (method == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION ||
             (elicitations && method == Protocol::ClientMethod::ELICITATION_CREATE))
       end
-      pending.each do |id, req|
-        req.answered = true
-        @in_flight.delete(id)
-      end
+      pending.each { |id, req| claim_cancelled_input(id, req) }
       pending
+    end
+
+    # Clears URL completion state immediately but keeps its RPC ID reserved
+    # through the cancel reply. The caller holds @pending_mutex.
+    private def claim_cancelled_input(id : Protocol::RequestId, req : InFlightRequest) : Nil
+      req.answered = true
+      abandon_url_elicitation(req)
+      @in_flight.delete(id) unless req.method == Protocol::ClientMethod::ELICITATION_CREATE
     end
 
     # Resolves claimed user input independently from the callback fibers.
@@ -2577,8 +2714,10 @@ module ACP
                    JSON.parse(Protocol::CreateElicitationResult.cancel.to_json)
                  end
         respond_to_agent(id, result)
-      rescue ex : TransportError
+      rescue ex : TransportError | IO::Error
         ClientLog.debug { "Could not answer cancelled input id=#{id}: #{ex.message}" }
+      ensure
+        settle_elicitation_reply(id, req, nil)
       end
     end
 
@@ -2597,8 +2736,8 @@ module ACP
       end
     end
 
-    # Removes an agent request from `@in_flight`. Returns false when a
-    # cancel already answered it, so the caller must not respond again.
+    # Claims an agent request's answer unless cancellation already won.
+    # Elicitations retain the ID until the reply write ends.
     # Untracked (null-id) requests are always answered.
     private def claim_agent_request(id : Protocol::RequestId?, entry : InFlightRequest?) : Bool
       return true unless id && entry
@@ -2607,7 +2746,11 @@ module ACP
         # still in flight, the map holds only the newer one, and whichever of
         # the two finishes first must not make the other look cancelled.
         return false if entry.answered?
-        @in_flight.delete(id) if @in_flight[id]?.try(&.same?(entry))
+        if entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+          entry.answered = true
+        elsif @in_flight[id]?.try(&.same?(entry))
+          @in_flight.delete(id)
+        end
         true
       end
     end
@@ -2638,8 +2781,8 @@ module ACP
             next false unless req && !req.answered?
 
             if CANCEL_ANSWERED_EARLY.includes?(req.method)
-              req.answered = true
-              entry = @in_flight.delete(id)
+              claim_cancelled_input(id, req)
+              entry = req
             end
             true
           end
@@ -2659,6 +2802,8 @@ module ACP
           end
         rescue ex : TransportError
           ClientLog.debug { "Could not answer cancelled request id=#{id}: #{ex.message}" }
+        ensure
+          settle_elicitation_reply(id, entry, nil)
         end
       end
 
@@ -2742,10 +2887,12 @@ module ACP
 
       params = msg["params"]?
       params_json = frame.try(&.params_json)
-      if frame && !params_json && method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
+      exact_params = method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST,
+        Protocol::ClientMethod::ELICITATION_COMPLETE)
+      if frame && !params_json && exact_params
         params_json = Protocol::WireFrame.field(frame.json, "params")
       end
-      if params_json && !method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST)
+      if params_json && !exact_params
         ClientLog.warn { "Ignoring notification with parameters outside the range of JSON::Any" }
         return
       end
@@ -2762,7 +2909,11 @@ module ACP
 
         handle_cancel_request(params, params_json)
       when Protocol::ClientMethod::ELICITATION_COMPLETE
-        handle_elicitation_complete(params)
+        return unless msg["jsonrpc"]?.try(&.as_s?) == "2.0"
+        return if msg["result"]? || msg["error"]?
+        return if frame && !Protocol::WireFrame.repeated_members(frame.json, "jsonrpc", "method", "params").empty?
+
+        handle_elicitation_complete(params, params_json)
       when Protocol::ClientMethod::AUTH_STATUS_UPDATE
         handle_auth_status_update(params)
       else
@@ -3060,19 +3211,42 @@ module ACP
       @early_plan_sessions.delete(session_id)
     end
 
-    # Delivers `elicitation/complete` to `on_elicitation_complete`, or to
-    # `on_notification` when that is unset or the params don't parse.
-    private def handle_elicitation_complete(params : JSON::Any?) : Nil
-      method = Protocol::ClientMethod::ELICITATION_COMPLETE
-      handler = @on_elicitation_complete
-      typed = params.try { |p| Protocol::CompleteElicitationParams.from_json(p.to_json) rescue nil }
-      return deliver_raw_notification(method, params) unless handler && typed
-
-      begin
-        handler.call(typed)
-      rescue ex
-        ClientLog.error { "Error in elicitation/complete handler: #{ex.message}" }
+    # Claims a completion once, or defers it until the user has accepted the URL.
+    private def handle_elicitation_complete(params : JSON::Any?, params_json : String?) : Nil
+      typed = begin
+        Protocol::CompleteElicitationParams.from_json(params_json || params.to_json)
+      rescue JSON::ParseException
+        return
       end
+      raw_params = params_json ? parse_completion_projection(params_json) : params
+      completion = ElicitationCompletion.new(typed, raw_params)
+      deliver = @pending_mutex.synchronize do
+        next false unless elicitation = @url_elicitations[typed.elicitation_id]?
+        if elicitation.accepted?
+          @url_elicitations.delete(typed.elicitation_id)
+          true
+        else
+          elicitation.completion ||= completion
+          false
+        end
+      end
+      deliver_elicitation_completion(completion) if deliver
+    end
+
+    private def parse_completion_projection(json : String) : JSON::Any?
+      JSON.parse(json)
+    rescue JSON::ParseException
+      nil
+    end
+
+    private def deliver_elicitation_completion(completion : ElicitationCompletion) : Nil
+      if handler = @on_elicitation_complete
+        handler.call(completion.typed)
+      elsif params = completion.params
+        deliver_raw_notification(Protocol::ClientMethod::ELICITATION_COMPLETE, params)
+      end
+    rescue ex
+      ClientLog.error { "Error in elicitation/complete handler: #{ex.message}" }
     end
 
     # Delivers advertised authentication status updates in receive order.

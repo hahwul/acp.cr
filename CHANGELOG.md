@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Correlate ACP v1 and v2 URL completion notifications with accepted elicitations on the same connection and deliver each completion once.
 - Reject ambiguous ACP permission requests and validate handler selections against the options the Agent originally supplied.
 - Apply cancellation only to unambiguous request IDs across direct and proxy connections, with lossless typed metadata.
 - Match replies to client-issued JSON-RPC requests by integer ID, including late replies for session close and resume.

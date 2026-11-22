@@ -573,7 +573,8 @@ module ACP
       method = envelope.try(&.["method"]?).try(&.as_s?)
       session_update = method == Protocol::AgentMethod::SESSION_UPDATE && envelope.try(&.["id"]?).try(&.raw).nil?
       exact_params = session_update || method.in?(Protocol::ClientMethod::MCP_MESSAGE,
-        Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, Protocol::ProtocolMethod::CANCEL_REQUEST)
+        Protocol::ClientMethod::SESSION_REQUEST_PERMISSION, Protocol::ProtocolMethod::CANCEL_REQUEST,
+        Protocol::ClientMethod::ELICITATION_CREATE, Protocol::ClientMethod::ELICITATION_COMPLETE)
       result = envelope.try(&.["result"]?).try(&.as_h?)
       protocol_version = result.try(&.["protocolVersion"]?).try(&.as_i64?)
       versioned_result = protocol_version && protocol_version > PROTOCOL_VERSION

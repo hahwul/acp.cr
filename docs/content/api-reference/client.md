@@ -101,6 +101,14 @@ Over stdio, repeated permission option fields return `-32602` before the
 callback runs. Custom and future ACP v2 outcome objects pass through unchanged.
 [ACP v2 Permissions](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+`on_elicitation_complete` fires once for each accepted URL elicitation on the
+connection. A completion that arrives before the `accept` reply is sent
+is held until the reply is written successfully. Completion callbacks run
+on the dispatcher. If no typed handler is set, matching notifications that
+fit in `JSON::Any` go to `on_notification`. The typed completion exposes
+exact metadata through `meta_raw`.
+[ACP v2 URL Completion](https://agentclientprotocol.com/protocol/v2/elicitation#url-completion)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable
@@ -553,6 +561,11 @@ original options. Invalid results or selections return JSON-RPC `-32603`.
 Over stdio, repeated permission option fields return `-32602` before the
 callback runs.
 [ACP v1 Permissions](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission)
+
+For an accepted URL elicitation, `on_elicitation_complete` receives the
+matching completion once. If no typed handler is set, the matching
+notification goes to `on_notification`.
+[ACP v1 URL Completion](https://agentclientprotocol.com/protocol/v1/elicitation#url-completion)
 
 ## Subagent Sessions
 
