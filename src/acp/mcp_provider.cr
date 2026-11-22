@@ -45,8 +45,14 @@ module ACP
     # Closes when the consumer, provider, or connection cancels the operation.
     getter cancellation = Channel(Nil).new
 
-    @cancelled = Atomic(Bool).new(false)
-    @finished = false
+    private enum State
+      Active
+      Cancelled
+      Finished
+      FinishedCancelled
+    end
+
+    @state = Atomic(State).new(State::Active)
     @writing = Mutex.new
     @notifying = Atomic(Bool).new(false)
     @acknowledged = false
@@ -58,7 +64,7 @@ module ACP
 
     # Whether the handler should stop its work and clean up.
     def cancelled? : Bool
-      @cancelled.get
+      @state.get.in?(State::Cancelled, State::FinishedCancelled)
     end
 
     # Sends an MCP notification on this active operation. The handler is
@@ -93,15 +99,21 @@ module ACP
     end
 
     # :nodoc:
-    def cancel : Nil
-      _, changed = @cancelled.compare_and_set(false, true)
+    def cancel : Bool
+      previous, changed = @state.compare_and_set(State::Active, State::Cancelled)
       @cancellation.close if changed
+      changed || previous.cancelled?
     end
 
     # :nodoc:
     def finish(reply : Protocol::MessageMcpResponse | Protocol::JsonRpcErrorObject) : Nil
       @writing.synchronize do
-        @finished = true
+        previous, finished = @state.compare_and_set(State::Active, State::Finished)
+        if previous.cancelled?
+          @state.set(State::FinishedCancelled)
+        elsif !finished
+          return
+        end
         return if @transport.closed?
 
         if cancelled?
@@ -131,7 +143,7 @@ module ACP
 
     private def ensure_notifiable : Nil
       raise RequestCancelledError.new(@outer_id) if cancelled?
-      raise InvalidStateError.new("The MCP operation has already finished") if @finished
+      raise InvalidStateError.new("The MCP operation has already finished") if @state.get.finished?
     end
 
     private def subscription_metadata(payload : Protocol::McpJson) : Protocol::McpJson
@@ -208,12 +220,7 @@ module ACP
     end
 
     def cancel(id : Protocol::RequestId) : Bool
-      @mutex.synchronize do
-        return false unless context = @by_outer_id[id]?
-
-        context.cancel
-        true
-      end
+      @mutex.synchronize { @by_outer_id[id]?.try(&.cancel) || false }
     end
 
     def active_outer?(id : Protocol::RequestId) : Bool

@@ -718,4 +718,16 @@ Set `client_capabilities.elicitation` to the modes `on_create_elicitation` handl
 
 Each agent request runs its handler in its own fiber, so a handler may block (e.g. waiting on the user) without holding up responses or notifications, but request handlers may run concurrently with each other and with notification callbacks. `on_update` / `on_notification` still run in arrival order on the dispatcher fiber, so they must not wait on a request of their own (for example `session_set_mode`): its response can't be read until the callback returns, so the call times out (or, with a nil timeout, hangs for good). Make such calls from another fiber (`spawn`). A request with no matching handler, including an unknown `_`-prefixed extension method, is answered with `-32601 Method not found`. A handler that raises `ACP::JsonRpcError` is answered with that error's code, message and data (for example `-32002` for a missing file or unknown terminal); any other exception becomes `-32603`.
 
-When the agent sends `$/cancel_request` for one of its requests, a request that only reads or waits (`session/request_permission`, `elicitation/create`, `fs/read_text_file`, `terminal/output`, `terminal/wait_for_exit`) is answered at once, with the `cancelled` outcome for a permission request and `-32800` for the others. Whatever its handler returns later is dropped. Requests with side effects, such as writes, terminal creation and extension methods, are left to their handler, which still has to answer. In every case the notification is also passed to `on_notification`, so the application can stop the work.
+When the Agent cancels a permission request, the Client answers with the
+`cancelled` outcome. A cancelled v2 elicitation gets the `cancel` action.
+Other requests that only read or wait, such as `fs/read_text_file`,
+`terminal/output`, and `terminal/wait_for_exit`, are answered with `-32800`.
+Those handlers' late answers are dropped. Handlers for writes, terminal
+creation, and extension requests still answer the original request.
+
+Valid cancellations are also passed to `on_notification` so the application
+can stop the work. ACP v2 delivers this callback for outstanding requests
+from the Agent. Cancellation IDs retain their number or string type, and
+ambiguous IDs are ignored. Use `CancelRequestParams#meta_raw` when decoding
+the notification JSON directly.
+[ACP v2 request cancellation](https://agentclientprotocol.com/protocol/v2/cancellation)

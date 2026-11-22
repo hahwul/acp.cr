@@ -69,6 +69,7 @@ module ACP
       getter result : Raw?
       getter error : Raw?
       getter? valid_version = false
+      getter? repeated_id = false
 
       def initialize(wire : String)
         pull = JSON::PullParser.new(wire)
@@ -77,12 +78,14 @@ module ACP
         pull.read_object do |key|
           case key
           when "jsonrpc" then @valid_version = Raw.new(pull).as_s? == "2.0"
-          when "id"      then @id = Raw.new(pull)
-          when "method"  then @method = Raw.new(pull)
-          when "params"  then @params = Raw.new(pull)
-          when "result"  then @result = Raw.new(pull)
-          when "error"   then @error = Raw.new(pull)
-          else                pull.skip
+          when "id"
+            @repeated_id = true if @id
+            @id = Raw.new(pull)
+          when "method" then @method = Raw.new(pull)
+          when "params" then @params = Raw.new(pull)
+          when "result" then @result = Raw.new(pull)
+          when "error"  then @error = Raw.new(pull)
+          else               pull.skip
           end
         end
       end
@@ -258,6 +261,13 @@ module ACP
       wire = incoming.is_a?(Protocol::WireFrame) ? incoming.json : Protocol::WireFrame.encode(incoming)
       frame = Frame.new(wire)
       id = frame.id
+      if frame.repeated_id?
+        return reject(peer, frame.method ? Raw.from_json("null") : nil, JsonRpcError::INVALID_REQUEST, "Ambiguous JSON-RPC id")
+      end
+      if frame.method.try(&.as_s?).in?(CANCEL, Method::SUCCESSOR) &&
+         !Protocol::WireFrame.repeated_members(wire, "jsonrpc", "method", "params").empty?
+        return reject(peer, id ? Raw.from_json("null") : nil, JsonRpcError::INVALID_REQUEST, "Ambiguous cancellation or successor envelope")
+      end
       unless frame.valid_version?
         return receive_response(peer, id, frame) if id && !frame.method
         return reject(peer, Raw.from_json("null"), JsonRpcError::INVALID_REQUEST, "Invalid request")
@@ -478,7 +488,9 @@ module ACP
 
     private def cancel(peer : Int32, params : Raw?, id : Raw?) : Nil
       return reject(peer, id, JsonRpcError::INVALID_REQUEST, "Expected a cancellation notification") if id
-      request_id = params.try(&.field("requestId"))
+      return unless params && Protocol::WireFrame.repeated_members(params.json, "requestId").empty?
+
+      request_id = params.field("requestId")
       return unless request_id && valid_id?(request_id)
       return unless route = @requests[{peer, key(request_id)}]?
 

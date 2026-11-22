@@ -259,7 +259,7 @@ module ACP
                   plan_wire = Protocol::WireFrame.field(params_json, "update")
                   return unless plan_wire && Protocol::WireFrame.unique_members?(plan_wire, recursive: false)
                 end
-                return unless @on_v2_update || raw_session_update_representable?(params_json)
+                return unless @on_v2_update || raw_notification_representable?(params_json)
 
                 case plan_operation = update.update.typed
                 when Wire::PlanUpdate, Protocol::PlanRemovedUpdate
