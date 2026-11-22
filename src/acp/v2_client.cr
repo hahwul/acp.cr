@@ -739,9 +739,14 @@ module ACP
 
       # Requests foreground cancellation. The Agent identifies affected requests.
       def session_cancel(session_id : String) : Nil
+        session_cancel(Wire::SessionCancelParams.new(session_id))
+      end
+
+      # Requests foreground cancellation with optional extension metadata.
+      def session_cancel(params : Wire::SessionCancelParams) : Nil
         @connection.with_request do
           session_capabilities
-          @connection.send_notification(AgentMethod::SESSION_CANCEL, Wire::SessionCancelParams.new(session_id))
+          @connection.session_cancel(params)
         end
       end
 
@@ -810,24 +815,41 @@ module ACP
 
       # Cancels a tool call with an advertised cancel marker.
       def tool_call_cancel(session_id : String, tool_call_id : String) : Wire::ToolCallCancelResult
+        tool_call_cancel(Wire::ToolCallCancelParams.new(session_id, tool_call_id))
+      end
+
+      # Cancels a tool call with optional extension metadata.
+      def tool_call_cancel(params : Wire::ToolCallCancelParams) : Wire::ToolCallCancelResult
         @connection.with_request do
           session_capabilities
-          @connection.request_typed(AgentMethod::TOOL_CALL_CANCEL, Wire::ToolCallCancelParams.new(session_id, tool_call_id), Wire::ToolCallCancelResult, exact_response: true)
+          @connection.request_exact(AgentMethod::TOOL_CALL_CANCEL, params, Wire::ToolCallCancelResult)
         end
       end
 
       # Cancels an Agent-owned terminal with an advertised cancel marker.
       def terminal_cancel(session_id : String, terminal_id : String) : Wire::TerminalCancelResult
+        terminal_cancel(Wire::TerminalCancelParams.new(session_id, terminal_id))
+      end
+
+      # Cancels an Agent-owned terminal with optional extension metadata.
+      def terminal_cancel(params : Wire::TerminalCancelParams) : Wire::TerminalCancelResult
         @connection.with_request do
           session_capabilities
-          @connection.request_typed(AgentMethod::TERMINAL_CANCEL, Wire::TerminalCancelParams.new(session_id, terminal_id), Wire::TerminalCancelResult, exact_response: true)
+          @connection.request_exact(AgentMethod::TERMINAL_CANCEL, params, Wire::TerminalCancelResult)
         end
       end
 
       # Cancels a client-originated request by its JSON-RPC ID.
       def cancel_request(request_id : Protocol::RequestId) : Nil
+        cancel_request(Protocol::CancelRequestParams.new(request_id))
+      end
+
+      # Cancels a client-originated request with optional extension metadata.
+      def cancel_request(params : Protocol::CancelRequestParams) : Nil
         ready
-        @connection.cancel_request(request_id)
+        raise ArgumentError.new("ACP v2 cancellation requires a string or integer request ID") if params.request_id.nil?
+
+        @connection.cancel_request(params)
       end
 
       # Calls a custom ACP extension method.

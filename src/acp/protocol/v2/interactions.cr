@@ -145,6 +145,7 @@ module ACP
       # Cancels one Agent-owned tool call that advertises cancellation.
       struct ToolCallCancelParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session that owns the tool call.
         @[JSON::Field(key: "sessionId")]
@@ -154,13 +155,12 @@ module ACP
         @[JSON::Field(key: "toolCallId")]
         property tool_call_id : String
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates cancellation parameters for a tool call.
-        def initialize(@session_id : String, @tool_call_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@session_id : String, @tool_call_id : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @session_id, @tool_call_id, metadata_comparison
       end
 
       # Successful tool_call/cancel response with optional metadata.
@@ -169,6 +169,7 @@ module ACP
       # Cancels one Agent-owned terminal that advertises cancellation.
       struct TerminalCancelParams
         include JSON::Serializable
+        include LosslessMetadata
 
         # Session that owns the terminal.
         @[JSON::Field(key: "sessionId")]
@@ -178,13 +179,12 @@ module ACP
         @[JSON::Field(key: "terminalId")]
         property terminal_id : String
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates cancellation parameters for a terminal.
-        def initialize(@session_id : String, @terminal_id : String, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@session_id : String, @terminal_id : String, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @session_id, @terminal_id, metadata_comparison
       end
 
       # Successful terminal/cancel response with optional metadata.

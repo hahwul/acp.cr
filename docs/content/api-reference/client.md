@@ -756,7 +756,10 @@ Convenience method to send a single text prompt.
 client.session_cancel(session_id : String? = nil) : Nil
 ```
 
-Cancels an in-progress generation.
+Cancels an in-progress generation. Pass `ACP::Protocol::SessionCancelParams`
+and set `meta_raw` to send exact JSON metadata in v1 or v2.
+V2 `tool_call_cancel` and `terminal_cancel` also accept their typed
+cancellation parameters with exact metadata.
 
 ### `#session_set_mode`
 
@@ -801,6 +804,7 @@ client.cancel_request(request_id : ACP::Protocol::RequestId) : Nil
 ```
 
 Sends `$/cancel_request` for one of the client's outstanding requests. The agent still answers it, usually with a `-32800` error (`JsonRpcError#request_cancelled?`). A request that hits its timeout is cancelled this way automatically. Use `session_cancel` to cancel a prompt turn.
+Pass `ACP::Protocol::CancelRequestParams` to include extension metadata.
 
 ## Extension Methods
 

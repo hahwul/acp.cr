@@ -1271,10 +1271,13 @@ module ACP
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
 
-      params = Protocol::SessionCancelParams.new(sid)
-      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
+      session_cancel(Protocol::SessionCancelParams.new(sid))
+    end
 
-      ClientLog.info { "Sent cancel for session: #{sid}" }
+    # Cancels a session with typed parameters and optional extension metadata.
+    def session_cancel(params : Protocol::SessionCancelParams) : Nil
+      send_notification(Protocol::AgentMethod::SESSION_CANCEL, params)
+      ClientLog.info { "Sent cancel for session: #{params.session_id}" }
     end
 
     # The effective state of an announced child session, if subagents are enabled.
@@ -1462,9 +1465,19 @@ module ACP
     def send_notification(method : String, params : JSON::Serializable) : Nil
       raise ConnectionClosedError.new if closed?
 
-      message = Protocol.build_notification(method, params)
-      send_client_notification(method, message)
-
+      raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
+      projection = raw.to_json_any?
+      routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
+      message = Protocol.build_notification_raw(method, routing_view)
+      message["params"] = routing_view if routing_view.raw.nil?
+      unless projection && Protocol::WireFrame.encode(projection) == raw.json
+        repeated = Protocol::WireFrame.repeated_members(raw.json, "sessionId", "requestId")
+        if repeated.includes?("sessionId") || (method == Protocol::ProtocolMethod::CANCEL_REQUEST && repeated.includes?("requestId"))
+          raise ArgumentError.new("ACP notification requires unambiguous routing fields")
+        end
+        wire_frame = frame_with_exact_params(message, raw, require_exact: true)
+      end
+      send_client_notification(method, message, wire_frame)
       ClientLog.debug { "Sent notification method=#{method}" }
     end
 
@@ -1515,7 +1528,12 @@ module ACP
     # `session_cancel` instead.
     # See: https://agentclientprotocol.com/protocol/v1/cancellation
     def cancel_request(request_id : Protocol::RequestId) : Nil
-      send_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, Protocol::CancelRequestParams.new(request_id))
+      cancel_request(Protocol::CancelRequestParams.new(request_id))
+    end
+
+    # Sends a request cancellation notification with typed extension metadata.
+    def cancel_request(params : Protocol::CancelRequestParams) : Nil
+      send_notification(Protocol::ProtocolMethod::CANCEL_REQUEST, params)
     end
 
     # Responds to an agent-initiated request.
@@ -1617,6 +1635,22 @@ module ACP
         wire_params: wire_params, require_exact_params: true)
     end
 
+    private def frame_with_exact_params(message : Hash(String, JSON::Any), params : Protocol::RawJson, *, require_exact : Bool) : Protocol::WireFrame
+      envelope = JSON.build do |json|
+        json.max_nesting = 512
+        json.object do
+          message.each do |key, value|
+            if key == "params"
+              json.field(key, params)
+            else
+              json.field(key, value)
+            end
+          end
+        end
+      end
+      Protocol::WireFrame.new(envelope, exact_params: true, require_exact: require_exact)
+    end
+
     # Core implementation for sending a JSON-RPC request and awaiting
     # its response. Both `send_request` and `send_request_raw` delegate
     # to this method, differing only in how they build the message.
@@ -1663,18 +1697,7 @@ module ACP
       id_str = id.to_s
       message = message_builder.call(id)
       if wire_params
-        envelope = JSON.build do |json|
-          json.object do
-            message.each do |key, value|
-              if key == "params"
-                json.field(key, wire_params)
-              else
-                json.field(key, value)
-              end
-            end
-          end
-        end
-        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: require_exact_params)
+        wire_frame = frame_with_exact_params(message, wire_params, require_exact: require_exact_params)
       end
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
@@ -1908,19 +1931,25 @@ module ACP
 
     # Checks child session permissions before sending a notification. Direct
     # session cancellation also claims and resolves pending user input.
-    private def send_client_notification(method : String, message : Hash(String, JSON::Any)) : Nil
+    private def send_client_notification(method : String, message : Hash(String, JSON::Any), wire_frame : Protocol::WireFrame? = nil) : Nil
       sid = message["params"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
       cancel = method == Protocol::AgentMethod::SESSION_CANCEL
       @pending_mutex.synchronize { check_session_notification(method, sid, cancel) }
       pending = nil
-      if sid
-        @transport.send_checked(message) do
+      if sid || wire_frame
+        preflight = -> do
           @pending_mutex.synchronize do
             check_session_notification(method, sid, cancel)
-            if cancel && !v2_wire?
+            if sid && cancel && !v2_wire?
               pending = claim_session_inputs([sid], elicitations: @subagents_enabled)
             end
           end
+          nil
+        end
+        if wire_frame
+          @transport.send_wire(wire_frame, &preflight)
+        else
+          @transport.send_checked(message, &preflight)
         end
       else
         write_client_message(message)

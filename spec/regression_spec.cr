@@ -1938,6 +1938,115 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+private struct InvalidNotificationParams
+  include JSON::Serializable
+
+  def initialize
+  end
+
+  def to_json(builder : JSON::Builder) : Nil
+    builder.raw(%({"sessionId":"session"} {}))
+  end
+end
+
+describe "ACP exact cancellation requests" do
+  it "parses session, tool call, and terminal cancellation parameters without narrowing metadata" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    wire = %({"sessionId":"session","toolCallId":"tool","terminalId":"terminal","_meta":#{metadata}})
+    {ACP::Protocol::SessionCancelParams, ACP::Protocol::V2::ToolCallCancelParams, ACP::Protocol::V2::TerminalCancelParams}.each do |type|
+      params = type.from_json(wire)
+      ACP::Protocol::RawJson.from_json(params.to_json).field("_meta").not_nil!.json.should eq(metadata)
+    end
+  end
+
+  {1, 2}.each do |version|
+    it "sends exact v#{version} cancellation notifications over stdio" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
+        client.request_timeout = 2.0
+        initialization = if version == 1
+                           %({"protocolVersion":1})
+                         else
+                           %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+                         end
+        answer_identity_request(feed, outgoing, initialization)
+        client.initialize_connection
+        metadata = ACP::Protocol::RawJson.from_json(%({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901}))
+
+        session = ACP::Protocol::SessionCancelParams.new("session")
+        session.meta_raw = metadata
+        client.session_cancel(session)
+        wire = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        wire.field("id").should be_nil
+        wire.field("method").not_nil!.as_s?.should eq("session/cancel")
+        payload = wire.field("params").not_nil!
+        payload.field("sessionId").not_nil!.as_s?.should eq("session")
+        payload.field("_meta").should eq(metadata)
+        if client.is_a?(ACP::Client)
+          client.send_notification("session/cancel", session)
+          ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!).should eq(wire)
+        end
+
+        params = ACP::Protocol::CancelRequestParams.new("request")
+        params.meta_raw = metadata
+        client.cancel_request(params)
+        wire = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        wire.field("id").should be_nil
+        wire.field("method").not_nil!.as_s?.should eq("$/cancel_request")
+        payload = wire.field("params").not_nil!
+        payload.field("requestId").not_nil!.as_s?.should eq("request")
+        payload.field("_meta").should eq(metadata)
+
+        null_id = ACP::Protocol::CancelRequestParams.new(nil)
+        if client.is_a?(ACP::V2::Client)
+          expect_raises(ArgumentError, /string or integer request ID/) { client.cancel_request(null_id) }
+        else
+          client.cancel_request(null_id)
+          payload = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!).field("params").not_nil!
+          payload.field("requestId").not_nil!.null?.should be_true
+        end
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "keeps v1 permission pending when the transport cannot send an exact cancellation" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    entered = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      entered.send(nil)
+      release.receive
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"session","toolCall":{"toolCallId":"tool"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}))
+    next_permission_event(entered)
+    params = ACP::Protocol::SessionCancelParams.from_json(%({"sessionId":"session","_meta":{"example.test/ratio":0.123456789012345678901}}))
+    expect_raises(ACP::ProtocolError, /cannot preserve/) { client.session_cancel(params) }
+    transport.sent_messages.should be_empty
+
+    release.send(nil)
+    reply = next_answer(transport)
+    reply["id"].should eq("permission")
+    reply["result"]["outcome"]["outcome"].should eq("selected")
+  ensure
+    release.try(&.close)
+    client.try(&.close)
+  end
+
+  it "rejects trailing JSON in a custom notification serializer before writing" do
+    transport = TestTransport.new
+    client = ACP::Client.new(transport)
+    expect_raises(JSON::ParseException) { client.send_notification("session/cancel", InvalidNotificationParams.new) }
+    transport.sent_messages.should be_empty
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP exact MCP server declarations" do
   it "parses v1 and v2 declarations with exact metadata" do
     metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
@@ -5048,8 +5157,9 @@ describe "ACP v2 cancellation replies" do
             setup = JSON.parse(outgoing.gets.not_nil!)
             feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
             feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":#{update.to_json},#{id_field.to_json}:"entity","capabilities":{"cancel":{}}}}})
-            cancel = JSON.parse(outgoing.gets.not_nil!)
-            feed.puts %({"jsonrpc":"2.0","id":#{cancel["id"]},"result":{"_meta":{"number":#{number}}}})
+            cancel = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+            metadata = cancel.field("params").not_nil!.field("_meta").not_nil!.json
+            feed.puts %({"jsonrpc":"2.0","id":#{cancel.field("id").not_nil!.json},"result":{"_meta":#{metadata}}})
           end
           client.initialize_connection
           client.session_new("/work")
@@ -5058,7 +5168,16 @@ describe "ACP v2 cancellation replies" do
           when timeout(2.seconds)
             fail "the Agent's cancellation capability did not arrive"
           end
-          result = kind == "terminal" ? client.terminal_cancel("root", "entity") : client.tool_call_cancel("root", "entity")
+          metadata = ACP::Protocol::RawJson.from_json(%({"number":#{number}}))
+          result = if kind == "terminal"
+                     params = ACP::Protocol::V2::TerminalCancelParams.new("root", "entity")
+                     params.meta_raw = metadata
+                     client.terminal_cancel(params)
+                   else
+                     params = ACP::Protocol::V2::ToolCallCancelParams.new("root", "entity")
+                     params.meta_raw = metadata
+                     client.tool_call_cancel(params)
+                   end
           result.meta_raw.not_nil!.field("number").not_nil!.json.should eq(number)
         ensure
           client.try(&.close)
