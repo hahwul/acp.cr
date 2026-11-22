@@ -579,8 +579,11 @@ module ACP
       choices_result = result && (result.has_key?("configOptions") || result.has_key?("availableCommands"))
       state_result = result && result.has_key?("status") && result.has_key?("state")
       session_list_result = result && (result.has_key?("sessions") || result.has_key?("nextCursor"))
+      identity_result = result && (result.has_key?("sessionId") || result.has_key?("messageId"))
       result_metadata = result.try(&.["_meta"]?).try(&.as_h?)
-      if exact_params || versioned_result || choices_result || state_result || session_list_result || result_metadata
+      response = envelope && envelope.has_key?("id") && !envelope.has_key?("method")
+      if exact_params || versioned_result || choices_result || state_result || session_list_result || identity_result || result_metadata ||
+         (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?)
         Protocol::WireFrame.new(line, exact_params: true)
       else
         value

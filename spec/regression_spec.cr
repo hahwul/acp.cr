@@ -6556,3 +6556,172 @@ describe "ACP v2 transcript message decoding" do
     end
   end
 end
+
+private def answer_identity_request(feed : IO, outgoing : IO, result : String) : Nil
+  spawn do
+    request = JSON.parse(outgoing.gets.not_nil!)
+    feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":#{result}})
+  end
+end
+
+describe "ACP result identities" do
+  it "requires unambiguous strings in the typed result decoders" do
+    [ACP::Protocol::SessionNewResult, ACP::Protocol::V2::SessionNewResult].each do |type|
+      [%("sessionId":null), %("sessionId":false), %("sessionId":"one","sessionId":"two")].each do |field|
+        expect_raises(JSON::ParseException) { type.from_json("{#{field}}") }
+      end
+      expect_raises(JSON::ParseException) { type.from_json("{}") }
+      type.from_json(%({"sessionId":""})).session_id.should eq("")
+    end
+
+    type = ACP::Protocol::V2::SessionPromptResult
+    [%("messageId":null), %("messageId":false), %("messageId":"one","messageId":"two")].each do |field|
+      expect_raises(JSON::ParseException) { type.from_json("{#{field}}") }
+    end
+    expect_raises(JSON::ParseException) { type.from_json("{}") }
+    type.from_json(%({"messageId":""})).message_id.should eq("")
+  end
+
+  it "preserves prompt acknowledgement metadata and rejects ambiguous IDs over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.prompt_timeout = 2.0
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+
+      answer_identity_request(feed, outgoing, %({"messageId":"first","messageId":"second"}))
+      expect_raises(ACP::ProtocolError, /Ambiguous.*messageId/) { client.session_prompt_text("root", "One") }
+
+      answer_identity_request(feed, outgoing, %({"messageId":"first"},"result":{"messageId":"second"}))
+      expect_raises(ACP::ProtocolError, /Ambiguous.*result/) { client.session_prompt_text("root", "Two") }
+
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        id = request["id"].as_i64
+        feed.puts %({"jsonrpc":"2.0","id":#{id + 1000},"id":#{id},"result":{"messageId":"uncorrelated"}})
+        feed.puts %({"jsonrpc":"2.0","id":#{id + 1000},"id":#{id},"error":{"code":-32603,"message":"Uncorrelated error"}})
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"messageId":"correlated"}})
+      end
+      client.session_prompt_text("root", "Three").message_id.should eq("correlated")
+
+      meta = %({"count":18446744073709551615,"precise":0.1234567890123456789,"label":"visible"})
+      answer_identity_request(feed, outgoing, %({"messageId":"inserted","_meta":#{meta}}))
+      ack = client.session_prompt_text("root", "Four")
+      ack.message_id.should eq("inserted")
+      ack.meta.not_nil!["label"].should eq("visible")
+      ack.meta_raw.not_nil!.json.should eq(meta)
+      ack.to_json.should contain(%("_meta":#{meta}))
+      client.session_state("root").not_nil!.idle?.should be_true
+
+      decimal_meta = %({"precise":0.1234567890123456789})
+      answer_identity_request(feed, outgoing, %({"messageId":"precise","_meta":#{decimal_meta}}))
+      client.session_prompt_text("root", "Five").meta_raw.not_nil!.json.should eq(decimal_meta)
+
+      answer_identity_request(feed, outgoing, %({"messageId":"valid","_meta":null,"_meta":{"conflicting":true}}))
+      client.session_prompt_text("root", "Six").meta.should be_nil
+
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":-32603,"message":"One"},"error":{"code":-32602,"message":"Two"}})
+      end
+      expect_raises(ACP::ProtocolError, /Ambiguous.*error/) { client.session_prompt_text("root", "Seven") }
+
+      spawn do
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":-32602,"message":"Valid error"}})
+      end
+      expect_raises(ACP::JsonRpcError, /Valid error/) { client.session_prompt_text("root", "Eight") }
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects ambiguous new and fork results before attaching either session ID" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"fork":{}}}}))
+      client.initialize_connection
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work").session_id.should eq("root")
+
+      {"session/new", "session/fork"}.each_with_index do |method, index|
+        candidate = "candidate-#{index}"
+        create = -> do
+          if method == "session/new"
+            client.session_new("/other")
+          else
+            client.session_fork("root", "/other")
+          end
+        end
+
+        answer_identity_request(feed, outgoing, %({"sessionId":"first","sessionId":#{candidate.to_json}}))
+        expect_raises(ACP::ProtocolError, /Ambiguous.*sessionId/) { create.call }
+
+        answer_identity_request(feed, outgoing, %({"sessionId":"first"},"result":{"sessionId":#{candidate.to_json}}))
+        expect_raises(ACP::ProtocolError, /Ambiguous.*result/) { create.call }
+        ["first", candidate].each do |id|
+          client.session_state(id).should be_nil
+          client.session_workspace(id).should be_nil
+          client.session_available_commands_raw(id).should be_nil
+          client.session_config_options_raw(id).should be_nil
+        end
+
+        answer_identity_request(feed, outgoing, %({"sessionId":#{candidate.to_json},"sessionId":"root"}))
+        expect_raises(ACP::ProtocolError, /Ambiguous.*sessionId/) { create.call }
+        client.session_state("root").not_nil!.idle?.should be_true
+        client.session_workspace("root").not_nil!.cwd.should eq("/work")
+
+        meta = %({"precise":0.1234567890123456789})
+        answer_identity_request(feed, outgoing, %({"sessionId":#{candidate.to_json},"_meta":#{meta}}))
+        created = create.call
+        created.session_id.should eq(candidate)
+        created.to_json.should contain(%("_meta":#{meta}))
+        client.session_state(candidate).not_nil!.idle?.should be_true
+        client.session_workspace(candidate).not_nil!.cwd.should eq("/other")
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the v1 session unchanged after ambiguous creation and fork results" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{}}}}))
+      client.initialize_connection
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work").session_id.should eq("root")
+      answer_identity_request(feed, outgoing, %({"sessionId":"first","sessionId":"second"}))
+      expect_raises(ACP::ProtocolError, /Ambiguous.*sessionId/) { client.session_new("/other") }
+      client.session_id.should eq("root")
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      expect_raises(ACP::ProtocolError, /existing session ID/) { client.session_new("/reused") }
+      client.session_id.should eq("root")
+
+      meta = %({"precise":0.1234567890123456789})
+      answer_identity_request(feed, outgoing, %({"sessionId":"second","_meta":#{meta}}))
+      created = client.session_new("/other")
+      created.session_id.should eq("second")
+      client.session_id.should eq("second")
+      created.meta_raw.not_nil!.json.should eq(meta)
+      created.to_json.should contain(%("_meta":#{meta}))
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"new","sessionId":"second"}))
+      expect_raises(ACP::ProtocolError, /Ambiguous.*sessionId/) { client.session_fork("second", "/fork") }
+      client.session_id.should eq("second")
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"new","_meta":#{meta}}))
+      forked = client.session_fork("second", "/fork")
+      forked.session_id.should eq("new")
+      forked.meta_raw.not_nil!.json.should eq(meta)
+      client.session_id.should eq("new")
+    ensure
+      client.try(&.close)
+    end
+  end
+end

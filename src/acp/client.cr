@@ -1426,8 +1426,9 @@ module ACP
         nil
       end
 
+      exact_response = v2_wire? || method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK)
       response = send_and_await_response(method, message_builder, on_result: observe,
-        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: v2_wire?)
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: exact_response)
       cached_result = decoded
       return cached_result if cached_result
 
@@ -1501,7 +1502,7 @@ module ACP
       if method == Protocol::AgentMethod::SESSION_FORK
         fork_source = params.try(&.["sessionId"]?).try(&.as_s?)
         creating_session = method if fork_source
-      elsif v2_wire? && method == Protocol::AgentMethod::SESSION_NEW
+      elsif method == Protocol::AgentMethod::SESSION_NEW
         creating_session = method
       end
       if !v2_wire? && method == Protocol::AgentMethod::SESSION_LOAD
@@ -2026,6 +2027,22 @@ module ACP
     # Handles a response to one of our pending requests.
     # Finds the corresponding channel by ID and sends the response into it.
     private def handle_response(msg : JSON::Any, wire_frame : Protocol::WireFrame? = nil, *, initialization_only : Bool = false) : Nil
+      if wire_frame
+        repeated = Protocol::WireFrame.repeated_members(wire_frame.json, *Protocol::WireFrame::RESPONSE_FIELDS)
+        if repeated.includes?("id")
+          ClientLog.warn { "Ignoring response with an ambiguous JSON-RPC id" }
+          return
+        elsif !repeated.empty?
+          ambiguous_response = ProtocolError.new("Ambiguous JSON-RPC response fields: #{repeated.join(", ")}")
+          # Settle the request without exposing either outcome to the cache observers.
+          envelope = msg.as_h.dup
+          envelope.delete("result")
+          envelope.delete("error")
+          msg = JSON::Any.new(envelope)
+          wire_frame = nil
+        end
+      end
+
       id = Protocol.extract_id(msg)
       unless id
         ClientLog.warn { "Ignoring response with a missing or unusable JSON-RPC id" }
@@ -2040,7 +2057,7 @@ module ACP
       # into the full channel would block the dispatcher for good.
       cancelled_inputs = nil
       wide_frame = wire_frame if wire_frame.try(&.wide_response?)
-      response = wide_frame || msg
+      response = ambiguous_response || wide_frame || msg
       observed_reply = false
       channel = @pending_mutex.synchronize do
         initializing = v2_wire? && @initialize_request == id_str
@@ -2066,7 +2083,7 @@ module ACP
               observe_initialize_response(result)
             end
           end
-          if error = created_session_response_error(request.creating_session, request.fork_source, msg)
+          if error = created_session_response_error(request.creating_session, request.fork_source, msg, wire_frame)
             response = error
             @subagent_registry.try(&.request_finished(id_str))
           else
@@ -2112,8 +2129,15 @@ module ACP
     end
 
     # Checks newly allocated IDs before the workspace or capability cache can change.
-    private def created_session_response_error(method : String?, source : String?, msg : JSON::Any) : ProtocolError?
-      return unless method && !msg["error"]? && (id = msg["result"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?))
+    private def created_session_response_error(method : String?, source : String?, msg : JSON::Any, frame : Protocol::WireFrame?) : ProtocolError?
+      return unless method && !msg["error"]?
+
+      if frame && (payload = Protocol::WireFrame.result_json(msg, frame))
+        unless Protocol::WireFrame.repeated_members(payload, "sessionId").empty?
+          return ProtocolError.new("Ambiguous sessionId in the Agent's #{method} result")
+        end
+      end
+      return unless id = msg["result"]?.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
 
       if id == source
         ProtocolError.new("The Agent returned the source session ID for session/fork")

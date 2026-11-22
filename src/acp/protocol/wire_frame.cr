@@ -77,6 +77,9 @@ module ACP
 
     # A syntactically valid frame retained for lossless typed decoding.
     struct WireFrame
+      # :nodoc:
+      RESPONSE_FIELDS = {"id", "result", "error"}
+
       # Serializes an already parsed payload at the wire parser's nesting limit.
       # :nodoc:
       def self.encode(value) : String

@@ -223,7 +223,8 @@ module ACP
               end
             end
           end
-          response = send_and_await_response(method, builder, prompt_timeout, before_send: check_skills, wire_params: wire_params)
+          response = send_and_await_response(method, builder, prompt_timeout,
+            before_send: check_skills, wire_params: wire_params, exact_response: true)
           decode_typed_response(method, response, Wire::SessionPromptResult)
         end
 
