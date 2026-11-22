@@ -1163,7 +1163,7 @@ module ACP
       params = Protocol::SessionPromptParams.new(sid, prompt)
 
       # Use a longer timeout for prompts since they can take a while.
-      send_typed_request(Protocol::AgentMethod::SESSION_PROMPT, params, Protocol::SessionPromptResult, timeout: @prompt_timeout)
+      send_typed_request(Protocol::AgentMethod::SESSION_PROMPT, params, Protocol::SessionPromptResult, timeout: @prompt_timeout, exact_response: true)
     end
 
     # Convenience: sends a simple text prompt.
@@ -1481,7 +1481,7 @@ module ACP
 
     protected def send_choice_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
       message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, validate_choice: true, exact_response: v2_wire?)
+      response = send_and_await_response(method, message_builder, validate_choice: true, exact_response: true)
       decode_typed_response(method, response, type)
     end
 
@@ -1513,9 +1513,8 @@ module ACP
         nil
       end
 
-      exact_response = v2_wire? || method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK)
       response = send_and_await_response(method, message_builder, on_result: observe,
-        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: exact_response)
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: true)
       cached_result = decoded
       return cached_result if cached_result
 

@@ -1042,6 +1042,7 @@ module ACP
     # but NOT a sessionId (unlike session/new).
     struct SessionLoadResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # Mode state if supported by the Agent.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
@@ -1051,15 +1052,13 @@ module ACP
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
+      # Builds a load result with optional mode and configuration state.
       def initialize(
         @modes : SessionModeState? = nil,
         @config_options : Array(ConfigOption)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # NOTE: `session/load` does not return a `sessionId` in the ACP spec —
@@ -1125,6 +1124,7 @@ module ACP
     # the Agent.
     struct SessionResumeResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # Mode state if supported by the Agent.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalSessionModes)]
@@ -1134,15 +1134,13 @@ module ACP
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::OptionalConfigOptions)]
       property config_options : Array(ConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
+      # Builds a resume result with optional mode and configuration state.
       def initialize(
         @modes : SessionModeState? = nil,
         @config_options : Array(ConfigOption)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -1237,6 +1235,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/prompt-turn#stop-reasons
     struct SessionPromptResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # Reason the agent stopped generating (required).
       # Values: "end_turn", "max_tokens", "max_turn_requests",
@@ -1248,12 +1247,9 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::Usage::Optional)]
       property usage : Usage?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Builds the turn result with optional token usage.
-      def initialize(@stop_reason : String, @meta : Hash(String, JSON::Any)? = nil, *, @usage : Usage? = nil)
+      def initialize(@stop_reason : String, meta : Hash(String, JSON::Any)? = nil, *, @usage : Usage? = nil)
+        self.meta = meta
       end
     end
 
@@ -1360,19 +1356,18 @@ module ACP
     # The response always contains the complete configuration state.
     struct SessionSetConfigOptionResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # The full set of configuration options and their current values (required).
       @[JSON::Field(key: "configOptions", converter: ACP::Protocol::ConfigOptionsConverter)]
       property config_options : Array(ConfigOption) = [] of ConfigOption
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Builds a result with the current configuration options.
       def initialize(
         @config_options : Array(ConfigOption) = [] of ConfigOption,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 

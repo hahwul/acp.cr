@@ -7059,6 +7059,69 @@ private def answer_identity_request(feed : IO, outgoing : IO, result : String) :
   end
 end
 
+describe "ACP v1 exact session and turn replies" do
+  {"load", "resume", "set_config_option", "prompt"}.each do |operation|
+    {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
+      it "preserves a #{label} in a session/#{operation} reply" do
+        with_wide_stdio do |transport, feed, outgoing|
+          client = ACP::Client.new(transport)
+          client.request_timeout = 2.0
+          client.prompt_timeout = 2.0
+          answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}))
+          client.initialize_connection
+
+          original = choice_state_option("id", "fast", ["fast", "large"])
+          answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":[#{original}]}))
+          client.session_new("/work")
+
+          updated = choice_state_option("id", "large", ["fast", "large"])
+          fields = operation == "prompt" ? %("stopReason":"end_turn") : %("configOptions":[#{updated}])
+          metadata = %({"example.test/source":"agent","example.test/number":#{number}})
+          answer_identity_request(feed, outgoing, %({#{fields},"_meta":#{metadata}}))
+          result = case operation
+                   when "load"              then client.session_load("root", "/work")
+                   when "resume"            then client.session_resume("root", "/work")
+                   when "set_config_option" then client.session_set_config_option("model", "large")
+                   else                          client.session_prompt_text("Hello")
+                   end
+          result.meta.try(&.["example.test/source"]?).should eq("agent")
+          result.meta_raw.not_nil!.json.should eq(metadata)
+          result.to_json.should contain(%("_meta":#{metadata}))
+          if result.is_a?(ACP::Protocol::SessionPromptResult)
+            result.stop_reason.should eq("end_turn")
+          else
+            result.config_options.not_nil!.first.current_value.should eq("large")
+            client.session_config_options.not_nil!.first.current_value.should eq("large")
+          end
+        ensure
+          client.try(&.close)
+        end
+      end
+    end
+  end
+
+  it "preserves exact token usage metadata in a prompt reply with no outer metadata" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      client.prompt_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work")
+
+      metadata = %({"example.test/ratio":1.23000000000000000001})
+      usage = %({"totalTokens":3,"inputTokens":1,"outputTokens":2,"_meta":#{metadata}})
+      answer_identity_request(feed, outgoing, %({"stopReason":"end_turn","usage":#{usage}}))
+      result = client.session_prompt_text("Hello")
+      result.usage.not_nil!.total_tokens.should eq(3)
+      result.usage.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
 describe "ACP result identities" do
   it "requires unambiguous strings in the typed result decoders" do
     [ACP::Protocol::SessionNewResult, ACP::Protocol::V2::SessionNewResult].each do |type|
