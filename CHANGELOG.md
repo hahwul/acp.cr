@@ -18,6 +18,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve connection-closed errors when stdio writes fail on older supported Crystal versions.
 - Render agent-supplied terminal control characters as visible text in the example clients.
 - Preserve ACP v1 terminal output truncation on subsequent replies for the same terminal.
 - Enforce ACP v1 terminal output byte limits at UTF-8 character boundaries in typed and generic replies.
