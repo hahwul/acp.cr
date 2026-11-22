@@ -843,7 +843,8 @@ their cleanup, including cleanup when a creation reply cannot be delivered.
 The client applies the original `terminal/create` output byte limit to typed
 and generic `terminal/output` replies. It replaces invalid UTF-8 bytes with
 replacement characters, then keeps the newest complete characters that fit.
-If bytes are dropped to meet the limit, the reply sets `truncated` to true.
+When the client records truncation from a validated output snapshot, later
+snapshots of that terminal keep `truncated` set to true.
 The application controls its terminal capture buffer and can enforce the same
 limit while collecting output.
 [ACP v1 Terminal Output Limit](https://agentclientprotocol.com/protocol/v1/terminals#executing-commands)

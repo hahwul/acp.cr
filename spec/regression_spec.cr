@@ -9814,3 +9814,78 @@ describe "ACP v1 terminal output byte limits" do
     end
   end
 end
+
+describe "ACP v1 terminal output truncation history" do
+  {"typed", "generic"}.each do |kind|
+    it "preserves confirmed truncation on later #{kind} output for the same terminal" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = initialized_v1_terminal_client(transport, feed, outgoing)
+        client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+          ACP::Protocol::CreateTerminalResult.new(params.command)
+        end
+        captured = ""
+        reported = false
+        invalid_metadata = ""
+        nested_metadata = %({"example.test/nested":#{"[" * 510}1#{"]" * 510}})
+        if kind == "typed"
+          client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+            result = ACP::Protocol::TerminalOutputResult.new(captured, truncated: reported)
+            case invalid_metadata
+            when "nan"
+              result.meta = {"example.test/value" => JSON::Any.new(0)}
+              result.meta.not_nil!["example.test/value"] = JSON::Any.new(Float64::NAN)
+            when "nesting"
+              result.meta_raw = ACP::Protocol::RawJson.from_json(nested_metadata)
+            end
+            result
+          end
+        else
+          client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+            fields = {"output" => JSON::Any.new(captured), "truncated" => JSON::Any.new(reported)}
+            case invalid_metadata
+            when "nan"
+              fields["_meta"] = JSON::Any.new({"example.test/value" => JSON::Any.new(Float64::NAN)})
+            when "nesting"
+              fields["_meta"] = JSON.parse(nested_metadata)
+            end
+            JSON::Any.new(fields)
+          end
+        end
+        create = ->(name : String, limit : UInt64?) do
+          limit_field = limit ? %(,"outputByteLimit":#{limit}) : ""
+          feed.puts %({"jsonrpc":"2.0","id":"create","method":"terminal/create","params":{"sessionId":"s","command":#{name.to_json}#{limit_field}}})
+          JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].should eq(name)
+        end
+        output = ->(name : String) do
+          feed.puts %({"jsonrpc":"2.0","id":"output","method":"terminal/output","params":{"sessionId":"s","terminalId":#{name.to_json}}})
+          JSON.parse(outgoing.gets.not_nil!)
+        end
+        create.call("limited", 4_u64)
+        create.call("reported", nil)
+        create.call("independent", 4_u64)
+
+        {"nan", "nesting"}.each do |failure|
+          captured = "한🙂"
+          invalid_metadata = failure
+          output.call("limited")["error"]?.try(&.["code"]).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+          invalid_metadata = ""
+          captured = "a"
+          output.call("limited")["result"]["truncated"].should eq(false)
+        end
+
+        captured = "한🙂"
+        output.call("limited")["result"].should eq(JSON.parse(%({"output":"🙂","truncated":true})))
+        captured = "z"
+        output.call("limited")["result"].should eq(JSON.parse(%({"output":"z","truncated":true})))
+        output.call("independent")["result"]["truncated"].should eq(false)
+
+        reported = true
+        output.call("reported")["result"]["truncated"].should eq(true)
+        reported = false
+        output.call("reported")["result"]["truncated"].should eq(true)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+end
