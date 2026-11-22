@@ -366,6 +366,7 @@ module ACP
 
     private class V1Terminal
       getter session_id : String
+      property output_byte_limit : UInt64?
       property? visible : Bool = false
       property? releasing : Bool = false
       property? retired : Bool = false
@@ -2534,7 +2535,11 @@ module ACP
           terminal = registration
         end
       end
-      prepared = entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
+      prepared = if creation = terminal
+                   -> { handle_v1_terminal_create(params, params_json, creation) }
+                 else
+                   entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
+                 end
       spawn(name: "acp-agent-request") do
         reply = rejection || (prepared ? prepared.call : route_agent_request(method_name, params, params_json))
         if (elicitation = entry) && id && elicitation.elicitation_parent_id
@@ -2709,7 +2714,7 @@ module ACP
       when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
         handle_v1_resource_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name, params_json, "path", "content")
       when Protocol::ClientMethod::TERMINAL_CREATE
-        handle_v1_resource_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name, params_json, "command", "args", "env", "cwd", "outputByteLimit")
+        handle_v1_terminal_create(params, params_json)
       when Protocol::ClientMethod::TERMINAL_OUTPUT
         handle_v1_resource_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name, params_json, "terminalId")
       when Protocol::ClientMethod::TERMINAL_RELEASE
@@ -3027,6 +3032,11 @@ module ACP
       end
     end
 
+    private def handle_v1_terminal_create(params : JSON::Any?, params_json : String?, creation : V1Terminal? = nil) : AgentReply
+      handle_v1_resource_method(params, @on_create_terminal, Protocol::CreateTerminalParams, Protocol::ClientMethod::TERMINAL_CREATE, params_json,
+        "command", "args", "env", "cwd", "outputByteLimit", terminal_creation: creation)
+    end
+
     # Decode known resource requests before handing them to either callback.
     private def handle_v1_resource_method(
       params : JSON::Any?,
@@ -3035,6 +3045,7 @@ module ACP
       method_name : String,
       params_json : String?,
       *fields : String,
+      terminal_creation : V1Terminal? = nil,
     ) : AgentReply
       return handle_unknown_agent_request(method_name, params, nil) unless handler || @on_agent_request
 
@@ -3060,6 +3071,9 @@ module ACP
         ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
       end
+      if terminal_creation && typed_params.is_a?(Protocol::CreateTerminalParams)
+        terminal_creation.output_byte_limit = typed_params.output_byte_limit
+      end
       terminal_id = typed_params.terminal_id if !v2_wire? && typed_params.responds_to?(:terminal_id)
       if terminal_id
         releasing = typed_params.is_a?(Protocol::ReleaseTerminalParams)
@@ -3075,6 +3089,11 @@ module ACP
                 begin
                   result = h.call(typed_params)
                   released = releasing
+                  if terminal && result.is_a?(Protocol::TerminalOutputResult)
+                    output, trimmed = normalize_terminal_output(result.output, terminal.output_byte_limit)
+                    result.output = output
+                    result.truncated = true if trimmed
+                  end
                   collision = terminal_id_collision(result.terminal_id) if result.is_a?(Protocol::CreateTerminalResult)
                   collision || encode_agent_result(result)
                 rescue ex
@@ -3087,6 +3106,8 @@ module ACP
                 released = releasing && !!result_fields
                 if method_name == Protocol::ClientMethod::TERMINAL_CREATE
                   collision = terminal_id_collision(result_fields.try(&.["terminalId"]?).try(&.as_s?))
+                elsif terminal && method_name == Protocol::ClientMethod::TERMINAL_OUTPUT && raw.is_a?(JSON::Any)
+                  raw = normalize_terminal_output_reply(raw, terminal.output_byte_limit)
                 end
                 collision || validate_v1_resource_reply(method_name, raw)
               end
@@ -3129,6 +3150,31 @@ module ACP
         terminal.releasing = true if release
         terminal
       end
+    end
+
+    # Use the newest complete characters that fit after normalizing invalid UTF-8.
+    private def normalize_terminal_output(output : String, limit : UInt64?) : {String, Bool}
+      text = output.valid_encoding? ? output : output.scrub
+      return {text, false} unless limit && text.bytesize.to_u64 > limit
+
+      start = text.bytesize - limit.to_i
+      while start < text.bytesize && (text.byte_at(start) & 0xc0_u8) == 0x80_u8
+        start += 1
+      end
+      {text.byte_slice(start), true}
+    end
+
+    private def normalize_terminal_output_reply(reply : JSON::Any, limit : UInt64?) : JSON::Any
+      fields = reply.as_h?
+      return reply unless fields && (output = fields["output"]?.try(&.as_s?)) && !fields["truncated"]?.try(&.as_bool?).nil?
+
+      text, trimmed = normalize_terminal_output(output, limit)
+      return reply if text.same?(output) && !trimmed
+
+      fields = fields.dup
+      fields["output"] = JSON::Any.new(text)
+      fields["truncated"] = JSON::Any.new(true) if trimmed
+      JSON::Any.new(fields)
     end
 
     private def validate_v1_resource_reply(method : String, reply : AgentReply) : AgentReply

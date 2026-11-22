@@ -18,6 +18,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Enforce ACP v1 terminal output byte limits at UTF-8 character boundaries in typed and generic replies.
 - Expose confirmed ACP v1 session workspaces through `Client#session_workspace` with or without subagents.
 - Validate generic ACP v1 file and terminal callback replies before sending a success response.
 - Preserve exact metadata in typed ACP v1 file and terminal replies, including terminal exit status.

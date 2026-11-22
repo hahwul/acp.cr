@@ -9732,3 +9732,85 @@ describe "ACP v1 terminal ownership" do
     client.try(&.close)
   end
 end
+
+describe "ACP v1 terminal output byte limits" do
+  it "keeps a valid UTF-8 suffix and preserves exact typed reply metadata" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
+      client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
+        ACP::Protocol::CreateTerminalResult.new(params.command)
+      end
+      text = "a한🙂\n"
+      current_output = text
+      handler_truncated = false
+      metadata = %({"example.test/wide":18446744073709551615,"example.test/fraction":0.123456789012345678901})
+      client.on_terminal_output = ->(_params : ACP::Protocol::TerminalOutputParams) do
+        result = ACP::Protocol::TerminalOutputResult.from_json(%({"output":"","truncated":false,"exitStatus":{"exitCode":1,"_meta":#{metadata}},"_meta":#{metadata}}))
+        result.output = current_output
+        result.truncated = handler_truncated
+        result
+      end
+
+      cases = {
+        {nil, text, false, text, false},
+        {9_u64, text, false, text, false},
+        {8_u64, text, false, "한🙂\n", true},
+        {7_u64, text, false, "🙂\n", true},
+        {4_u64, text, false, "\n", true},
+        {3_u64, "🙂", false, "", true},
+        {0_u64, text, false, "", true},
+        {0_u64, "", false, "", false},
+        {UInt64::MAX, text, true, text, true},
+        {3_u64, String.new(Bytes[0xff, 0x61]), false, "a", true},
+      }
+      cases.each_with_index do |(limit, captured, already_truncated, expected, truncated), index|
+        terminal = "term-#{index}"
+        current_output = captured
+        handler_truncated = already_truncated
+        limit_field = limit ? %(,"outputByteLimit":#{limit}) : ""
+        feed.puts %({"jsonrpc":"2.0","id":"create","method":"terminal/create","params":{"sessionId":"s","command":#{terminal.to_json}#{limit_field}}})
+        JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].should eq(terminal)
+        feed.puts %({"jsonrpc":"2.0","id":"output","method":"terminal/output","params":{"sessionId":"s","terminalId":#{terminal.to_json}}})
+        result = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!).field("result").not_nil!
+        result.field("output").not_nil!.as_s?.should eq(expected)
+        result.field("truncated").not_nil!.json.should eq(truncated.to_json)
+        result.field("_meta").not_nil!.json.should eq(metadata)
+        status = result.field("exitStatus").not_nil!
+        status.field("exitCode").not_nil!.as_i64?.should eq(1)
+        status.field("_meta").not_nil!.json.should eq(metadata)
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "uses the negotiated limit for the generic callback without editing its result" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
+      original = JSON.parse(%({"output":"a한🙂","truncated":false,"example.test/extra":[1,true]}))
+      reply = original
+      client.on_agent_request = ->(method : String, params : JSON::Any) do
+        if method == "terminal/create"
+          params.as_h["outputByteLimit"] = JSON::Any.new(99_i64)
+          JSON.parse(%({"terminalId":"fixture"}))
+        else
+          reply
+        end
+      end
+      feed.puts %({"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"fixture","outputByteLimit":6}})
+      JSON.parse(outgoing.gets.not_nil!)["result"]["terminalId"].should eq("fixture")
+
+      request = %({"jsonrpc":"2.0","id":2,"method":"terminal/output","params":{"sessionId":"s","terminalId":"fixture"}})
+      feed.puts request
+      result = JSON.parse(outgoing.gets.not_nil!)["result"]
+      result.should eq(JSON.parse(%({"output":"🙂","truncated":true,"example.test/extra":[1,true]})))
+      original.should eq(JSON.parse(%({"output":"a한🙂","truncated":false,"example.test/extra":[1,true]})))
+
+      reply = JSON.parse(%({"output":"a한🙂","truncated":"invalid"}))
+      feed.puts request
+      JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
