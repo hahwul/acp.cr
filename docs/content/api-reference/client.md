@@ -109,7 +109,13 @@ fit in `JSON::Any` go to `on_notification`. The typed completion exposes
 exact metadata through `meta_raw`.
 [ACP v2 URL Completion](https://agentclientprotocol.com/protocol/v2/elicitation#url-completion)
 
-An elicitation with `request_id` belongs to an outstanding Client request
+Both protocol versions require an elicitation scope and a message. URL
+mode also requires an absolute URL and an opaque `elicitationId`. The
+client returns JSON-RPC `-32602` for invalid requests before calling the
+handler. ACP v1 accepts an explicit `null` request ID for request scope.
+[ACP v1 Elicitation Scope](https://agentclientprotocol.com/protocol/v1/elicitation#creating-an-elicitation)
+
+An ACP v2 elicitation with `request_id` belongs to an outstanding Client request
 on the same connection. The client rejects a request-scoped elicitation
 with `toolCallId`. The callback's local `cancellation` channel closes when
 the elicitation is cancelled, its originating request ends before an input

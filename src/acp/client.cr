@@ -2496,10 +2496,14 @@ module ACP
       end
 
       fields = fields.not_nil!
+      unless fields["message"]?.try(&.as_s?)
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Elicitation requires a message")
+      end
+
+      session = fields["sessionId"]?
+      request = fields["requestId"]?
       parent_id = nil
       if v2_wire?
-        session = fields["sessionId"]?
-        request = fields["requestId"]?
         if session
           valid_scope = session.as_s? && !request
         else
@@ -2510,15 +2514,19 @@ module ACP
         unless valid_scope
           return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "ACP v2 elicitation requires a sessionId or a requestId without toolCallId")
         end
-        if mode == "form" && !fields["requestedSchema"]?.try(&.as_h?)
-          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Missing ACP v2 form elicitation schema")
-        end
+      elsif !session.try(&.as_s?) && !(request && (request.raw.nil? || request.as_i64? || request.as_s?))
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "ACP v1 elicitation requires a sessionId or requestId")
       end
 
-      if mode == "url"
+      if mode == "form"
+        unless fields["requestedSchema"]?.try(&.as_h?)
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Missing form elicitation schema")
+        end
+      elsif mode == "url"
         url_id = fields["elicitationId"]?.try(&.as_s?)
-        unless url_id && fields["url"]?.try(&.as_s?) && fields["message"]?.try(&.as_s?)
-          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation requires an elicitationId, url, and message")
+        url = fields["url"]?.try(&.as_s?)
+        unless url_id && url && Protocol.absolute_uri_syntax?(url)
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "URL elicitation requires an elicitationId and an absolute URL")
         end
       end
       return unless parent_id || url_id
@@ -2572,18 +2580,14 @@ module ACP
           raise ArgumentError.new("Exact elicitation content requires an ACP v2 form") if result.content_raw
           result
         end
-        handle_typed_client_method(params, typed_callback, Protocol::CreateElicitationParams, method, params_json)
+        handle_typed_client_method(params, typed_callback, Protocol::ElicitationRequest, method, params_json)
       end
     end
 
     private def handle_form_elicitation(json : String, handler : CreateElicitationHandler) : AgentReply
       v2 = v2_wire?
       input = begin
-        if v2
-          Protocol::FormElicitation.from_v2_json(json)
-        else
-          Protocol::FormElicitation.from_v1_json(json)
-        end
+        Protocol::FormElicitation.from_json(json, v2: v2)
       rescue ex : JSON::Error
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid form elicitation: #{ex.message}")
       end
@@ -2613,7 +2617,7 @@ module ACP
       return unrepresentable_request_params unless raw_notification_representable?(params_json)
 
       schema = begin
-        request = Protocol::FormElicitation.from_v1_json(params_json || params.to_json)
+        request = Protocol::FormElicitation.from_json(params_json || params.to_json, v2: false)
         request.requested_schema_raw.not_nil!
       rescue ex : JSON::Error
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid form elicitation: #{ex.message}")
