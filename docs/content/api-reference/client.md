@@ -798,7 +798,8 @@ Sends a custom extension notification (no response expected).
 | `session_id` | `String?` | Current session ID |
 | `agent_capabilities` | `AgentCapabilities?` | Negotiated agent capabilities |
 | `agent_info` | `AgentInfo?` | Agent metadata |
-| `auth_methods` | `Array(JSON::Any)?` | Available authentication methods |
+| `auth_methods` | `Array(JSON::Any)?` | Editable view of the advertised methods |
+| `auth_methods_raw` | `Protocol::RawJson?` | Exact advertised methods and extension metadata |
 | `typed_auth_methods` | `Array(AuthenticationMethod)` | Supported protocol and terminal descriptors |
 | `negotiated_protocol_version` | `UInt16?` | Negotiated protocol version |
 

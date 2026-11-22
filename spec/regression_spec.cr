@@ -1938,6 +1938,56 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP v1 exact authentication offers" do
+  it "keeps authentication descriptors with exact metadata available after initialization" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      methods = %([{"id":"login","name":"Agent sign-in","_meta":#{metadata}},{"type":"terminal","id":"terminal","name":"Terminal sign-in","args":[],"_meta":#{metadata}},{"type":"future","id":"future","name":"Future sign-in","_meta":#{metadata}},{"id":"missing-name","_meta":#{metadata}}])
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentInfo":{"name":"agent","version":"1","_meta":#{metadata}},"authMethods":#{methods},"_meta":#{metadata}}))
+      result = client.initialize_connection
+      result.typed_auth_methods.map(&.id).should eq(["login", "terminal"])
+      client.typed_auth_methods.map(&.id).should eq(["login", "terminal"])
+      result.meta_raw.not_nil!.json.should eq(metadata)
+      client.agent_info.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      client.auth_methods.not_nil!.size.should eq(4)
+      client.auth_methods_raw.not_nil!.json.should eq(methods)
+      result.typed_auth_methods.each do |method|
+        method.meta_raw.not_nil!.json.should eq(metadata)
+      end
+      ACP::Protocol::RawJson.from_json(result.to_json).field("authMethods").not_nil!.json.should eq(methods)
+
+      answer_identity_request(feed, outgoing, "{}")
+      client.authenticate("login")
+      expect_raises(ACP::InvalidStateError) { client.authenticate("terminal") }
+      expect_raises(ACP::InvalidStateError) { client.authenticate("future") }
+      expect_raises(ACP::InvalidStateError, /invalid descriptor/) { client.authenticate("missing-name") }
+    ensure
+      client.try(&.close)
+    end
+  end
+  it "preserves precise decimals even when the initialization reply fits in JSON::Any" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      metadata = %({"example.test/ratio":0.123456789012345678901})
+      methods = %([{"id":"login","name":"Sign in","_meta":#{metadata}}])
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"authMethods":#{methods}}))
+      result = client.initialize_connection
+      result.auth_methods_raw.not_nil!.json.should eq(methods)
+      client.typed_auth_methods.first.meta_raw.not_nil!.json.should eq(metadata)
+
+      result.auth_methods.not_nil!.first.as_h["description"] = JSON::Any.new("Updated description")
+      method = client.typed_auth_methods.first
+      method.description.should eq("Updated description")
+      method.meta_raw.not_nil!.json.should eq(metadata)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
 # Debug logs need to hide launch descriptors while keeping the actual
 # initialize response available to the application.
 describe "ACP terminal authentication logging" do
@@ -1946,7 +1996,7 @@ describe "ACP terminal authentication logging" do
     Log.capture("acp.transport", level: :debug) do |logs|
       transport = ACP::StdioTransport.new(IO::Memory.new(frame + "\n"), IO::Memory.new)
       transport.receive.not_nil!["result"]["authMethods"][0]["env"]["EXAMPLE_VALUE"].should eq("sample-value")
-      logs.check(:debug, /"authMethods":"\[REDACTED\]"/)
+      logs.check(:debug, /\[REDACTED frame\]/)
       logs.entry.message.should_not contain("sample-value")
     ensure
       transport.try(&.close)

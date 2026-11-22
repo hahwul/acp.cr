@@ -782,6 +782,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#implementation-information
     struct AgentInfo
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Intended for programmatic or logical use, but can be used as a
       # display name fallback if title isn't present.
@@ -795,11 +797,8 @@ module ACP
       # Version of the implementation.
       property version : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@name : String, @version : String, @title : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # Returns the display-friendly name (title if available, otherwise name).
@@ -987,6 +986,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/authentication
     struct AuthMethod
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Unique identifier for this authentication method.
       property id : String
@@ -995,29 +996,29 @@ module ACP
       property name : String
 
       # Optional description providing more details.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property description : String?
 
       # Explicit wire type. Omission also selects Agent-managed authentication.
       @[JSON::Field(key: "type")]
       property method_type : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @id : String,
         @name : String,
         @description : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @method_type : String? = nil,
       )
+        self.meta = meta
       end
     end
 
     # Describes login arguments and environment for the configured Agent program.
     struct TerminalAuthMethod
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Always `terminal` for this flow.
       @[JSON::Field(key: "type", ignore_deserialize: true)]
@@ -1030,6 +1031,7 @@ module ACP
       property name : String
 
       # Optional description providing more details.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property description : String?
 
       # Additional arguments for the configured Agent executable.
@@ -1038,10 +1040,6 @@ module ACP
       # Values to override in the configured Agent's environment.
       property env : Hash(String, String) = {} of String => String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a terminal login descriptor.
       def initialize(
         @id : String,
@@ -1049,8 +1047,9 @@ module ACP
         @description : String? = nil,
         @args : Array(String) = [] of String,
         @env : Hash(String, String) = {} of String => String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -1059,18 +1058,28 @@ module ACP
 
     # Parses the implemented authentication methods, skipping unknown wire types.
     def self.typed_auth_methods(methods : Array(JSON::Any)?) : Array(AuthenticationMethod)
-      return [] of AuthenticationMethod unless methods
+      methods.try(&.compact_map { |value| typed_auth_method(RawJson.new(value)) }) || [] of AuthenticationMethod
+    end
 
-      methods.compact_map do |value|
-        next unless fields = value.as_h?
+    # Parses the implemented authentication methods from exact JSON.
+    def self.typed_auth_methods(methods : RawJson) : Array(AuthenticationMethod)
+      methods.elements?.try(&.compact_map { |value| typed_auth_method(value) }) || [] of AuthenticationMethod
+    end
 
-        case fields["type"]?.try(&.raw)
-        when nil, "agent" then AuthMethod.from_json(value.to_json)
-        when "terminal"   then TerminalAuthMethod.from_json(value.to_json)
+    # Parses an implemented method with unambiguous identity and launch fields.
+    def self.typed_auth_method(value : RawJson) : AuthenticationMethod?
+      return unless value.field("id", unique: true).try(&.as_s?) && value.field("name", unique: true).try(&.as_s?)
+
+      case value.field("type", unique: true).try(&.json)
+      when nil, "null", %("agent")
+        AuthMethod.from_json(value.json)
+      when %("terminal")
+        if WireFrame.repeated_members(value.json, "args", "env").empty?
+          TerminalAuthMethod.from_json(value.json)
         end
-      rescue JSON::ParseException
-        nil
       end
+    rescue JSON::ParseException
+      nil
     end
   end
 end
