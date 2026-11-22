@@ -142,7 +142,10 @@ client.on_agent_request = ->(method : String, params : JSON::Any) {
 
 ### Typed Client Method Handlers
 
-For specific agent-initiated requests, use typed handlers:
+Advertise the file capabilities you handle before `initialize_connection`.
+For example, set `client_capabilities.fs` to an
+`ACP::Protocol::FsCapabilities` with the appropriate `read_text_file` and
+`write_text_file` flags. Then register the corresponding handlers.
 
 ```crystal
 client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) {

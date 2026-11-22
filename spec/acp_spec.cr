@@ -4637,7 +4637,8 @@ end
 describe "Client typed handler dispatch" do
   it "dispatches fs/read_text_file to typed handler" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    client = ACP::Client.new(transport, client_capabilities: caps)
 
     handler_called = false
     received_path = ""
@@ -4686,7 +4687,8 @@ describe "Client typed handler dispatch" do
 
   it "dispatches fs/write_text_file to typed handler" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(write_text_file: true))
+    client = ACP::Client.new(transport, client_capabilities: caps)
 
     written_path = ""
     written_content = ""
@@ -4729,7 +4731,7 @@ describe "Client typed handler dispatch" do
 
   it "dispatches terminal/create to typed handler" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
 
     received_command = ""
 
@@ -4773,7 +4775,8 @@ describe "Client typed handler dispatch" do
 
   it "falls back to on_agent_request when typed handler not set" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    client = ACP::Client.new(transport, client_capabilities: caps)
 
     fallback_called = false
     fallback_method = ""
@@ -4815,7 +4818,7 @@ describe "Client typed handler dispatch" do
 
   it "returns method-not-found error when no handler is set" do
     transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
 
     spawn do
       sleep 10.milliseconds

@@ -503,8 +503,7 @@ describe "ACP $/cancel_request" do
   end
 
   it "answers a waiting request with -32800 at once, drops the late answer, and tells on_notification" do
-    transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    transport, client = v1_client(client_caps: ACP::Protocol::ClientCapabilities.new(terminal: true))
     release = Channel(Nil).new(1)
     entered = Channel(Nil).new(1)
     notified = Channel(JSON::Any?).new(1)
@@ -552,8 +551,8 @@ describe "ACP $/cancel_request" do
   end
 
   it "leaves a request with side effects to its handler" do
-    transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(write_text_file: true))
+    transport, client = v1_client(client_caps: caps)
     release = Channel(Nil).new(1)
     entered = Channel(Nil).new(1)
     client.on_write_text_file = ->(_p : ACP::Protocol::WriteTextFileParams) do
@@ -575,8 +574,8 @@ describe "ACP $/cancel_request" do
   end
 
   it "still answers both requests when the agent reuses an in-flight ID" do
-    transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    transport, client = v1_client(client_caps: caps)
     release = Channel(Nil).new(2)
     entered = Channel(Nil).new(2)
     client.on_read_text_file = ->(p : ACP::Protocol::ReadTextFileParams) do
@@ -594,8 +593,8 @@ describe "ACP $/cancel_request" do
   end
 
   it "answers the older of two same-ID requests when the newer one finishes first" do
-    transport = TestTransport.new
-    client = ACP::Client.new(transport)
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    transport, client = v1_client(client_caps: caps)
     releases = [Channel(Nil).new(1), Channel(Nil).new(1)]
     entered = Channel(Nil).new(2)
     calls = Atomic(Int32).new(0)

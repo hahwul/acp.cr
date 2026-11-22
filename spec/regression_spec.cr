@@ -1137,7 +1137,7 @@ describe "ACP unsigned protocol integers" do
 
   it "rejects a negative fs/read_text_file line with INVALID_PARAMS" do
     transport = SignalingTransport.new
-    client = ACP::Client.new(transport)
+    client = initialized_read_client(transport)
     called = false
     client.on_read_text_file = ->(_p : ACP::Protocol::ReadTextFileParams) do
       called = true
@@ -1161,6 +1161,17 @@ private def next_answer(transport : SignalingTransport) : JSON::Any
   when timeout(2.seconds)
     fail "the client sent no answer"
   end
+end
+
+private def initialized_read_client(transport : SignalingTransport) : ACP::Client
+  caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+  client = ACP::Client.new(transport, client_capabilities: caps)
+  spawn do
+    request = next_answer(transport)
+    transport.inject_raw(build_init_response(request["id"].as_i64))
+  end
+  client.initialize_connection
+  client
 end
 
 # ─── R25: a request with `"id": null` must be answered, not dropped ─────
@@ -1307,7 +1318,7 @@ end
 describe "ACP::Client handler JSON-RPC errors" do
   it "sends the code, message and data of a JsonRpcError raised by a typed handler" do
     transport = SignalingTransport.new
-    client = ACP::Client.new(transport)
+    client = initialized_read_client(transport)
     client.on_read_text_file = ->(p : ACP::Protocol::ReadTextFileParams) : ACP::Protocol::ReadTextFileResult do
       raise ACP::JsonRpcError.new(ACP::JsonRpcError::RESOURCE_NOT_FOUND, "Resource not found", JSON.parse(%({"uri":"#{p.path}"})))
     end
@@ -1350,7 +1361,7 @@ describe "ACP::Client handler JSON-RPC errors" do
 
   it "reports a JSON error from the handler's own code as -32603, not invalid params" do
     transport = SignalingTransport.new
-    client = ACP::Client.new(transport)
+    client = initialized_read_client(transport)
     client.on_read_text_file = ->(_p : ACP::Protocol::ReadTextFileParams) do
       ACP::Protocol::ReadTextFileResult.from_json(%({"wrong":1}))
     end
@@ -1713,7 +1724,7 @@ describe "ACP stdio messages with wide integers" do
 
   it "passes a full unsigned byte limit to the typed terminal handler" do
     with_wide_stdio do |transport, feed, outgoing|
-      client = ACP::Client.new(transport)
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
       client.on_create_terminal = ->(params : ACP::Protocol::CreateTerminalParams) do
         ACP::Protocol::CreateTerminalResult.new(params.output_byte_limit.to_s)
       end
@@ -1853,6 +1864,16 @@ private def initialize_wide_v2(client : ACP::V2::Client, feed : IO, outgoing : I
   end
   client.initialize_connection
   client.session_new("/work") if session_id
+end
+
+private def initialized_v1_terminal_client(transport : ACP::Transport, feed : IO, outgoing : IO) : ACP::Client
+  client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
+  spawn do
+    request = JSON.parse(outgoing.gets.not_nil!)
+    feed.puts build_init_response(request["id"].as_i64).delete('\n')
+  end
+  client.initialize_connection
+  client
 end
 
 private def await_wide_update(updates : Channel(Nil))
@@ -7005,7 +7026,7 @@ describe "ACP cancellation request identities" do
 
   it "cancels a v1 request despite malformed optional metadata over stdio" do
     with_wide_stdio do |transport, feed, outgoing|
-      client = ACP::Client.new(transport)
+      client = initialized_v1_terminal_client(transport, feed, outgoing)
       started = Channel(Nil).new(1)
       release = Channel(Nil).new(1)
       client.on_wait_for_terminal_exit = ->(_params : ACP::Protocol::WaitForTerminalExitParams) do
@@ -8632,5 +8653,205 @@ describe "ACP elicitation extension metadata" do
     next_answer(transport)["result"]["action"].as_s.should eq("accept")
   ensure
     client.try(&.close)
+  end
+end
+
+describe "ACP v1 resource callback capabilities" do
+  it "uses advertised file and terminal capabilities before either callback" do
+    transport = SignalingTransport.new
+    read_only = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    client = ACP::Client.new(transport, client_capabilities: read_only)
+    calls = [] of String
+    client.on_read_text_file = ->(_params : ACP::Protocol::ReadTextFileParams) do
+      calls << "read"
+      ACP::Protocol::ReadTextFileResult.new("fixture")
+    end
+    client.on_write_text_file = ->(_params : ACP::Protocol::WriteTextFileParams) do
+      calls << "write"
+      ACP::Protocol::WriteTextFileResult.new
+    end
+    client.on_agent_request = ->(method : String, _params : JSON::Any) do
+      calls << method
+      JSON.parse("{}")
+    end
+    send_request = ->(id : String, method : String, fields : String) do
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{id.to_json},"method":#{method.to_json},"params":{"sessionId":"s",#{fields}}}))
+      next_answer(transport)
+    end
+
+    read_fields = %("path":"/file")
+    send_request.call("early", "fs/read_text_file", read_fields)["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(build_init_response(request["id"].as_i64))
+    end
+    client.initialize_connection
+    client.client_capabilities = ACP::Protocol::ClientCapabilities.new(
+      fs: ACP::Protocol::FsCapabilities.new(write_text_file: true), terminal: true)
+
+    send_request.call("read", "fs/read_text_file", read_fields)["result"]["content"].as_s.should eq("fixture")
+    {
+      {"fs/write_text_file", %("path":"/file","content":"fixture")},
+      {"terminal/create", %("command":"fixture")},
+      {"terminal/output", %("terminalId":"t")},
+      {"terminal/release", %("terminalId":"t")},
+      {"terminal/wait_for_exit", %("terminalId":"t")},
+      {"terminal/kill", %("terminalId":"t")},
+    }.each do |method, fields|
+      reply = send_request.call(method, method, fields)
+      reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+    end
+    calls.should eq(["read"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "uses the raw initialize offer for generic callbacks" do
+    transport = SignalingTransport.new
+    client = ACP::Client.new(transport)
+    entered = Channel(String).new(2)
+    client.on_agent_request = ->(method : String, _params : JSON::Any) do
+      entered.send(method)
+      JSON.parse(%({"output":"fixture","truncated":false}))
+    end
+    offer = JSON.parse(%({"protocolVersion":1,"clientCapabilities":{"terminal":true}}))
+    terminal_request = %({"jsonrpc":"2.0","id":"terminal","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+    spawn do
+      request = next_answer(transport)
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"].as_i64},"error":{"code":-32603,"message":"Initialization failed"}}))
+    end
+    expect_raises(ACP::JsonRpcError) { client.send_request_raw("initialize", offer) }
+    transport.inject_raw(terminal_request)
+    next_answer(transport)["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+
+    finished = Channel(JSON::Any).new(1)
+    spawn do
+      finished.send(client.send_request_raw("initialize", offer))
+    end
+    request = next_answer(transport)
+    transport.inject_raw(build_init_response(request["id"].as_i64))
+    transport.inject_raw(terminal_request)
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"extension","method":"_test","params":{}}))
+    replies = {next_answer(transport), next_answer(transport)}
+    replies.each { |reply| reply["result"]?.try(&.["output"].as_s?).should eq("fixture") }
+    methods = {next_permission_event(entered), next_permission_event(entered)}
+    methods.to_a.sort.should eq(["_test", "terminal/output"])
+    next_permission_event(finished)["protocolVersion"].as_i.should eq(1)
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps a queued raw initialize offer consistent with the request written to stdio" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedRequestElicitationStdio.new(reader, writer)
+    transport.pause_method = "initialize"
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      JSON.parse(%({"output":"fixture","truncated":false}))
+    end
+
+    offer = JSON.parse(%({"protocolVersion":1,"clientCapabilities":{"terminal":true}}))
+    finished = Channel(JSON::Any).new(1)
+    spawn { finished.send(client.send_request_raw("initialize", offer)) }
+    id = next_permission_event(transport.queued).as_i64
+    offer["clientCapabilities"].as_h["terminal"] = JSON::Any.new(false)
+
+    request = %({"jsonrpc":"2.0","id":"term","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+    feed.puts request
+    JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+
+    transport.release.send(nil)
+    initialize = JSON.parse(outgoing.gets.not_nil!)
+    initialize["params"]["clientCapabilities"]["terminal"].as_bool.should be_true
+    feed.puts build_init_response(id).delete('\n')
+    feed.puts request
+    JSON.parse(outgoing.gets.not_nil!)["result"]["output"].as_s.should eq("fixture")
+    next_permission_event(finished)["protocolVersion"].as_i.should eq(1)
+  ensure
+    transport.try(&.release.close)
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "keeps the latest successful offer when overlapping initialize replies are reordered" do
+    { {true, true}, {false, true}, {false, false} }.each do |(first_reply_first, second_fails)|
+      transport = SignalingTransport.new
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+        JSON.parse(%({"output":"fixture","truncated":false}))
+      end
+      finished = Channel(Bool).new(2)
+      send_offer = ->(terminal : Bool) do
+        spawn do
+          offer = JSON.parse(%({"protocolVersion":1,"clientCapabilities":{"terminal":#{terminal}}}))
+          client.send_request_raw("initialize", offer)
+          finished.send(true)
+        rescue ACP::JsonRpcError
+          finished.send(false)
+        end
+        nil
+      end
+
+      send_offer.call(true)
+      first_id = next_answer(transport)["id"].as_i64
+      send_offer.call(false)
+      second_id = next_answer(transport)["id"].as_i64
+      first = build_init_response(first_id)
+      second = if second_fails
+                 %({"jsonrpc":"2.0","id":#{second_id},"error":{"code":-32603,"message":"Initialization failed"}})
+               else
+                 build_init_response(second_id)
+               end
+      replies = first_reply_first ? {first, second} : {second, first}
+      replies.each { |reply| transport.inject_raw(reply) }
+      outcomes = {next_permission_event(finished), next_permission_event(finished)}
+      outcomes.count(true).should eq(second_fails ? 1 : 2)
+
+      transport.inject_raw(%({"jsonrpc":"2.0","id":"term","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}}))
+      reply = next_answer(transport)
+      if second_fails
+        reply["result"]["output"].as_s.should eq("fixture")
+      else
+        reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "rejects malformed initialize replies before activating the advertised methods" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(terminal: true))
+      client.request_timeout = 2.0
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+        JSON.parse(%({"output":"fixture","truncated":false}))
+      end
+      request = %({"jsonrpc":"2.0","id":"term","method":"terminal/output","params":{"sessionId":"s","terminalId":"t"}})
+      {
+        { %q("jsonrpc":"1.0"), %q("protocolVersion":1) },
+        { %q("jsonrpc":"1.0","jsonrpc":"2.0"), %q("protocolVersion":1) },
+        { %q("jsonrpc":"2.0"), %q("protocolVersion":2,"protocolVersion":1) },
+      }.each do |(header, versions)|
+        finished = Channel(Bool).new(1)
+        spawn do
+          client.initialize_connection
+          finished.send(false)
+        rescue ACP::ProtocolError
+          finished.send(true)
+        end
+        id = JSON.parse(outgoing.gets.not_nil!)["id"].as_i64
+        feed.puts %({#{header},"id":#{id},"result":{#{versions}}})
+        next_permission_event(finished).should be_true
+        feed.puts request
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::METHOD_NOT_FOUND)
+      end
+    ensure
+      client.try(&.close)
+    end
   end
 end

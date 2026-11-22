@@ -253,6 +253,13 @@ module ACP
     private alias PendingResponse = JSON::Any | Protocol::WireFrame | ProtocolError
     private alias ForkCursorGrant = {String, String, UInt64}
 
+    @[Flags]
+    private enum V1ResourceMethods
+      ReadTextFile
+      WriteTextFile
+      Terminal
+    end
+
     private record PendingRequest,
       response : Channel(PendingResponse),
       closing_session : String?,
@@ -264,7 +271,9 @@ module ACP
       on_response : (PendingResponse -> Nil)?,
       armed : Bool,
       retirement_order : UInt64? = nil,
-      exact_response : Bool = false
+      exact_response : Bool = false,
+      v1_resource_offer : V1ResourceMethods? = nil,
+      v1_initialize_order : UInt64 = 0_u64
 
     @pending = {} of String => PendingRequest
 
@@ -280,6 +289,11 @@ module ACP
     @known_session_ids = Set(String).new
     @session_choices : SessionChoices
     @v1_boolean_config_supported = false
+
+    # File and terminal callbacks follow the initialize exchange in receive order.
+    @v1_resource_methods = V1ResourceMethods::None
+    @v1_initialize_write_order = 0_u64
+    @v1_initialize_applied_order = 0_u64
 
     # Negotiated once by the dispatcher before delivering any suggestions.
     @suggestion_content_types : Set(String)?
@@ -297,8 +311,7 @@ module ACP
     # Guarded by `@pending_mutex`.
     @disconnected : Bool = false
 
-    # Matches initialize at the dispatcher boundary so the next frame uses
-    # the newly negotiated protocol and authentication status capability.
+    # Matches v2 initialize replies before dispatching later frames.
     @initialize_request : String?
     @v2_initialization_result : Protocol::V2::InitializeResult?
     @v2_request_sent = false
@@ -1346,6 +1359,10 @@ module ACP
       params : JSON::Any,
       timeout : Float64? = @request_timeout,
     ) : JSON::Any
+      # A queued v1 initialize must send the same offer we record for dispatch.
+      if method == Protocol::AgentMethod::INITIALIZE && !v2_wire?
+        params = JSON.parse(Protocol::WireFrame.encode(params))
+      end
       message_builder = ->(id : Int64) { Protocol.build_request_raw(id, method, params) }
       response_result(send_and_await_response(method, message_builder, timeout), method)
     end
@@ -1532,12 +1549,13 @@ module ACP
 
       fork_cursor = nil
       initialize = method == Protocol::AgentMethod::INITIALIZE
+      resource_offer = v1_resource_offer(params) if initialize && !v2_wire?
       v2_request = v2_wire? && !initialize
       changes_choice = @session_choices.change_method?(method)
       v2_retirement_session = closing_session if v2_wire?
       state_setup = v2_wire? && method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
       entity_cancel = @subagent_registry.try(&.entity_cancel?(method))
-      arm_at_write = v2_wire? || changes_choice || entity_cancel
+      arm_at_write = initialize || v2_wire? || changes_choice || entity_cancel
       @pending_mutex.synchronize do
         raise ConnectionClosedError.new if @disconnected
         check_v2_request_order(initialize) if v2_wire?
@@ -1555,10 +1573,10 @@ module ACP
           @suggestion_loads[id_str] = loading_session
         end
         @pending[id_str] = PendingRequest.new(response_channel, closing_session, close_on_missing, creating_session, fork_source, fork_cursor,
-          on_result, on_response, !arm_at_write, exact_response: exact_response)
-        if initialize
+          on_result, on_response, !arm_at_write, exact_response: exact_response, v1_resource_offer: resource_offer)
+        if initialize && v2_wire?
           @initialize_request = id_str
-          @v2_initialize_armed = false if v2_wire?
+          @v2_initialize_armed = false
         end
       end
       begin
@@ -1590,7 +1608,12 @@ module ACP
                 end
                 @subagent_registry.try(&.root_setup_written(id_str, @session_lifecycle_order)) if state_setup
                 retirement_order = @session_lifecycle_order if v2_retirement_session
-                @pending[id_str] = @pending[id_str].copy_with(armed: true, retirement_order: retirement_order)
+                pending = @pending[id_str]
+                if pending.v1_resource_offer
+                  @v1_initialize_write_order += 1
+                  pending = pending.copy_with(v1_initialize_order: @v1_initialize_write_order)
+                end
+                @pending[id_str] = pending.copy_with(armed: true, retirement_order: retirement_order)
               end
             end
             mark_v2_request_sent if v2_request
@@ -2148,11 +2171,8 @@ module ACP
           if (grant = request.fork_cursor) && response_error_code(msg) == JsonRpcError::INVALID_PARAMS
             @cursor_registry.try(&.reject_fork(*grant))
           end
-          if !v2_wire? && @initialize_request == id_str
-            @initialize_request = nil
-            if result = Protocol::WireFrame.result_json(msg, wire_frame)
-              observe_initialize_response(result)
-            end
+          if (offer = request.v1_resource_offer) && !malformed
+            response = observe_v1_initialize_response(msg, wire_frame, offer, request.v1_initialize_order) || response
           end
           if error = created_session_response_error(request.creating_session, request.fork_source, msg, wire_frame)
             response = error
@@ -2161,7 +2181,7 @@ module ACP
             retired_setup = @subagent_registry.try(&.retired_setup?(id_str))
             @subagent_registry.try(&.request_finished(id_str, msg, wire_frame))
             request.on_response.try(&.call(initializing && wire_frame ? wire_frame : response))
-            if !retired_setup && (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
+            if !response.is_a?(ProtocolError) && !retired_setup && (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
             end
           end
@@ -2293,9 +2313,21 @@ module ACP
     end
 
     # Runs under the pending-request mutex before releasing the initialize waiter.
-    private def observe_initialize_response(result : String) : Nil
-      typed = Protocol::InitializeResult.from_json(result)
-      if ACP.supports_protocol_version?(typed.protocol_version)
+    private def observe_v1_initialize_response(msg : JSON::Any, frame : Protocol::WireFrame?,
+                                               resource_offer : V1ResourceMethods, write_order : UInt64) : ProtocolError?
+      unless msg["jsonrpc"]?.try(&.as_s?) == "2.0" &&
+             (!frame || Protocol::WireFrame.repeated_members(frame.json, "jsonrpc").empty?)
+        return ProtocolError.new("Invalid JSON-RPC header in ACP v1 initialize reply")
+      end
+      return unless result = Protocol::WireFrame.result_json(msg, frame)
+      unless Protocol::WireFrame.repeated_members(result, "protocolVersion").empty?
+        return ProtocolError.new("Ambiguous protocolVersion in ACP v1 initialize result")
+      end
+
+      typed = decode_result_json(Protocol::InitializeResult, result, Protocol::AgentMethod::INITIALIZE)
+      if ACP.supports_protocol_version?(typed.protocol_version) && write_order > @v1_initialize_applied_order
+        @v1_initialize_applied_order = write_order
+        @v1_resource_methods = resource_offer
         @mcp_acp_supported = typed.agent_capabilities.mcp_capabilities.try(&.acp?) || false
         @auth_status_supported = !typed.agent_capabilities.auth.try(&.status).nil?
         prompt = typed.agent_capabilities.prompt_capabilities
@@ -2303,7 +2335,32 @@ module ACP
           image: prompt.try(&.image?) || false, audio: prompt.try(&.audio?) || false,
           embedded_context: prompt.try(&.embedded_context?) || false)
       end
-    rescue JSON::ParseException
+      nil
+    rescue ex : ProtocolError
+      ex
+    end
+
+    private def v1_resource_offer(params : Hash(String, JSON::Any)?) : V1ResourceMethods
+      capabilities = params.try(&.["clientCapabilities"]?).try(&.as_h?)
+      files = capabilities.try(&.["fs"]?).try(&.as_h?)
+      offered = V1ResourceMethods::None
+      offered |= V1ResourceMethods::ReadTextFile if files.try(&.["readTextFile"]?).try(&.as_bool?)
+      offered |= V1ResourceMethods::WriteTextFile if files.try(&.["writeTextFile"]?).try(&.as_bool?)
+      offered |= V1ResourceMethods::Terminal if capabilities.try(&.["terminal"]?).try(&.as_bool?)
+      offered
+    end
+
+    private def v1_resource_requirement(method : String) : V1ResourceMethods?
+      case method
+      when Protocol::ClientMethod::FS_READ_TEXT_FILE
+        V1ResourceMethods::ReadTextFile
+      when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
+        V1ResourceMethods::WriteTextFile
+      when Protocol::ClientMethod::TERMINAL_CREATE, Protocol::ClientMethod::TERMINAL_OUTPUT,
+           Protocol::ClientMethod::TERMINAL_RELEASE, Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT,
+           Protocol::ClientMethod::TERMINAL_KILL
+        V1ResourceMethods::Terminal
+      end
     end
 
     # Handles a method call from the agent (e.g., session/request_permission).
@@ -2346,7 +2403,10 @@ module ACP
       end
 
       params_json = wire_frame.try(&.params_json)
-      if wire_frame && method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+      if !v2_wire? && (required = v1_resource_requirement(method_name)) && !@v1_resource_methods.includes?(required)
+        rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::METHOD_NOT_FOUND,
+          "Client did not advertise support for: #{method_name}", JSON::Any.new(method_name))
+      elsif wire_frame && method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
         exact_params = params_json || Protocol::WireFrame.field(wire_frame.json, "params")
         if ambiguous_permission_request?(wire_frame, exact_params)
           rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous permission request fields")
