@@ -2097,8 +2097,12 @@ private class QueuedChoiceStateTransport < ChoiceStateTransport
   getter queued = Channel(Int64).new(1)
   getter write = Channel(Nil).new(1)
 
+  def initialize(@queued_method : String = "session/set_config_option")
+    super()
+  end
+
   def send_checked(message : Hash(String, JSON::Any), &preflight : -> Nil) : Nil
-    if message["method"]?.try(&.as_s?) == "session/set_config_option"
+    if message["method"]?.try(&.as_s?) == @queued_method
       @queued.send(message["id"].as_i64)
       @write.receive
     end
@@ -6983,12 +6987,16 @@ describe "ACP JSON-RPC response ID types" do
   end
 end
 
-private class PendingMcpReplyTransport < ChoiceStateTransport
+private class PausedReplyTransport < ChoiceStateTransport
   getter finishing = Channel(Nil).new(1)
   getter release = Channel(Nil).new(1)
 
+  def initialize(@paused_id : String = "finishing")
+    super()
+  end
+
   def send(message : Hash(String, JSON::Any)) : Nil
-    if message["id"]?.try(&.as_s?) == "finishing"
+    if message["id"]?.try(&.as_s?) == @paused_id
       @finishing.send(nil)
       @release.receive?
     end
@@ -7175,7 +7183,7 @@ describe "ACP cancellation request identities" do
   end
 
   it "ignores a cancellation after the native MCP terminal reply is selected" do
-    transport = PendingMcpReplyTransport.new
+    transport = PausedReplyTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{"mcp":{"acp":{}}}}})
     transport.replies["session/new"] = %("result":{"sessionId":"root"})
     client = ACP::V2::Client.new(transport)
@@ -9172,5 +9180,289 @@ describe "ACP v1 generic resource replies" do
     ensure
       client.try(&.close)
     end
+  end
+end
+
+describe "ACP v1 session workspaces" do
+  it "makes the attached roots available to file callbacks and retires each scope independently" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"additionalDirectories":{},"close":{},"delete":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"first"})
+    caps = ACP::Protocol::ClientCapabilities.new(fs: ACP::Protocol::FsCapabilities.new(read_text_file: true))
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    next_answer(transport)
+    client.on_read_text_file = ->(params : ACP::Protocol::ReadTextFileParams) do
+      workspace = client.session_workspace(params.session_id)
+      ACP::Protocol::ReadTextFileResult.new(workspace.try { |roots| ([roots.cwd] + roots.additional_directories).join(",") } || "unknown")
+    end
+
+    transport.after_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      if method == "session/new"
+        transport.inject_raw(%({"jsonrpc":"2.0","id":"read","method":"fs/read_text_file","params":{"sessionId":"first","path":"/work/file"}}))
+      end
+    end
+    client.session_new("/work", additional_directories: ["/docs"])
+    next_answer(transport)["method"].should eq("session/new")
+    next_answer(transport)["result"]["content"].should eq("/work,/docs")
+    transport.after_reply = nil
+
+    transport.replies["session/new"] = %("result":{"sessionId":"second"})
+    client.session_new("C:/other")
+    first = client.session_workspace("first").not_nil!
+    first.additional_directories.clear
+    client.session_workspace("first").should eq(ACP::SessionWorkspace.new("/work", ["/docs"]))
+    client.session_workspace("second").should eq(ACP::SessionWorkspace.new("C:/other", [] of String))
+    client.session_workspace("unattached").should be_nil
+
+    transport.replies["session/delete"] = %("result":{})
+    client.session_delete("first")
+    client.session_workspace("first").should_not be_nil
+    transport.replies["session/close"] = %("error":{"code":-32002,"message":"Already closed"})
+    client.session_close("first")
+    client.session_workspace("first").should be_nil
+    client.session_workspace("second").should_not be_nil
+    client.forget_session("second").should be_true
+    client.session_workspace("second").should be_nil
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps the confirmed roots during raw setup and replaces the full set only on success" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"additionalDirectories":{},"resume":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.send_request_raw("session/new", JSON.parse(%({"cwd":"/work","additionalDirectories":["/extra"],"mcpServers":[]})))
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+
+    seen = nil
+    transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      seen = client.session_workspace("root") if method == "session/load"
+      nil
+    end
+    transport.replies["session/load"] = %("error":{"code":-32602,"message":"Rejected"})
+    params = JSON.parse(%({"sessionId":"root","cwd":"/work","mcpServers":[]}))
+    expect_raises(ACP::JsonRpcError, "Rejected") { client.send_request_raw("session/load", params) }
+    seen.should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+
+    transport.replies["session/load"] = %("result":{})
+    client.send_request_raw("session/load", params)
+    seen.should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", [] of String))
+
+    transport.replies["session/resume"] = %("result":{})
+    client.send_request_raw("session/resume", JSON.parse(%({"sessionId":"root","cwd":"/work","additionalDirectories":["/valid",123],"mcpServers":[]})))
+    client.session_workspace("root").should be_nil
+    client.send_request_raw("session/resume", JSON.parse(%({"sessionId":"root","cwd":"/work","additionalDirectories":null,"mcpServers":[]})))
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", [] of String))
+
+    transport.replies.delete("session/resume")
+    client.request_timeout = 0.01
+    expect_raises(ACP::RequestTimeoutError) { client.send_request_raw("session/resume", params) }
+    client.session_workspace("root").should be_nil
+
+    client.request_timeout = 2.0
+    transport.replies["session/resume"] = %("result":{})
+    client.send_request_raw("session/resume", params)
+    client.session_workspace("root").should_not be_nil
+    client.close
+    client.session_workspace("root").should be_nil
+  ensure
+    client.try(&.close)
+  end
+  it "records the sent workspace only when a queued request can receive a reply" do
+    transport = QueuedChoiceStateTransport.new("session/new")
+    transport.replies["initialize"] = %("result":{"protocolVersion":1})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    params = JSON.parse(%({"cwd":"/original","additionalDirectories":["/extra"],"mcpServers":[]}))
+    completed = Channel(JSON::Any | Exception).new(1)
+    spawn do
+      completed.send(client.send_request_raw("session/new", params))
+    rescue ex
+      completed.send(ex)
+    end
+
+    queued_id = select
+    when id = transport.queued.receive
+      id
+    when timeout(2.seconds)
+      fail "session setup did not reach the send queue"
+    end
+    params.as_h["cwd"] = JSON::Any.new("/edited")
+    params["additionalDirectories"].as_a.clear
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{queued_id},"result":{"sessionId":"premature"}}))
+    choice_state_barrier(client, transport)
+    client.session_workspace("premature").should be_nil
+    transport.write.send(nil)
+
+    select
+    when result = completed.receive
+      result.should eq(JSON.parse(%({"sessionId":"root"})))
+    when timeout(2.seconds)
+      fail "session setup did not finish"
+    end
+    request = transport.sent_messages.find! { |message| message["method"]?.try(&.as_s?) == "session/new" }
+    request["params"]["cwd"].should eq("/original")
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/original", ["/extra"]))
+  ensure
+    transport.try(&.write.close)
+    client.try(&.close)
+  end
+  it "keeps confirmed roots when stdio setup replies have an invalid JSON-RPC header" do
+    with_wide_stdio do |transport, feed, outgoing|
+      cursors = ACP::Protocol::ClientSessionCapabilities.new(cursors: ACP::Protocol::SessionCursorsCapabilities.new)
+      caps = ACP::Protocol::ClientCapabilities.new(session: cursors)
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"additionalDirectories":{}}}}))
+      client.initialize_connection
+
+      spawn do
+        new_request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"id":#{new_request["id"]},"result":{"sessionId":"unconfirmed"}})
+      end
+      expect_raises(ACP::ProtocolError, /Invalid JSON-RPC header/) { client.session_new("/work") }
+      client.session_workspace("unconfirmed").should be_nil
+
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work", additional_directories: ["/extra"])
+      bad_headers = [%("jsonrpc":"1.0"), %("jsonrpc":"1.0","jsonrpc":"2.0")]
+      bad_headers.each do |header|
+        spawn do
+          load_request = JSON.parse(outgoing.gets.not_nil!)
+          feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"cursor_update","cursorId":"replayed"}}})
+          feed.puts %({#{header},"id":#{load_request["id"]},"result":{}})
+        end
+        expect_raises(ACP::ProtocolError, /JSON-RPC/) { client.session_load("root", "/work") }
+        client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+        client.session_cursor("root", "replayed").should be_nil
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "does not give a malformed raw fork authority over an existing workspace" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"fork":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/fork"] = %("result":{"sessionId":"root"})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    client.send_request_raw("session/fork", JSON.parse(%({"cwd":"/other","mcpServers":[]})))
+    client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", [] of String))
+
+    transport.replies["session/fork"] = %("result":{"sessionId":"forked"})
+    client.session_fork("root", "/forked")
+    client.session_workspace("forked").should eq(ACP::SessionWorkspace.new("/forked", [] of String))
+  ensure
+    client.try(&.close)
+  end
+
+  {"close", "forget"}.each do |retirement|
+    it "does not restore a retired workspace when an older load replies after #{retirement}" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{}}}})
+      transport.replies["session/new"] = %("result":{"sessionId":"root"})
+      transport.replies["session/close"] = %("result":{})
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work")
+      next_answer(transport)
+      next_answer(transport)
+
+      completed = Channel(Exception?).new(1)
+      spawn do
+        client.session_load("root", "/work")
+        completed.send(nil)
+      rescue ex
+        completed.send(ex)
+      end
+      load = next_answer(transport)
+      load["method"].should eq("session/load")
+      if retirement == "close"
+        client.session_close("root")
+      else
+        client.forget_session("root").should be_true
+      end
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{load["id"]},"result":{}}))
+
+      select
+      when error = completed.receive
+        error.should be_nil
+      when timeout(2.seconds)
+        fail "session load did not finish"
+      end
+      client.session_workspace("root").should be_nil
+      client.session_id.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "retires on a late close reply and preserves a workspace from a newer attachment" do
+    transport = PausedReplyTransport.new("permission")
+    transport.replies["initialize"] = %("result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"close":{},"additionalDirectories":{}}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/load"] = %("result":{})
+    client = ACP::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+
+    permission_started = Channel(Nil).new(1)
+    permission_release = Channel(Nil).new(1)
+    client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+      permission_started.send(nil)
+      permission_release.receive?
+      JSON.parse(ACP::Protocol::RequestPermissionResult.selected("allow").to_json)
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"permission","method":"session/request_permission","params":{"sessionId":"root","toolCall":{"toolCallId":"tool"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}))
+    next_permission_event(permission_started)
+
+    {false, true}.each do |reattach|
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) { client.session_close("root") }
+      close = next_answer(transport)
+      close["method"].should eq("session/close")
+      next_answer(transport)["method"].should eq("$/cancel_request")
+      client.session_workspace("root").should_not be_nil
+
+      client.request_timeout = 2.0
+      if reattach
+        client.session_load("root", "/work", additional_directories: ["/extra"])
+        next_answer(transport)
+      end
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{close["id"]},"result":{}}))
+      next_permission_event(transport.finishing) unless reattach
+      choice_state_barrier(client, transport)
+      next_answer(transport)
+      if reattach
+        client.session_workspace("root").should eq(ACP::SessionWorkspace.new("/work", ["/extra"]))
+      else
+        client.session_workspace("root").should be_nil
+        transport.release.send(nil)
+        next_answer(transport)["result"]["outcome"]["outcome"].should eq("cancelled")
+        client.session_load("root", "/work")
+        next_answer(transport)
+      end
+    end
+  ensure
+    permission_release.try(&.close)
+    transport.try(&.release.close)
+    client.try(&.close)
   end
 end

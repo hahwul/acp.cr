@@ -801,6 +801,20 @@ parameters provide exact extension metadata through `meta_raw`, and
 [ACP v1 File System](https://agentclientprotocol.com/protocol/v1/file-system#checking-support)
 [ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#checking-support)
 
+Call `client.session_workspace(params.session_id)` to look up the Agent-side
+`cwd` and `additional_directories` in either callback. ACP v1 records the roots from
+successful new, load, resume, and fork replies, including raw requests and
+sessions without subagents. A successful reattachment replaces the root set.
+A reattachment timeout clears the lookup until a setup succeeds. A confirmed
+close or archive, local `forget_session`, and disconnection also clear it.
+The lookup returns `nil` when the workspace is unknown. Announced subagents can
+inherit roots from their parent.
+
+Apply your application's access policy using these roots. The ACP file system
+spec recommends checking resolved paths at the time of use and comparing
+them by path component.
+[ACP v1 Workspace Root Security](https://agentclientprotocol.com/protocol/v1/session-setup#workspace-root-security)
+
 Use `meta_raw=` to attach exact JSON metadata to typed file and terminal
 results, including `TerminalExitStatus`. Stdio preserves the original
 number tokens. Custom transports that cannot preserve an exact reply
