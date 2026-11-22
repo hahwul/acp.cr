@@ -807,6 +807,12 @@ number tokens. Custom transports that cannot preserve an exact reply
 return `-32603` to the Agent.
 [ACP v1 Extension Metadata](https://agentclientprotocol.com/protocol/v1/extensibility#the-_meta-field)
 
+For ACP v1 file and terminal methods, `on_agent_request` must return a
+result object with the method's required fields. Return `{}` for an
+empty successful acknowledgement. Malformed results return `-32603`.
+Additional result fields and explicit `ACP::JsonRpcError` replies pass
+through.
+
 | Handler | Params Type | Result Type | Description |
 |---------|-------------|-------------|-------------|
 | `on_read_text_file` | `ReadTextFileParams` | `ReadTextFileResult` | Handle `fs/read_text_file` |
