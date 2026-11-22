@@ -3947,7 +3947,7 @@ module ACP
       if suggestion_types && (suggestions = update_params.update.as?(Protocol::PromptSuggestionsUpdate))
         suggestions.suggestions.select! { |suggestion| suggestion.allowed?(suggestion_types) }
         unless handler
-          list = JSON.parse(Protocol::WireFrame.encode(suggestions.suggestions))
+          list = Protocol::PromptSuggestionList(Protocol::PromptSuggestion).notification_projection(suggestions.suggestions)
           deliver_suggestion_notification(JSON::Any.new(raw_params), params_json, list)
           return
         end

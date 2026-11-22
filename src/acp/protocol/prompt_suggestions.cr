@@ -1,7 +1,6 @@
 require "./raw_json"
 require "set"
 require "./content_block"
-require "./optional_metadata"
 require "./optional_capability"
 
 module ACP
@@ -67,26 +66,74 @@ module ACP
       def_equals_and_hash @image, @audio, @embedded_context, metadata_comparison
     end
 
+    private struct SuggestionPrompt(Block)
+      getter blocks : Array(Block)
+      @wire : PreservedJson?
+
+      def initialize(@blocks : Array(Block), @wire : PreservedJson? = nil)
+      end
+
+      def self.new(pull : JSON::PullParser) : self
+        {% if Block == JSON::Any %}
+          wire = ContentBlockArray.from_json(pull)
+          new(wire.value.not_nil!.as_a, wire)
+        {% else %}
+          new(Array(Block).new(pull))
+        {% end %}
+      end
+
+      def raw : RawJson
+        @wire.try(&.raw) || RawJson.new(JSON::PullParser.new(WireFrame.encode(@blocks)))
+      end
+
+      def to_json(json : JSON::Builder) : Nil
+        if wire = @wire
+          wire.to_json(json)
+        else
+          @blocks.to_json(json)
+        end
+      end
+    end
+
     # :nodoc:
     struct PromptSuggestionOf(Block)
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Ordered content blocks ready to use in a prompt after user acceptance.
-      getter prompt : Array(Block)
-
-      # Extension metadata specific to this suggestion.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      @[JSON::Field(key: "prompt")]
+      @prompt_wire : SuggestionPrompt(Block)
 
       # Creates a suggestion from its complete prompt.
-      def initialize(@prompt : Array(Block), @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(prompt : Array(Block), meta : Hash(String, JSON::Any)? = nil)
+        @prompt_wire = SuggestionPrompt(Block).new(prompt)
+        self.meta = meta
+      end
+
+      # Ordered content blocks for display.
+      def prompt : Array(Block)
+        @prompt_wire.blocks
+      end
+
+      # Serializes the typed v1 blocks or returns the exact v2 block JSON.
+      def prompt_raw : RawJson
+        @prompt_wire.raw
+      end
+
+      def_equals_and_hash comparable_prompt, metadata_comparison
+
+      protected def comparable_prompt
+        {% if Block == JSON::Any %}
+          wire = prompt_raw
+          wire.to_json_any? || wire
+        {% else %}
+          prompt
+        {% end %}
       end
 
       # :nodoc:
       def usable? : Bool
         has_content = false
-        @prompt.each do |value|
-          block = parse_block(value)
+        each_block do |block|
           case block
           when TextContentBlock
             has_content ||= !block.text.blank?
@@ -98,21 +145,21 @@ module ACP
           end
         end
         has_content
-      rescue JSON::Error
+      rescue JSON::Error | ArgumentError
         false
       end
 
       # :nodoc:
       def allowed?(types : Set(String)) : Bool
-        @prompt.all? { |block| types.includes?(block_type(block)) }
+        prompt.all? { |block| types.includes?(block_type(block)) }
       end
 
-      private def parse_block(block : ContentBlock) : ContentBlock
-        block
-      end
-
-      private def parse_block(block : JSON::Any) : ContentBlock
-        ContentBlock.from_json(WireFrame.encode(block))
+      private def each_block(&)
+        {% if Block == JSON::Any %}
+          prompt_raw.elements?.not_nil!.each { |block| yield ContentBlock.from_v2_prompt(block) }
+        {% else %}
+          prompt.each { |block| yield block }
+        {% end %}
       end
 
       private def block_type(block : ContentBlock) : String
@@ -139,14 +186,30 @@ module ACP
         candidates
       end
 
-      def self.decode_usable(raw : String, *, unique_members : Bool = false) : T?
-        return if unique_members && !WireFrame.unique_members?(raw)
+      def self.decode_usable(raw : String) : T?
+        # A candidate must have the same meaning when it is sent back.
+        return unless WireFrame.unique_members?(raw)
 
         suggestion = T.from_json(raw)
         suggestion if suggestion.usable?
       rescue JSON::Error
         # Keep the remaining suggestions when one cannot be used.
         nil
+      end
+
+      # Projects a full replacement for generic callbacks, which can only
+      # offer candidates whose complete prompt fits in JSON::Any.
+      def self.notification_projection(suggestions : Array(T)) : JSON::Any
+        values = suggestions.compact_map do |suggestion|
+          next unless prompt = suggestion.prompt_raw.to_json_any?
+
+          fields = {"prompt" => prompt}
+          if meta = suggestion.meta_raw.try(&.to_json_any?)
+            fields["_meta"] = meta
+          end
+          JSON::Any.new(fields)
+        end
+        JSON::Any.new(values)
       end
 
       def self.to_json(values : Array(T), json : JSON::Builder) : Nil

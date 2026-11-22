@@ -5889,7 +5889,7 @@ describe "ACP v2 exact session update delivery" do
     end
   end
 
-  it "keeps original JSON for suggestions that pass capability filtering" do
+  it "keeps and resubmits exact prompt suggestions that pass capability filtering" do
     with_wide_stdio do |transport, feed, outgoing|
       suggestions = ACP::Protocol::PromptSuggestionsCapabilities.new
       caps = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: suggestions))
@@ -5901,18 +5901,120 @@ describe "ACP v2 exact session update delivery" do
       end
       initialize_wide_v2(client, feed, outgoing, session_id: "s")
 
-      allowed = %({"prompt":[{"type":"text","text":"Keep"}],"futureField":0.4321098765432109876,"_meta":{"example.test/count":18446744073709551615}})
+      meta = %({"example.test/count":18446744073709551615,"example.test/fraction":0.1234567890123456789})
+      link = %({"type":"resource_link","uri":"file:///work/notes","name":"Notes","size":18446744073709551615})
+      blocks = %([{"type":"text","text":"Keep","_meta":#{meta},"futureField":[18446744073709551615]},#{link}])
+      allowed = %({"prompt":#{blocks},"futureField":0.4321098765432109876,"_meta":#{meta}})
       disallowed = %({"prompt":[{"type":"image","mimeType":"image/png","data":"YQ=="}]})
       ambiguous = %({"prompt":[{"type":"image","mimeType":"image/png","data":"YQ==","type":"text","text":"Ambiguous"}]})
-      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[#{allowed},#{disallowed},#{ambiguous}]}}})
+      invalid = %({"prompt":[{"type":"resource_link","uri":"file:///work/notes","name":"Notes","size":-1}]})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[#{allowed},#{disallowed},#{ambiguous},#{invalid}],"_meta":#{meta}}}})
 
       filtered = next_exact_session_update(observed)
       filtered.raw.field("update").not_nil!.field("suggestions").not_nil!.json.should eq("[#{allowed}]")
-      filtered.update.json_unmapped["suggestions"].should eq(JSON.parse(%([{"prompt":[{"type":"text","text":"Keep"}]}])))
-      surviving = filtered.update.typed.as(ACP::Protocol::V2::PromptSuggestionsUpdate).suggestions
+      filtered.update.json_unmapped["suggestions"][0]["prompt"][0]["text"].should eq("Keep")
+      update = filtered.update.typed.as(ACP::Protocol::V2::PromptSuggestionsUpdate)
+      surviving = update.suggestions
       surviving.map { |suggestion| suggestion.prompt.first["text"].as_s }.should eq(["Keep"])
+      typed = ACP::Protocol::RawJson.from_json(update.to_json)
+      typed.field("_meta").try(&.json).should eq(meta)
+      candidate = typed.field("suggestions").not_nil!.elements?.not_nil!.first
+      candidate.field("_meta").try(&.json).should eq(meta)
+      candidate.field("prompt").try(&.json).should eq(blocks)
+
+      params = ACP::Protocol::V2::SessionPromptParams.new("s", surviving.first.prompt_raw)
+      sent = capture_request_params(feed, outgoing, %({"messageId":"accepted"}))
+      client.session_prompt(params).message_id.should eq("accepted")
+      next_permission_event(sent).field("prompt").try(&.json).should eq(blocks)
+
+      surviving.first.prompt.first.as_h["text"] = JSON::Any.new("Edited")
+      surviving.first.prompt_raw.json.should eq(blocks.sub(%("Keep"), %("Edited")))
+
+      edited = filtered.update
+      edited.json_unmapped["suggestions"][0]["prompt"][0].as_h["text"] = JSON::Any.new("Edited")
+      ACP::Protocol::RawJson.from_json(edited.to_json).field("suggestions").try(&.json).should eq("[#{allowed.sub(%("Keep"), %("Edited"))}]")
     ensure
       client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v1 exact prompt suggestions" do
+  it "keeps metadata on the update, candidate, and submitted content" do
+    with_wide_stdio do |transport, feed, outgoing|
+      capabilities = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(
+        prompt_suggestions: ACP::Protocol::PromptSuggestionsCapabilities.new))
+      client = ACP::Client.new(transport, client_capabilities: capabilities)
+      observed = Channel(ACP::Protocol::PromptSuggestionsUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        observed.send(note.update.as(ACP::Protocol::PromptSuggestionsUpdate))
+        nil
+      end
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"s"}))
+      client.session_new("/work")
+
+      meta = %({"example.test/count":18446744073709551615,"example.test/fraction":0.1234567890123456789})
+      blocks = %([{"type":"text","text":"Keep","_meta":#{meta}}])
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update","suggestions":[{"prompt":#{blocks},"_meta":#{meta}}],"_meta":#{meta}}}})
+      update = next_permission_event(observed)
+      update_json = ACP::Protocol::RawJson.from_json(update.to_json)
+      update_json.field("_meta").try(&.json).should eq(meta)
+      candidate = update_json.field("suggestions").not_nil!.elements?.not_nil!.first
+      candidate.field("_meta").try(&.json).should eq(meta)
+
+      sent = capture_request_params(feed, outgoing, %({"stopReason":"end_turn"}))
+      client.session_prompt(update.suggestions.first.prompt).stop_reason.should eq("end_turn")
+      submitted = next_permission_event(sent).field("prompt").not_nil!.elements?.not_nil!.first
+      submitted.field("type").try(&.as_s?).should eq("text")
+      submitted.field("text").try(&.as_s?).should eq("Keep")
+      submitted.field("_meta").try(&.json).should eq(meta)
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP exact prompt suggestions in generic notifications" do
+  {"v1", "v2"}.each do |version|
+    it "delivers generic replacements when only some suggested prompts fit in JSON::Any on #{version}" do
+      with_wide_stdio do |transport, feed, outgoing|
+        media = ACP::Protocol::PromptSuggestionsCapabilities.new
+        if version == "v1"
+          caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(prompt_suggestions: media))
+          client = ACP::Client.new(transport, client_capabilities: caps)
+          result = %({"protocolVersion":1})
+        else
+          caps = ACP::Protocol::V2::ClientCapabilities.new(session: ACP::Protocol::V2::ClientSessionCapabilities.new(prompt_suggestions: media))
+          client = ACP::V2::Client.new(transport, capabilities: caps)
+          result = %({"protocolVersion":2,"info":{"name":"fixture","version":"1"}})
+        end
+        received = Channel(Tuple(String, JSON::Any?)).new(3)
+        client.on_notification = ->(method : String, params : JSON::Any?) do
+          received.send({method, params})
+          nil
+        end
+        answer_identity_request(feed, outgoing, result)
+        client.initialize_connection
+
+        context = %("jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"prompt_suggestions_update")
+        metadata = %({"example.test/count":18446744073709551615})
+        wide = %({"prompt":[{"type":"text","text":"Typed only","_meta":#{metadata}}]})
+        narrow_prompt = %([{"type":"text","text":"Keep"}])
+        narrow = %({"prompt":#{narrow_prompt},"_meta":#{metadata}})
+        feed.puts %({#{context},"suggestions":[#{wide},#{narrow}]}}})
+        method, params = next_permission_event(received)
+        method.should eq("session/update")
+        params.not_nil!["update"]["suggestions"].should eq(JSON.parse(%([{"prompt":#{narrow_prompt}}])))
+
+        feed.puts %({#{context},"suggestions":[#{wide}]}}})
+        method, params = next_permission_event(received)
+        method.should eq("session/update")
+        params.not_nil!["update"]["suggestions"].as_a.should be_empty
+      ensure
+        client.try(&.close)
+      end
     end
   end
 end
