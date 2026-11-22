@@ -594,6 +594,26 @@ module ACP
     end
 
     # :nodoc:
+    module WireValueEquality
+      def_equals_and_hash comparison_value
+
+      protected def comparison_value
+        comparable_json(self)
+      end
+
+      private def comparable_json(value) : JSON::Any | String
+        # Keep ordinary JSON::Any comparisons while comparing exact JSON
+        # when some values cannot be represented.
+        wire = WireFrame.encode(value)
+        begin
+          JSON.parse(wire)
+        rescue JSON::ParseException
+          wire
+        end
+      end
+    end
+
+    # :nodoc:
     module OptionalRawMetadata
       def self.from_json(pull : JSON::PullParser) : RawJson?
         return RawJson.new(pull) if pull.kind.begin_object?

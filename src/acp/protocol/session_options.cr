@@ -189,26 +189,6 @@ module ACP
     end
 
     # :nodoc:
-    module ConfigOptionEquality
-      def_equals_and_hash comparison_value
-
-      protected def comparison_value
-        comparable_json(self)
-      end
-
-      private def comparable_json(value) : JSON::Any | String
-        # Match the former JSON::Any comparison for representable choices.
-        # Fall back to the exact wire value when a number exceeds that range.
-        wire = WireFrame.encode(value)
-        begin
-          JSON.parse(wire)
-        rescue JSON::ParseException
-          wire
-        end
-      end
-    end
-
-    # :nodoc:
     module OptionalOptionDescription
       def self.from_json(pull : JSON::PullParser) : String?
         return pull.read_string if pull.kind.string?

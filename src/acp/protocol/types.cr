@@ -385,6 +385,8 @@ module ACP
     # A mode the agent can operate in.
     struct SessionMode
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Unique identifier for this mode (required).
       property id : String
@@ -393,13 +395,12 @@ module ACP
       property name : String
 
       # Optional description providing more details about what this mode does.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityString)]
       property description : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@id : String, @name : String, @description : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates an advertised mode with optional details.
+      def initialize(@id : String, @name : String, @description : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # Backward-compatible alias for `name`.
@@ -414,24 +415,35 @@ module ACP
     # The set of modes and the one currently active.
     struct SessionModeState
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
+
+      # :nodoc:
+      module ModeList
+        def self.from_json(pull : JSON::PullParser) : Array(SessionMode)
+          OptionalContentList(SessionMode).from_json(pull) || [] of SessionMode
+        end
+
+        def self.to_json(value : Array(SessionMode), json : JSON::Builder) : Nil
+          value.to_json(json)
+        end
+      end
 
       # The current mode the Agent is in.
       @[JSON::Field(key: "currentModeId")]
       property current_mode_id : String
 
       # The set of modes that the Agent can operate in.
-      @[JSON::Field(key: "availableModes")]
+      @[JSON::Field(key: "availableModes", converter: ::ACP::Protocol::SessionModeState::ModeList)]
       property available_modes : Array(SessionMode) = [] of SessionMode
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a snapshot of the current and available modes.
       def initialize(
         @current_mode_id : String,
         @available_modes : Array(SessionMode) = [] of SessionMode,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -476,7 +488,7 @@ module ACP
     struct ConfigOptionGroup
       include JSON::Serializable
       include LosslessMetadata
-      include ConfigOptionEquality
+      include WireValueEquality
 
       # Unique identifier for this group (required). Per the ACP schema
       # (`SessionConfigSelectGroup`) this is carried on the wire under the key
@@ -519,7 +531,7 @@ module ACP
     struct ConfigOption
       include JSON::Serializable
       include LosslessMetadata
-      include ConfigOptionEquality
+      include WireValueEquality
 
       # Unique identifier for this config option (required).
       # Maps to the Rust SDK's `SessionConfigId`.
@@ -1295,12 +1307,12 @@ module ACP
     # Result of the `session/set_mode` method. Empty on success.
     struct SessionSetModeResult
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a mode change acknowledgement with optional metadata.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

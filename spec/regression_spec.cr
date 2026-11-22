@@ -7122,6 +7122,87 @@ describe "ACP v1 exact session and turn replies" do
   end
 end
 
+describe "ACP v1 exact session modes" do
+  {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
+    it "preserves a #{label} in mode snapshots and live updates" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::Client.new(transport)
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"options":{},"resume":{}}}}))
+        client.initialize_connection
+
+        metadata = %({"example.test/samples":[{"number":#{number}}]})
+        list = %([{"id":"ask","name":"Ask","_meta":#{metadata}},{"id":false,"name":"Invalid"},{"id":"code","name":"Code"}])
+        modes = %({"currentModeId":"ask","availableModes":#{list},"_meta":#{metadata}})
+        answer_identity_request(feed, outgoing, %({"modes":#{modes}}))
+        preview = client.session_options("/work").modes.not_nil!
+        preview.available_modes.map(&.id).should eq(["ask", "code"])
+        preview.meta_raw.not_nil!.json.should eq(metadata)
+        preview.available_modes.first.meta_raw.not_nil!.json.should eq(metadata)
+        check_snapshot = ->(snapshot : ACP::Protocol::SessionModeState?) do
+          current = snapshot.not_nil!
+          current.should eq(preview)
+          current.hash.should eq(preview.hash)
+          current.meta_raw.not_nil!.json.should eq(metadata)
+          current.available_modes.first.meta_raw.not_nil!.json.should eq(metadata)
+          nil
+        end
+
+        answer_identity_request(feed, outgoing, %({"sessionId":"root","modes":#{modes}}))
+        check_snapshot.call(client.session_new("/work").modes)
+        answer_identity_request(feed, outgoing, %({"modes":#{modes}}))
+        check_snapshot.call(client.session_load("root", "/work").modes)
+        answer_identity_request(feed, outgoing, %({"modes":#{modes}}))
+        check_snapshot.call(client.session_resume("root", "/work").modes)
+        check_snapshot.call(client.session_modes)
+
+        acknowledgement = %({"_meta":#{metadata}})
+        ACP::Protocol::SessionSetModeResult.from_json(acknowledgement).meta_raw.not_nil!.json.should eq(metadata)
+        answer_identity_request(feed, outgoing, acknowledgement)
+        client.session_set_mode("code")
+        client.session_modes.not_nil!.current_mode_id.should eq("code")
+
+        updates = Channel(ACP::Protocol::CurrentModeUpdate).new(1)
+        client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+          if update = params.update.as?(ACP::Protocol::CurrentModeUpdate)
+            updates.send(update)
+          end
+          nil
+        end
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"current_mode_update","currentModeId":"ask","_meta":#{metadata}}}})
+        select
+        when update = updates.receive
+          update.current_mode_id.should eq("ask")
+          update.meta_raw.not_nil!.json.should eq(metadata)
+        when timeout(2.seconds)
+          fail "current mode update did not arrive"
+        end
+        check_snapshot.call(client.session_modes)
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "skips invalid mode entries and optional fields without discarding usable modes" do
+    entries = %(false,{"id":42,"name":"Invalid"},{"id":"ask","name":"Ask","description":false},{"id":"code","name":"Code","_meta":true})
+    result = ACP::Protocol::SessionNewResult.from_json(%({"sessionId":"root","modes":{"currentModeId":"ask","availableModes":[#{entries}]}}))
+    modes = result.modes.not_nil!
+    modes.current_mode_id.should eq("ask")
+    modes.available_modes.map(&.id).should eq(["ask", "code"])
+    modes.available_modes.first.description.should be_nil
+    modes.available_modes.last.meta.should be_nil
+
+    {"null", "false", "{}"}.each do |list|
+      empty = ACP::Protocol::SessionModeState.from_json(%({"currentModeId":"ask","availableModes":#{list}}))
+      empty.available_modes.should be_empty
+    end
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::SessionModeState.from_json(%({"currentModeId":42,"availableModes":[]}))
+    end
+  end
+end
+
 describe "ACP v1 exact configuration options" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
     it "keeps flat and grouped choices with a #{label} in extension metadata" do
