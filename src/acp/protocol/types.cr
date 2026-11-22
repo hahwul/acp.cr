@@ -982,6 +982,7 @@ module ACP
     # Params for the `session/list` method (Client → Agent).
     struct SessionListParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Optional filter: only return sessions with this working directory.
       property cwd : String?
@@ -989,20 +990,19 @@ module ACP
       # Optional pagination cursor from a previous `nextCursor` response.
       property cursor : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Optional archive filter: exclude, include, only, or a future wire value.
       property archived : String?
 
       def initialize(
         @cwd : String? = nil,
         @cursor : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @archived : String? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @cwd, @cursor, @archived, metadata_comparison
     end
 
     # Result of the `session/list` method (Agent → Client).
@@ -1236,20 +1236,20 @@ module ACP
     # Params for the `session/close` method (Client → Agent).
     struct SessionCloseParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The ID of the active session to close (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # Result of the `session/close` method (an empty object on success).
@@ -1269,17 +1269,17 @@ module ACP
     # Params for the `session/delete` method (Client → Agent).
     struct SessionDeleteParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session to remove from session history (required).
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@session_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # Result of the `session/delete` method (an empty object on success).

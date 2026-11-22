@@ -1,4 +1,3 @@
-require "./optional_metadata"
 require "./raw_json"
 
 module ACP
@@ -34,26 +33,26 @@ module ACP
     # :nodoc:
     abstract struct ArchiveParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # ID of the target session.
       @[JSON::Field(key: "sessionId")]
       getter session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates parameters for a session archive operation.
-      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@session_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
     # Parameters for closing and archiving a session.
     struct SessionArchiveParams < ArchiveParams
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # Parameters for restoring a session to the default list.
     struct SessionUnarchiveParams < ArchiveParams
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # :nodoc:

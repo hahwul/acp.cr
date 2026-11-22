@@ -1938,6 +1938,51 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact session management" do
+  it "preserves exact metadata on all session management parameter types" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    wire = %({"sessionId":"session","cwd":"/work","title":"Example","_meta":#{metadata}})
+    {
+      ACP::Protocol::SessionCloseParams, ACP::Protocol::SessionDeleteParams,
+      ACP::Protocol::SessionArchiveParams, ACP::Protocol::SessionUnarchiveParams,
+      ACP::Protocol::SessionListParams, ACP::Protocol::SessionOptionsParams,
+      ACP::Protocol::SessionStatusParams, ACP::Protocol::SetSessionTitleParams,
+    }.each do |type|
+      params = type.from_json(wire)
+      ACP::Protocol::RawJson.from_json(params.to_json).field("_meta").not_nil!.json.should eq(metadata)
+    end
+  end
+
+  it "keeps attached v2 state after an exact retirement write is rejected" do
+    with_v2_request_client(%({"archive":{},"delete":{}})) do |client, transport|
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessionId":"root"}}))
+      end
+      client.session_new("/work")
+      wire = %({"sessionId":"root","_meta":{"example.test/ratio":0.123456789012345678901}})
+      expect_raises(ACP::ProtocolError, /cannot preserve/) do
+        client.session_archive(ACP::Protocol::SessionArchiveParams.from_json(wire))
+      end
+      expect_raises(ACP::ProtocolError, /cannot preserve/) do
+        client.session_close(ACP::Protocol::SessionCloseParams.from_json(wire))
+      end
+      expect_raises(ACP::ProtocolError, /cannot preserve/) do
+        client.session_delete(ACP::Protocol::SessionDeleteParams.from_json(wire))
+      end
+      transport.sent_messages.size.should eq(2)
+      client.session_workspace("root").not_nil!.cwd.should eq("/work")
+
+      spawn do
+        request = next_answer(transport)
+        transport.inject_raw(%({"jsonrpc":"2.0","id":#{request["id"]},"error":{"code":-32002,"message":"Already closed"}}))
+      end
+      client.session_close("root").should be_a(ACP::Protocol::SessionCloseResult)
+      client.session_workspace("root").should be_nil
+    end
+  end
+end
+
 private struct InvalidNotificationParams
   include JSON::Serializable
 
@@ -5083,17 +5128,19 @@ describe "ACP v2 replay retirement" do
   end
 end
 
-describe "ACP exact session management replies" do
+describe "ACP exact session management round trips" do
   {1, 2}.each do |version|
-    {"set_title", "archive", "unarchive", "close", "delete", "status", "options"}.each do |operation|
-      it "preserves metadata in a v#{version} session/#{operation} reply" do
+    {"set_title", "archive", "unarchive", "close", "delete", "status", "options", "list"}.each do |operation|
+      it "preserves request and response metadata for v#{version} session/#{operation}" do
         with_wide_stdio do |transport, feed, outgoing|
           client = version == 1 ? ACP::Client.new(transport) : ACP::V2::Client.new(transport)
           client.request_timeout = 2.0
-          count = operation == "status" ? "42" : "18446744073709551615"
+          count = operation.in?("status", "list") ? "42" : "18446744073709551615"
+          sent = Channel(ACP::Protocol::RawJson).new(1)
+          request_metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
           spawn do
             init = JSON.parse(outgoing.gets.not_nil!)
-            supports = %({"title":{},"archive":{},"close":{},"delete":{},"status":{},"options":{}})
+            supports = %({"title":{},"archive":{},"close":{},"delete":{},"status":{},"options":{},"list":{}})
             result = if version == 1
                        %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":#{supports}}})
                      else
@@ -5102,26 +5149,33 @@ describe "ACP exact session management replies" do
             feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":#{result}})
             setup = JSON.parse(outgoing.gets.not_nil!)
             feed.puts %({"jsonrpc":"2.0","id":#{setup["id"]},"result":{"sessionId":"root"}})
-            request = JSON.parse(outgoing.gets.not_nil!)
+            request = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+            sent.send(request)
             fields = case operation
                      when "set_title" then %("title":"Stored title",)
                      when "status"    then %("status":"open","state":{"state":"idle"},)
+                     when "list"      then %("sessions":[],"nextCursor":"next",)
                      else                  ""
                      end
-            feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{#{fields}"_meta":{"example.test/source":"agent","example.test/count":#{count},"example.test/ratio":1.23000000000000000001}}})
+            feed.puts %({"jsonrpc":"2.0","id":#{request.field("id").not_nil!.json},"result":{#{fields}"_meta":{"example.test/source":"agent","example.test/count":#{count},"example.test/ratio":1.23000000000000000001}}})
           end
 
           client.initialize_connection
           client.session_new("/work")
+          params = %({"sessionId":"root","cwd":"/work","title":"Proposed title","_meta":#{request_metadata}})
           result = case operation
-                   when "set_title" then client.session_set_title("root", "Proposed title")
-                   when "archive"   then client.session_archive("root")
-                   when "unarchive" then client.session_unarchive("root")
-                   when "close"     then client.session_close("root")
-                   when "delete"    then client.session_delete("root")
-                   when "status"    then client.session_status("root")
-                   else                  client.session_options("/work")
+                   when "set_title" then client.session_set_title(ACP::Protocol::SetSessionTitleParams.from_json(params))
+                   when "archive"   then client.session_archive(ACP::Protocol::SessionArchiveParams.from_json(params))
+                   when "unarchive" then client.session_unarchive(ACP::Protocol::SessionUnarchiveParams.from_json(params))
+                   when "close"     then client.session_close(ACP::Protocol::SessionCloseParams.from_json(params))
+                   when "delete"    then client.session_delete(ACP::Protocol::SessionDeleteParams.from_json(params))
+                   when "status"    then client.session_status(ACP::Protocol::SessionStatusParams.from_json(params))
+                   when "list"      then client.session_list(ACP::Protocol::SessionListParams.from_json(params))
+                   else                  client.session_options(ACP::Protocol::SessionOptionsParams.from_json(%({"cwd":"/work","_meta":#{request_metadata}})))
                    end
+          request = next_permission_event(sent)
+          request.field("method").not_nil!.as_s?.should eq("session/#{operation}")
+          request.field("params").not_nil!.field("_meta").not_nil!.json.should eq(request_metadata)
           result.meta.try(&.["example.test/source"]?).should eq("agent")
           result.title.should eq("Stored title") if result.is_a?(ACP::Protocol::SetSessionTitleResult)
           metadata = result.meta_raw.not_nil!

@@ -1,4 +1,3 @@
-require "./optional_metadata"
 require "./raw_json"
 
 module ACP
@@ -34,6 +33,7 @@ module ACP
     # Parameters of the draft session/set_title request in v1 and v2.
     struct SetSessionTitleParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Agent-owned ID of the session to retitle.
       @[JSON::Field(key: "sessionId")]
@@ -42,13 +42,12 @@ module ACP
       # The proposed session title.
       property title : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a request to set a session title.
-      def initialize(@session_id : String, @title : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@session_id : String, @title : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @title, metadata_comparison
     end
 
     # The title stored by the Agent after any normalization.

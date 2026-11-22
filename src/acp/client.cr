@@ -865,17 +865,22 @@ module ACP
       *,
       archived : String? = nil,
     ) : Protocol::SessionListResult
-      ensure_state(ClientState::Initialized, "session/list")
+      session_list(Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived))
+    end
+
+    # Lists sessions with typed filters and optional extension metadata.
+    def session_list(params : Protocol::SessionListParams) : Protocol::SessionListResult
+      method = Protocol::AgentMethod::SESSION_LIST
+      ensure_state(ClientState::Initialized, method)
       unless @agent_capabilities.try(&.session_capabilities).try(&.list?)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.list")
       end
-      if cwd && !Protocol.absolute_path?(cwd)
+      if (cwd = params.cwd) && !Protocol.absolute_path?(cwd)
         raise ArgumentError.new("The ACP session list directory must be absolute")
       end
-      ensure_archive_support("session/list") if archived
+      ensure_archive_support(method) if params.archived
 
-      params = Protocol::SessionListParams.new(cwd: cwd, cursor: cursor, archived: archived)
-      send_typed_request(Protocol::AgentMethod::SESSION_LIST, params, Protocol::SessionListResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SessionListResult)
     end
 
     # Previews options before creating or restoring a session.
@@ -892,7 +897,7 @@ module ACP
         raise ArgumentError.new("ACP session directories must be absolute")
       end
 
-      send_typed_request(method, params, Protocol::SessionOptionsResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SessionOptionsResult)
     end
 
     # Previews options for a new session in the given workspace.
@@ -921,38 +926,58 @@ module ACP
 
     # Queries a session without attaching to it. Requires draft status support.
     def session_status(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionStatusResult
+      session_status(Protocol::SessionStatusParams.new(session_id, meta))
+    end
+
+    # Queries a session with typed parameters and optional extension metadata.
+    def session_status(params : Protocol::SessionStatusParams) : Protocol::SessionStatusResult
       method = Protocol::AgentMethod::SESSION_STATUS
       ensure_state(ClientState::Initialized, method)
       unless @agent_capabilities.try(&.session_capabilities).try(&.status)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.status")
       end
 
-      send_typed_request(method, Protocol::SessionStatusParams.new(session_id, meta), Protocol::SessionStatusResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SessionStatusResult)
     end
 
     # Sets the title of a session and returns the title the Agent stored.
     def session_set_title(session_id : String, title : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SetSessionTitleResult
+      session_set_title(Protocol::SetSessionTitleParams.new(session_id, title, meta))
+    end
+
+    # Sets a session title with optional extension metadata.
+    def session_set_title(params : Protocol::SetSessionTitleParams) : Protocol::SetSessionTitleResult
       method = Protocol::AgentMethod::SESSION_SET_TITLE
       ensure_state(ClientState::Initialized, method)
       unless @agent_capabilities.try(&.session_capabilities).try(&.title)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.title")
       end
 
-      send_typed_request(method, Protocol::SetSessionTitleParams.new(session_id, title, meta), Protocol::SetSessionTitleResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SetSessionTitleResult)
     end
 
     # Closes and archives the session while preserving its saved history.
     def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionArchiveResult
+      session_archive(Protocol::SessionArchiveParams.new(session_id, meta))
+    end
+
+    # Archives a session with optional extension metadata.
+    def session_archive(params : Protocol::SessionArchiveParams) : Protocol::SessionArchiveResult
       method = Protocol::AgentMethod::SESSION_ARCHIVE
       ensure_archive_support(method)
-      send_typed_request(method, Protocol::SessionArchiveParams.new(session_id, meta), Protocol::SessionArchiveResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SessionArchiveResult)
     end
 
     # Restores the session to default list results without attaching to it.
     def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Protocol::SessionUnarchiveResult
+      session_unarchive(Protocol::SessionUnarchiveParams.new(session_id, meta))
+    end
+
+    # Restores a session to default listing with optional extension metadata.
+    def session_unarchive(params : Protocol::SessionUnarchiveParams) : Protocol::SessionUnarchiveResult
       method = Protocol::AgentMethod::SESSION_UNARCHIVE
       ensure_archive_support(method)
-      send_typed_request(method, Protocol::SessionUnarchiveParams.new(session_id, meta), Protocol::SessionUnarchiveResult, exact_response: true)
+      send_exact_typed_request(method, params, Protocol::SessionUnarchiveResult)
     end
 
     private def ensure_archive_support(method : String) : Nil
@@ -1134,14 +1159,21 @@ module ACP
 
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
+
+      session_close(Protocol::SessionCloseParams.new(sid))
+    end
+
+    # Closes a session with typed parameters and optional extension metadata.
+    def session_close(params : Protocol::SessionCloseParams) : Protocol::SessionCloseResult
+      method = Protocol::AgentMethod::SESSION_CLOSE
+      ensure_state(ClientState::Initialized, method)
       unless @agent_capabilities.try(&.session_capabilities).try(&.close?)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.close")
       end
 
-      params = Protocol::SessionCloseParams.new(sid)
-      result = send_session_retirement_request(Protocol::AgentMethod::SESSION_CLOSE, params, Protocol::SessionCloseResult)
+      result = send_session_retirement_request(method, params, Protocol::SessionCloseResult)
 
-      ClientLog.info { "Session closed: #{sid}" }
+      ClientLog.info { "Session closed: #{params.session_id}" }
 
       result
     end
@@ -1157,15 +1189,20 @@ module ACP
     # Raises `InvalidStateError` if not initialized.
     # See: https://agentclientprotocol.com/protocol/v1/session-delete
     def session_delete(session_id : String) : Protocol::SessionDeleteResult
-      ensure_state(ClientState::Initialized, "session/delete")
+      session_delete(Protocol::SessionDeleteParams.new(session_id))
+    end
+
+    # Deletes a saved session with optional extension metadata.
+    def session_delete(params : Protocol::SessionDeleteParams) : Protocol::SessionDeleteResult
+      method = Protocol::AgentMethod::SESSION_DELETE
+      ensure_state(ClientState::Initialized, method)
       unless @agent_capabilities.try(&.session_capabilities).try(&.delete?)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.delete")
       end
 
-      params = Protocol::SessionDeleteParams.new(session_id)
-      result = send_session_retirement_request(Protocol::AgentMethod::SESSION_DELETE, params, Protocol::SessionDeleteResult)
+      result = send_session_retirement_request(method, params, Protocol::SessionDeleteResult)
 
-      ClientLog.info { "Session deleted: #{session_id}" }
+      ClientLog.info { "Session deleted: #{params.session_id}" }
 
       result
     end
@@ -1444,8 +1481,7 @@ module ACP
 
     # Close and delete are idempotent when the Agent reports a missing session.
     protected def send_session_retirement_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
-      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, exact_response: true)
+      response = send_exact_request(method, params)
       return T.new if missing_session_response?(response)
 
       decode_typed_response(method, response, type)
