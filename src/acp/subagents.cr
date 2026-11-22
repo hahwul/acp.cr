@@ -17,7 +17,8 @@ module ACP
     description : String?,
     state : Protocol::SubagentState?,
     config_options : Array(Protocol::ConfigOption)?,
-    cancel_allowed : Bool do
+    cancel_allowed : Bool,
+    meta_raw : Protocol::RawJson? = nil do
     # Whether the client can currently cancel this child's foreground work.
     def cancel? : Bool
       cancel_allowed
@@ -33,15 +34,16 @@ module ACP
       property description : String?
       property cwd : String?
       property additional_directories : Array(String)?
-      property capabilities : Protocol::SubagentSessionCapabilities?
+      property cancel_allowed : Bool = false
       property state : Protocol::SubagentState?
       property config_options : Array(Protocol::ConfigOption)?
+      property meta_raw : Protocol::RawJson?
 
       def initialize(@parent_id : String)
       end
 
       def clear_runtime : Nil
-        @capabilities = nil
+        @cancel_allowed = false
         @state = nil
         @config_options = nil
       end
@@ -111,7 +113,7 @@ module ACP
       attaching = runtime_sync_pending?(session_id)
       state = child.state.try(&.dup) unless attaching
       config = child.config_options.try(&.dup) unless attaching
-      SubagentSession.new(session_id, child.parent_id, child.title, child.description, state, config, cancel?(session_id))
+      SubagentSession.new(session_id, child.parent_id, child.title, child.description, state, config, cancel?(session_id), child.meta_raw)
     end
 
     def children(parent_id : String) : Array(SubagentSession)
@@ -225,7 +227,7 @@ module ACP
     def cancel?(session_id : String) : Bool
       return false if runtime_sync_pending?(session_id)
 
-      !@children[session_id]?.try(&.capabilities).try(&.cancel).nil?
+      @children[session_id]?.try(&.cancel_allowed) == true
     end
 
     def known_session?(session_id : String) : Bool
@@ -442,16 +444,19 @@ module ACP
     end
 
     # Observes v2 capabilities at the wire boundary. Each replaying session
-    # has its own marker. A marked parent's upsert can authorize its child.
-    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?, *, replaying : Bool) : Bool
+    # has its own marker. Nil requests raw delivery without applying the update.
+    def observe_v2_update(session_id : String, update : Hash(String, JSON::Any), update_json : String?, *, replaying : Bool) : Bool?
       case update["sessionUpdate"]?.try(&.as_s?)
       when "replay_complete"
         if (setup = setup_for(session_id)) && setup.written?
           setup.replay_markers.try(&.add(session_id))
         end
       when "subagent_update"
-        wire = Protocol::RawJson.from_json(update_json || Protocol::WireFrame.encode(update))
-        patch = Protocol::SubagentUpdate.from_json(Protocol::StateFields.normalize_patch(wire).json)
+        begin
+          patch = Protocol::V2::SubagentUpdate.from_json(update_json || Protocol::WireFrame.encode(update))
+        rescue JSON::ParseException
+          return nil
+        end
         return announce(session_id, patch, live: !replaying)
       when "state_update"
         if (child = @children[session_id]?) && !replaying && current_updates?(session_id)
@@ -513,7 +518,7 @@ module ACP
 
     # Updates the association and effective child state. A historical update
     # can introduce a child but its state and capabilities stay unconfirmed.
-    def announce(parent_id : String, patch : Protocol::SubagentUpdate, *, live : Bool = true) : Bool
+    def announce(parent_id : String, patch : Protocol::SubagentUpdate | Protocol::V2::SubagentUpdate, *, live : Bool = true) : Bool
       sid = patch.session_id
       if child = @children[sid]?
         return false if child.parent_id != parent_id
@@ -528,11 +533,17 @@ module ACP
       child.description = patch.description if patch.description_present?
       child.cwd = patch.cwd if patch.cwd_present?
       child.additional_directories = patch.additional_directories.try(&.dup) if patch.additional_directories_present?
+      child.meta_raw = patch.apply_metadata_raw(child.meta_raw) if patch.meta_present?
 
       if live && current_updates?(@v2 ? parent_id : sid)
-        child.capabilities = patch.capabilities if patch.capabilities_present?
+        child.cancel_allowed = !patch.capabilities.try(&.cancel).nil? if patch.capabilities_present?
         if patch.state_present?
-          child.state = patch.state.try(&.dup)
+          case state = patch.state
+          when Protocol::V2::StateSnapshot
+            child.state = Protocol::SubagentState.from_json(state.raw.json)
+          else
+            child.state = state.try(&.dup)
+          end
         end
       end
       true

@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Apply ACP v2 child session patches consistently in typed callbacks and the child cache, with exact metadata and validated workspace roots.
 - Preserve exact ACP v2 session state, background work, and idle error and usage payloads through typed snapshots.
 - Validate Base64 media, resource URIs, and optional link display fields in received ACP v2 content.
 - Apply the same validation to streamed ACP v2 tool content as to replacement content, preserving unknown payloads and exact metadata.

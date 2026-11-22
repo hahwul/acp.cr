@@ -2534,7 +2534,9 @@ module ACP
         registry = @subagent_registry.not_nil!
         waiting_to_write = registry.setup_waiting_to_write?(session_id) && !registry.resume_timed_out?(session_id)
         replaying = !waiting_to_write && !!@cursor_registry.try(&.replaying?(session_id))
-        return false unless registry.observe_v2_update(session_id, update, update_json, replaying: replaying)
+        applied = registry.observe_v2_update(session_id, update, update_json, replaying: replaying)
+        return true if applied.nil? # Deliver the raw update without follow-up effects.
+        return false unless applied
 
         case update["sessionUpdate"]?.try(&.as_s?)
         when "subagent_update"

@@ -295,8 +295,15 @@ formats. Tool content and individual file changes expose open fields through
 exact metadata through `meta_raw`.
 [ACP v2 Tool Calls](https://agentclientprotocol.com/protocol/v2/tool-calls#diffs)
 
-Typed child-session announcements expose the mirrored `StateSnapshot`, and
-inter-session messages retain their transcript links and open content.
+Typed child-session announcements and the child cache use the same patch
+rules. Malformed optional title, description, capability, or state values
+are treated as omitted. A repeated capability field clears the cancel grant.
+Child workspace values use absolute Agent-side paths.
+An explicit `null` restores inheritance for that workspace field, and an
+empty additional-directory list overrides inheritance. The cached
+`SubagentSession#meta_raw` exposes the exact association metadata after
+applying key-level patches. Inter-session messages retain their transcript
+links and open content.
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
 fields from clears and apply metadata patches by key. Compaction summary
 chunks reuse their wire-compatible `ACP::Protocol` types.

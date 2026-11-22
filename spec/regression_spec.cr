@@ -5898,3 +5898,166 @@ describe "ACP v2 exact session state" do
     end
   end
 end
+describe "ACP v2 subagent patch decoding" do
+  it "keeps valid fields when optional child fields are malformed" do
+    wire = %({"sessionId":"child","title":"Retained","description":false,"capabilities":[],"state":{"state":false},"cwd":"/work/child","additionalDirectories":[]})
+    patch = ACP::Protocol::V2::SubagentUpdate.from_json(wire)
+    patch.title.should eq("Retained")
+    patch.description_present?.should be_false
+    patch.capabilities_present?.should be_false
+    patch.state_present?.should be_false
+    patch.cwd.should eq("/work/child")
+    patch.additional_directories.not_nil!.should be_empty
+    encoded = JSON.parse(patch.to_json)
+    encoded["description"]?.should be_nil
+    encoded["capabilities"]?.should be_nil
+    encoded["state"]?.should be_nil
+  end
+
+  it "requires an unambiguous child ID and absolute workspace paths" do
+    [
+      %({"sessionId":"one","sessionId":"two"}),
+      %({"sessionId":"child","cwd":"relative"}),
+      %({"sessionId":"child","cwd":"/work/one","cwd":"/work/two"}),
+      %({"sessionId":"child","additionalDirectories":["/valid","relative"]}),
+      %({"sessionId":"child","additionalDirectories":[],"additionalDirectories":null}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::SubagentUpdate.from_json(wire) }
+    end
+  end
+
+  it "treats ambiguous optional capabilities as unavailable" do
+    wire = %({"sessionId":"child","capabilities":{"cancel":{}},"capabilities":false})
+    patch = ACP::Protocol::V2::SubagentUpdate.from_json(wire)
+    patch.capabilities_present?.should be_true
+    patch.capabilities.should be_nil
+
+    wire = %({"sessionId":"child","capabilities":{"cancel":null,"cancel":{},"_meta":{"example.test/sequence":18446744073709551615}}})
+    patch = ACP::Protocol::V2::SubagentUpdate.from_json(wire)
+    patch.capabilities_present?.should be_true
+    patch.capabilities.not_nil!.cancel.should be_nil
+    patch.capabilities.not_nil!.meta_raw.not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+  end
+
+  it "applies the typed child patch to workspace, metadata, and cancellation over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{init["id"]},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"additionalDirectories":{}}}}})
+        request = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessionId":"root"}})
+      end
+      client.initialize_connection
+      client.session_new(ACP::Protocol::V2::SessionNewParams.new("/work", additional_directories: ["/parent/extra"]))
+
+      send_patch = ->(fields : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"subagent_update",#{fields}}}})
+        next_exact_session_update(observed)
+      end
+      first = %("sessionId":"child","title":"First","description":"Original","capabilities":{"cancel":{}},"cwd":"/work/child","additionalDirectories":[],"_meta":{"example.test/remove":true,"example.test/retain":18446744073709551615})
+      send_patch.call(first).update.typed.as(ACP::Protocol::V2::SubagentUpdate).capabilities.not_nil!.cancel.should_not be_nil
+      client.session_workspace("child").not_nil!.cwd.should eq("/work/child")
+      client.session_workspace("child").not_nil!.additional_directories.should be_empty
+
+      second = %("sessionId":"child","title":"Updated","description":false,"capabilities":[],"_meta":{"example.test/remove":null,"example.test/ratio":0.1234567890123456789})
+      patch = send_patch.call(second).update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+      patch.description_present?.should be_false
+      patch.capabilities_present?.should be_false
+      child = client.subagent("child").not_nil!
+      child.title.should eq("Updated")
+      child.description.should eq("Original")
+      child.cancel?.should be_true
+      child.meta_raw.not_nil!.field("example.test/remove").should be_nil
+      child.meta_raw.not_nil!.field("example.test/retain").not_nil!.json.should eq(UInt64::MAX.to_s)
+      child.meta_raw.not_nil!.field("example.test/ratio").not_nil!.json.should eq("0.1234567890123456789")
+
+      invalid = send_patch.call(%("sessionId":"child","cwd":"relative","title":"Discarded","capabilities":null))
+      invalid.update.typed.should be_nil
+      invalid.raw.field("update").not_nil!.field("cwd").not_nil!.as_s?.should eq("relative")
+      client.subagent("child").not_nil!.title.should eq("Updated")
+      client.session_workspace("child").not_nil!.cwd.should eq("/work/child")
+      client.session_cancel("child")
+      JSON.parse(outgoing.gets.not_nil!)["method"].should eq("session/cancel")
+
+      ambiguous = send_patch.call(%("sessionId":"child","sessionId":"other","capabilities":{"cancel":{}}))
+      ambiguous.update.typed.should be_nil
+      client.subagent("other").should be_nil
+
+      clear = send_patch.call(%("sessionId":"child","capabilities":null,"capabilities":{"cancel":{}},"cwd":null,"additionalDirectories":null,"_meta":null))
+      patch = clear.update.typed.as(ACP::Protocol::V2::SubagentUpdate)
+      patch.capabilities_present?.should be_true
+      patch.capabilities.should be_nil
+      client.subagent("child").not_nil!.cancel?.should be_false
+      client.subagent("child").not_nil!.meta_raw.should be_nil
+      client.session_workspace("child").not_nil!.cwd.should eq("/work")
+      client.session_workspace("child").not_nil!.additional_directories.should eq(["/parent/extra"])
+      expect_raises(ACP::InvalidStateError) { client.session_cancel("child") }
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps malformed child announcements out of associations and cursor replay" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(2)
+      raw = Channel(Nil).new(2)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      client.on_notification = ->(method : String, _params : JSON::Any?) do
+        raw.send(nil) if method == "session/update"
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+
+      child = %({"sessionUpdate":"subagent_update","sessionId":"phantom","capabilities":{"cancel":{}}})
+      [
+        %({"sessionId":"other","sessionId":"root","update":#{child}}),
+        %({"sessionId":"root","update":{},"update":#{child}}),
+        %({"sessionId":"root","update":{"sessionUpdate":"notice","sessionUpdate":"subagent_update","sessionId":"phantom"}}),
+      ].each do |params|
+        expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionUpdateParams.from_json(params) }
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":#{params}})
+        next_permission_event(raw)
+        client.subagent("phantom").should be_nil
+      end
+
+      resume = Channel(ACP::Protocol::V2::SessionResumeResult | Exception).new(1)
+      spawn do
+        params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+        resume.send(client.session_resume(params))
+      rescue ex
+        resume.send(ex)
+      end
+      request = JSON.parse(outgoing.gets.not_nil!)
+      request["method"].should eq("session/resume")
+      send_update = ->(sid : String, update : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{sid.to_json},"update":#{update}}})
+        next_exact_session_update(observed)
+      end
+      invalid = send_update.call("root", %({"sessionUpdate":"subagent_update","sessionId":"other","cwd":"relative"}))
+      invalid.update.typed.should be_nil
+      client.subagent("other").should be_nil
+      send_update.call("other", %({"sessionUpdate":"cursor_update","cursorId":"live"}))
+      client.session_cursor("other", "live").should_not be_nil
+
+      send_update.call("root", %({"sessionUpdate":"replay_complete"}))
+      send_update.call("root", %({"sessionUpdate":"state_update","state":"idle"}))
+      feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{}})
+      next_permission_event(resume).should be_a(ACP::Protocol::V2::SessionResumeResult)
+      client.session_cursor("other", "live").should_not be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end
