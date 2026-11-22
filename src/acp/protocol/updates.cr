@@ -844,12 +844,60 @@ module ACP
       end
     end
 
+    # :nodoc:
+    struct RetainedCost
+      getter cost : Cost
+
+      def initialize(@cost : Cost, @source : RawJson? = nil)
+        @original_meta = @cost.meta_raw
+      end
+
+      def_equals_and_hash @cost
+
+      def raw : RawJson
+        return RawJson.new(JSON::PullParser.new(WireFrame.encode(@cost))) unless source = @source
+
+        meta = @cost.meta_raw
+        return source if meta.try(&.json) == @original_meta.try(&.json)
+
+        meta ? source.with_field("_meta", meta) : source.without_field("_meta")
+      end
+
+      def to_json(builder : JSON::Builder) : Nil
+        raw.to_json(builder)
+      end
+
+      module Optional
+        def self.from_json(pull : JSON::PullParser) : RetainedCost?
+          wire = RawJson.new(RawJson.patch_parser(pull, required: {"amount", "currency"}, optional: {"_meta"}))
+          return unless token = wire.field("amount")
+
+          kind = JSON::PullParser.new(token.json).kind
+          return unless kind.int? || kind.float?
+          return unless (amount = token.json.to_f64?) && amount.finite?
+
+          # Normalize only the typed projection. Forward the Agent's exact amount.
+          cost = Cost.from_json(wire.with_field("amount", RawJson.new(JSON::Any.new(amount))).json)
+          wire = wire.without_field("_meta") if wire.field("_meta") && !cost.meta_raw
+          RetainedCost.new(cost, wire)
+        rescue JSON::ParseException
+          nil
+        end
+
+        def self.to_json(value : RetainedCost, builder : JSON::Builder) : Nil
+          value.to_json(builder)
+        end
+      end
+    end
+
     # Notification that the session's context-window usage has changed.
     # Agents send this so clients can show how much of the window is
     # consumed, and optionally what the turn has cost.
     # See: https://agentclientprotocol.com/protocol/schema
     struct UsageUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # How much of the context window is currently in use (required). Schema `uint64`.
       property used : UInt64
@@ -857,20 +905,35 @@ module ACP
       # The total size of the context window (required). Schema `uint64`.
       property size : UInt64
 
-      # The cost accrued so far, if the agent reports one.
-      property cost : Cost?
+      @[JSON::Field(key: "cost", converter: ::ACP::Protocol::RetainedCost::Optional)]
+      @cost_wire : RetainedCost?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a usage update with optional cumulative cost and metadata.
       def initialize(
         @used : UInt64,
         @size : UInt64,
-        @cost : Cost? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        cost : Cost? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "usage_update"
+        self.cost = cost
+        self.meta = meta
+      end
+
+      # Cumulative cost as a typed Float64 projection, when reported.
+      def cost : Cost?
+        @cost_wire.try(&.cost)
+      end
+
+      # Replaces or removes the reported cost.
+      def cost=(value : Cost?) : Cost?
+        @cost_wire = value.try { |cost| RetainedCost.new(cost) }
+        value
+      end
+
+      # Exact cumulative cost JSON, including the Agent's original amount.
+      def cost_raw : RawJson?
+        @cost_wire.try(&.raw)
       end
 
       # The fraction of the context window in use, in `0.0..1.0`.
@@ -878,6 +941,11 @@ module ACP
       def usage_ratio : Float64
         return 0.0 if @size == 0
         @used.to_f / @size.to_f
+      end
+
+      protected def comparison_value
+        # Wide token counts should not affect comparison of cost or metadata.
+        {@session_update, @used, @size, comparable_json(cost), comparable_json(meta_raw)}
       end
     end
 
