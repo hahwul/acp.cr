@@ -10057,3 +10057,128 @@ describe "ACP v2 repeated initialization" do
     client.try(&.close)
   end
 end
+
+describe ACP::V2::TerminalStore do
+  it "accumulates received bytes before a tool references the terminal" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"session"})
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::TerminalStore.new
+    observed = Channel(Bool).new(1)
+    client.on_update = ->(params : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(params))
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+    store.terminal("session", "term").should be_nil
+
+    transport.update("session", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"4g=="}))
+    take_v2_frame(observed).should be_true
+    store.terminal("session", "term").not_nil!.output.should eq(Bytes[0xe2])
+    transport.update("session", %({"sessionUpdate":"tool_call_update","toolCallId":"term","content":[{"type":"terminal","terminalId":"term"}]}))
+    take_v2_frame(observed).should be_false
+    transport.update("session", %({"sessionUpdate":"terminal_update","terminalId":"term","exitStatus":{"exitCode":0}}))
+    take_v2_frame(observed).should be_true
+    transport.update("session", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"gqw="}))
+    take_v2_frame(observed).should be_true
+    snapshot = store.terminal("session", "term").not_nil!
+    snapshot.exit_status.not_nil!.exit_code.should eq(0)
+    snapshot.output.should eq("€".to_slice)
+
+    transport.update("session", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"YQ"}))
+    take_v2_frame(observed).should be_false
+    store.terminal("session", "term").not_nil!.output.should eq("€".to_slice)
+  ensure
+    client.try(&.close)
+  end
+
+  it "replaces snapshots and patches only the addressed terminal while preserving exact metadata" do
+    store = ACP::V2::TerminalStore.new
+    observe = ->(session : String, update : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{update}})))
+    end
+    id = "term"
+    wide = "18446744073709551615"
+    fraction = "0.123456789012345678901"
+    observe.call("other", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"WA=="})).should be_true
+    observe.call("main", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"YQ==","_meta":{"chunk":true}})).should be_true
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"term","command":"fixture","cwd":"/work","size":{"cols":80,"rows":24,"_meta":{"wide":#{wide}}},"output":{"data":"Yg==","_meta":{"fraction":#{fraction}}},"capabilities":{"cancel":{}},"_meta":{"wide":#{wide},"drop":1}})).should be_true
+    observe.call("main", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":"Yw==","_meta":{"fraction":0}})).should be_true
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"term","cwd":"relative","size":{"cols":0,"rows":24},"output":{"data":"YQ"},"exitStatus":{"signal":"SIGTERM","_meta":{"wide":#{wide}}},"_meta":{"drop":null,"new":#{fraction}}})).should be_true
+
+    snapshot = store.terminal("main", id).not_nil!
+    snapshot.session_id.should eq("main")
+    snapshot.terminal_id.should eq(id)
+    snapshot.command.should eq("fixture")
+    snapshot.cwd.should eq("/work")
+    snapshot.size.not_nil!.cols.should eq(80)
+    snapshot.size.not_nil!.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.output.should eq("bc".to_slice)
+    snapshot.output_meta_raw.not_nil!.field("fraction").not_nil!.json.should eq(fraction)
+    snapshot.exit_status.not_nil!.signal.should eq("SIGTERM")
+    snapshot.exit_status.not_nil!.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.capabilities.not_nil!.cancel.should_not be_nil
+    snapshot.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.meta_raw.not_nil!.field("new").not_nil!.json.should eq(fraction)
+    snapshot.meta_raw.not_nil!.field("drop").should be_nil
+    snapshot.meta_raw.not_nil!.field("chunk").should be_nil
+    snapshot.output.not_nil![0] = 0_u8
+    snapshot.size.not_nil!.meta.not_nil!["injected"] = JSON::Any.new(true)
+    store.terminal("main", id).not_nil!.output.should eq("bc".to_slice)
+    store.terminal("main", id).not_nil!.size.not_nil!.meta.not_nil!.has_key?("injected").should be_false
+    store.terminal("other", id).not_nil!.output.should eq("X".to_slice)
+
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"term","command":null,"cwd":null,"size":null,"output":null,"exitStatus":null,"capabilities":null,"_meta":null})).should be_true
+    cleared = store.terminal("main", id).not_nil!
+    cleared.command.should be_nil
+    cleared.cwd.should be_nil
+    cleared.size.should be_nil
+    cleared.output.should be_nil
+    cleared.exit_status.should be_nil
+    cleared.capabilities.should be_nil
+    cleared.meta_raw.should be_nil
+    cleared.output_meta_raw.should be_nil
+    observe.call("main", %({"sessionUpdate":"terminal_output_chunk","terminalId":"term","data":""})).should be_true
+    store.terminal("main", id).not_nil!.output.should eq(Bytes.empty)
+    store.forget_session("main").should be_true
+    store.forget_session("main").should be_false
+    store.terminal("main", id).should be_nil
+    store.terminal("other", id).not_nil!.output.should eq("X".to_slice)
+  end
+
+  it "retains the newest bytes within the configured limit after append and replacement" do
+    expect_raises(ArgumentError, /non-negative/) { ACP::V2::TerminalStore.new(output_byte_limit: -1) }
+    {0, 4}.each do |limit|
+      store = ACP::V2::TerminalStore.new(output_byte_limit: limit)
+      observe = ->(fields : String) do
+        store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"session","update":#{fields}})))
+      end
+      observe.call(%({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"QUJD"})).should be_true
+      observe.call(%({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"REU="})).should be_true
+      store.terminal("session", "t").not_nil!.output.should eq(limit.zero? ? Bytes.empty : "BCDE".to_slice)
+      observe.call(%({"sessionUpdate":"terminal_update","terminalId":"t","output":{"data":"MDEyMzQ1"}})).should be_true
+      store.terminal("session", "t").not_nil!.output.should eq(limit.zero? ? Bytes.empty : "2345".to_slice)
+      observe.call(%({"sessionUpdate":"terminal_output_chunk","terminalId":"t","data":"eA=="})).should be_true
+      store.terminal("session", "t").not_nil!.output.should eq(limit.zero? ? Bytes.empty : "345x".to_slice)
+    end
+  end
+
+  it "bounds new entries and cumulative terminal metadata without dropping other patch fields" do
+    store = ACP::V2::TerminalStore.new(terminal_limit: 1, terminal_metadata_byte_limit: 16)
+    observe = ->(session : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{fields}})))
+    end
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"t","_meta":{"a":"abc"}})).should be_true
+    observe.call("other", %({"sessionUpdate":"terminal_update","terminalId":"t"})).should be_false
+    store.terminal("other", "t").should be_nil
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"t","command":"fixture","_meta":{"b":"def"}})).should be_true
+    snapshot = store.terminal("main", "t").not_nil!
+    snapshot.command.should eq("fixture")
+    snapshot.meta_raw.not_nil!.json.should eq(%({"a":"abc"}))
+    observe.call("main", %({"sessionUpdate":"terminal_update","terminalId":"t","_meta":{"a":null,"b":"def"}})).should be_true
+    store.terminal("main", "t").not_nil!.meta_raw.not_nil!.json.should eq(%({"b":"def"}))
+    store.forget_session("main").should be_true
+    observe.call("other", %({"sessionUpdate":"terminal_update","terminalId":"t"})).should be_true
+  end
+end

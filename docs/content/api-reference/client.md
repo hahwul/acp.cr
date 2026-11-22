@@ -201,6 +201,42 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Display-only terminal state
+
+Create a `TerminalStore` per connection and feed it v2 session updates in
+receive order. Look up terminals by the reporting session and terminal IDs.
+
+```crystal
+terminals = ACP::V2::TerminalStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  terminals.observe(update)
+  nil
+end
+
+# Read this after the terminal has sent an update.
+snapshot = terminals.terminal(session_id, terminal_id)
+output = snapshot.try(&.output)
+```
+
+The store keeps the newest 1 MiB of output per terminal by default. Set
+`output_byte_limit:` to choose a different byte budget, or zero to keep
+terminal state without output bytes. `output` is a detached byte slice when
+output is available. It can begin in the middle of a UTF-8 character or
+terminal sequence when the limit discards earlier bytes. Apply your display
+policy before rendering it. `output_meta_raw` describes the latest replacement
+snapshot. Chunk metadata is available on each `TerminalOutputChunk` update.
+
+The default `terminal_limit:` is 128 across all sessions. At capacity,
+`observe` returns `false` for new terminal IDs. The default
+`terminal_metadata_byte_limit:` is 64 KiB per terminal. A top-level `_meta`
+patch that would exceed this limit leaves the stored metadata unchanged.
+
+Use `forget_session` to discard one session's display history. For full
+replay of a session tree, clear the parent and each affected child first,
+or rebuild the display state in a fresh store. Stored capabilities reflect
+the reported display state. Use `client.terminal_cancel` for current
+cancellation checks. [ACP v2 display-only terminals](https://agentclientprotocol.com/protocol/v2/tool-calls#display-only-terminals)
+
 ### Repeat initialization
 
 On a v2 connection, call `initialize_connection` again before your first
