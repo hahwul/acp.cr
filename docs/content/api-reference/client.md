@@ -541,7 +541,10 @@ On v1 and v2, `client.auth_status` reads the Agent's authentication state
 when the `auth.status` capability is advertised. Register
 `on_auth_status_update` to receive changes from the Agent. `state` maps
 future values to `unknown`, and `raw_state` preserves the wire value.
-`accounts` describes the accounts for display.
+`accounts` describes the accounts for display and skips invalid entries.
+Use `meta_raw` on the status snapshot or an individual account to read
+extension metadata without rounding numbers. To attach exact metadata to
+the query, set `AuthStatusParams#meta_raw=`.
 [ACP Authentication State Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/aa2aa6c77b80fd37ff81205ad2cfef60ef83ef1a/docs/rfds/get-auth-state.mdx)
 
 ### `#close`

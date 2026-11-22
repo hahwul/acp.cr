@@ -117,7 +117,7 @@ module ACP
             nil
           end
           begin
-            send_initialization_offer(offer, on_response: observe)
+            send_exact_request(AgentMethod::INITIALIZE, offer, on_response: observe)
           rescue ex : FrameTooLargeError
             raise ex
           rescue ex : RequestTimeoutError | TransportError
@@ -512,7 +512,7 @@ module ACP
             raise InvalidStateError.new("The Agent did not advertise auth.status")
           end
 
-          request(AgentMethod::AUTH_STATUS, params, Wire::AuthStatusResult)
+          @connection.request_auth_status(params)
         end
       end
 

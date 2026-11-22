@@ -536,7 +536,7 @@ module ACP
       params.meta_raw = meta if meta.is_a?(Protocol::RawJson)
       initialize_meta = params.meta_raw
 
-      response = send_initialization_offer(params)
+      response = send_exact_request(Protocol::AgentMethod::INITIALIZE, params)
       result = decode_typed_response(Protocol::AgentMethod::INITIALIZE, response, Protocol::InitializeResult)
 
       # The handshake is a negotiation: the agent returns the version it will
@@ -717,8 +717,7 @@ module ACP
         raise InvalidStateError.new("The Agent did not advertise auth.status")
       end
 
-      method = Protocol::AgentMethod::AUTH_STATUS
-      decode_result(Protocol::AuthStatusResult, send_request(method, params), method)
+      request_auth_status(params)
     end
 
     # Lists the Agent's configurable model providers and current routing.
@@ -1564,8 +1563,12 @@ module ACP
       decode_typed_response(method, response, type)
     end
 
-    private def send_initialization_offer(params : JSON::Serializable, *, on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
-      method = Protocol::AgentMethod::INITIALIZE
+    protected def request_auth_status(params : Protocol::AuthStatusParams) : Protocol::AuthStatusResult
+      method = Protocol::AgentMethod::AUTH_STATUS
+      decode_typed_response(method, send_exact_request(method, params), Protocol::AuthStatusResult)
+    end
+
+    private def send_exact_request(method : String, params : JSON::Serializable, *, on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
       raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
       projection = raw.to_json_any?
       wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
@@ -1629,7 +1632,8 @@ module ACP
             end
           end
         end
-        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: method == Protocol::AgentMethod::INITIALIZE)
+        require_exact = method.in?(Protocol::AgentMethod::INITIALIZE, Protocol::AgentMethod::AUTH_STATUS)
+        wire_frame = Protocol::WireFrame.new(envelope, exact_params: true, require_exact: require_exact)
       end
       params = message["params"]?.try(&.as_h?)
       mcp_servers = mcp_declarations(method, params)
@@ -3670,7 +3674,7 @@ module ACP
       params = msg["params"]?
       params_json = frame.try(&.params_json)
       exact_params = method_name.in?(Protocol::AgentMethod::SESSION_UPDATE, Protocol::ProtocolMethod::CANCEL_REQUEST,
-        Protocol::ClientMethod::ELICITATION_COMPLETE)
+        Protocol::ClientMethod::ELICITATION_COMPLETE, Protocol::ClientMethod::AUTH_STATUS_UPDATE)
       if frame && !params_json && exact_params
         params_json = Protocol::WireFrame.field(frame.json, "params")
       end
@@ -3697,7 +3701,7 @@ module ACP
 
         handle_elicitation_complete(params, params_json)
       when Protocol::ClientMethod::AUTH_STATUS_UPDATE
-        handle_auth_status_update(params)
+        handle_auth_status_update(params, params_json)
       else
         # Delegate to the generic notification handler.
         # Extension notifications (prefixed with `_`) are also routed here.
@@ -4032,13 +4036,16 @@ module ACP
     end
 
     # Delivers advertised authentication status updates in receive order.
-    private def handle_auth_status_update(params : JSON::Any?) : Nil
+    private def handle_auth_status_update(params : JSON::Any?, params_json : String?) : Nil
       if (handler = @on_auth_status_update) && @pending_mutex.synchronize { @auth_status_supported }
-        if update = params.try { |p| Protocol::AuthStatusUpdateParams.from_json(p.to_json) rescue nil }
+        wire = params_json || params.try { |value| Protocol::WireFrame.encode(value) }
+        if wire && (update = Protocol::AuthStatusUpdateParams.from_json(wire) rescue nil)
           handler.call(update)
           return
         end
       end
+      return unless @on_notification && raw_notification_representable?(params_json)
+
       deliver_raw_notification(Protocol::ClientMethod::AUTH_STATUS_UPDATE, params)
     rescue ex
       ClientLog.error { "Error in auth/status_update handler: #{ex.class}" }

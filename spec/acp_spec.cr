@@ -6688,11 +6688,11 @@ describe "ACP draft authentication status" do
       transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
       transport.receive.not_nil!["result"]["accounts"][0]["label"].should eq("Display account")
       transport.receive.not_nil!["params"]["accounts"][0]["label"].should eq("Display account")
-      2.times do
-        logs.check(:debug, /"accounts":"\[REDACTED\]"/)
-        logs.entry.message.should_not contain("Display account")
-      end
-      logs.check(:debug, /"params":"\[REDACTED\]"/)
+      logs.check(:debug, /\[REDACTED frame\]/)
+      logs.entry.message.should_not contain("Display account")
+      logs.check(:debug, /"accounts":"\[REDACTED\]"/)
+      logs.entry.message.should_not contain("Display account")
+      logs.check(:debug, /\[REDACTED frame\]/)
       logs.entry.message.should_not contain("Display account")
     ensure
       transport.try(&.close)

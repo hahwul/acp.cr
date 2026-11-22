@@ -32,20 +32,20 @@ module ACP
     # Parameters of the draft auth/status method.
     struct AuthStatusParams
       include JSON::Serializable
-
-      # Extension metadata scoped to the query.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a read-only authentication status query.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Agent-provided account information for display.
     struct AuthAccount
       include JSON::Serializable
-      include JSON::Serializable::Unmapped
+      include LosslessOpenObject
 
       # Human-readable account label.
       getter label : String
@@ -79,16 +79,16 @@ module ACP
         @json_unmapped["organization"]?.try(&.as_s?)
       end
 
-      # Extension metadata scoped to this account.
-      def meta : Hash(String, JSON::Any)?
-        @json_unmapped["_meta"]?.try(&.as_h?)
-      end
+      def_equals_and_hash @label, @json_unmapped, @raw_fields
     end
 
     # Authentication status snapshot shared by both ACP versions.
     struct AuthStatusResult
       include JSON::Serializable
-      include JSON::Serializable::Unmapped
+      include LosslessOpenObject
+
+      @[JSON::Field(ignore: true)]
+      @accounts_wire : PreservedJson?
 
       # Authentication state as received, including future values.
       @[JSON::Field(key: "state")]
@@ -96,6 +96,32 @@ module ACP
 
       # Creates a status snapshot with additional wire fields.
       def initialize(@raw_state : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
+      end
+
+      # Reads a snapshot with an unambiguous state.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "state"))
+      end
+
+      protected def on_unknown_json_attribute(pull, key, key_location)
+        return super unless key == "accounts"
+
+        source = RawJson.new(pull)
+        projection = source.to_json_any?
+        # A fully representable list remains editable through json_unmapped.
+        # Keep the entire wire array when an element cannot be projected.
+        @accounts_wire = if projection.try(&.as_a?) && WireFrame.encode(projection) != source.json
+                           PreservedJson.new(source, project_array_objects: true, project_nested_objects: true)
+                         end
+        retain_unmapped_json(key, source.json, projection: @accounts_wire.try(&.value) || projection)
+      end
+
+      protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+        if key == "accounts" && (accounts = @accounts_wire) && (view = accounts.value.try(&.as_a?)) && value.as_a?.try(&.same?(view))
+          return accounts.raw.json
+        end
+
+        super
       end
 
       # The known state, treating future values as unknown.
@@ -108,15 +134,17 @@ module ACP
 
       # Reported accounts for display. Invalid entries are skipped.
       def accounts : Array(AuthAccount)
-        return [] of AuthAccount unless entries = @json_unmapped["accounts"]?.try(&.as_a?)
+        return [] of AuthAccount unless wire = exact_unmapped_json("accounts")
+        return [] of AuthAccount unless entries = RawJson.new(JSON::PullParser.new(wire)).elements?
 
-        entries.compact_map { |entry| AuthAccount.from_json(entry.to_json) rescue nil }
+        entries.compact_map do |entry|
+          AuthAccount.from_json(entry.json) if entry.object?
+        rescue JSON::ParseException
+          nil
+        end
       end
 
-      # Extension metadata scoped to the snapshot.
-      def meta : Hash(String, JSON::Any)?
-        @json_unmapped["_meta"]?.try(&.as_h?)
-      end
+      def_equals_and_hash @raw_state, @json_unmapped, @raw_fields
     end
 
     # The auth/status_update notification carries the same status snapshot.
