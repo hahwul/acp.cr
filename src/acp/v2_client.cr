@@ -901,7 +901,6 @@ module ACP
           raise InvalidStateError.new("The Agent did not advertise session.options") unless caps.options
           Protocol.validate_initial_config_options(config_options)
         end
-        validate_mcp_servers(caps.mcp, servers) if servers
         if system_prompt
           support = caps.system_prompt || raise InvalidStateError.new("The Agent did not advertise systemPrompt")
           unless support.supports_mode?(system_prompt.mode, @on_system_prompt_mode)
@@ -911,6 +910,7 @@ module ACP
             raise ArgumentError.new("ACP v2 system prompts require one or more text content blocks")
           end
         end
+        validate_mcp_servers(caps.mcp, servers) if servers
       end
 
       private def validate_mcp_servers(caps : Wire::McpCapabilities?, servers : Array(Wire::McpServer)) : Nil

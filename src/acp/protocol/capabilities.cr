@@ -843,6 +843,7 @@ module ACP
     # HTTP header to set when making requests to an MCP server.
     struct HttpHeader
       include JSON::Serializable
+      include LosslessMetadata
 
       # The name of the HTTP header.
       property name : String
@@ -850,12 +851,11 @@ module ACP
       # The value to set for the HTTP header.
       property value : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@name : String, @value : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@name : String, @value : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @name, @value, metadata_comparison
     end
 
     # Configuration for connecting to an MCP server via stdio transport.
@@ -863,6 +863,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#stdio-transport
     struct McpServerStdio
       include JSON::Serializable
+      include LosslessMetadata
 
       # Human-readable name identifying this MCP server.
       property name : String
@@ -876,18 +877,17 @@ module ACP
       # Environment variables to set when launching the MCP server.
       property env : Array(EnvVariable) = [] of EnvVariable
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @name : String,
         @command : String,
         @args : Array(String) = [] of String,
         @env : Array(EnvVariable) = [] of EnvVariable,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @name, @command, @args, @env, metadata_comparison
     end
 
     # Configuration for connecting to an MCP server via HTTP transport.
@@ -895,6 +895,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#http-transport
     struct McpServerHttp
       include JSON::Serializable
+      include LosslessMetadata
 
       # Must be "http".
       @[JSON::Field(key: "type")]
@@ -909,18 +910,17 @@ module ACP
       # HTTP headers to set when making requests to the MCP server.
       property headers : Array(HttpHeader) = [] of HttpHeader
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @name : String,
         @url : String,
         @headers : Array(HttpHeader) = [] of HttpHeader,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @transport_type = "http"
+        self.meta = meta
       end
+
+      def_equals_and_hash @transport_type, @name, @url, @headers, metadata_comparison
     end
 
     # Configuration for connecting to an MCP server via SSE transport.
@@ -929,6 +929,7 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#sse-transport
     struct McpServerSse
       include JSON::Serializable
+      include LosslessMetadata
 
       # Must be "sse".
       @[JSON::Field(key: "type")]
@@ -943,25 +944,24 @@ module ACP
       # HTTP headers to set when establishing the SSE connection.
       property headers : Array(HttpHeader) = [] of HttpHeader
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @name : String,
         @url : String,
         @headers : Array(HttpHeader) = [] of HttpHeader,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @transport_type = "sse"
+        self.meta = meta
       end
+
+      def_equals_and_hash @transport_type, @name, @url, @headers, metadata_comparison
     end
 
     # Union type representing all MCP server transport configurations.
     # Uses the "type" discriminator to determine transport kind; stdio
     # servers omit the type field (they are the default).
     #
-    # For JSON deserialization, use `McpServer.from_json` which handles
+    # For JSON deserialization, use `McpServerParser.from_json` which handles
     # the discriminator logic. For simplicity in Crystal, the type is
     # kept as a tagged union.
     #
@@ -973,17 +973,31 @@ module ACP
       # Parses a JSON::Any value into the appropriate McpServer subtype.
       def self.from_json_any(value : JSON::Any) : McpServer
         transport_type = value.as_h?.try(&.["type"]?).try(&.as_s?)
+        decode(RawJson.new(value), transport_type)
+      end
 
+      # Reads a known server declaration without narrowing metadata.
+      def self.from_json(value : RawJson | String) : McpServer
+        wire = value.is_a?(RawJson) ? value : RawJson.from_json(value)
+        type = wire.field("type", unique: true)
+        transport_type = type.try(&.as_s?)
+        if type && !type.null? && !transport_type.in?("stdio", "http", "sse", "acp")
+          raise JSON::ParseException.new("Unsupported MCP server transport type", 1, 1)
+        end
+        decode(wire, transport_type)
+      end
+
+      private def self.decode(wire : RawJson, transport_type : String?) : McpServer
         case transport_type
         when "http"
-          McpServerHttp.from_json(value.to_json)
+          McpServerHttp.from_json(wire.json)
         when "sse"
-          McpServerSse.from_json(value.to_json)
+          McpServerSse.from_json(wire.json)
         when "acp"
-          McpServerAcp.from_json(value.to_json)
+          McpServerAcp.from_json(wire.json)
         else
           # Default: stdio transport (no "type" field)
-          McpServerStdio.from_json(value.to_json)
+          McpServerStdio.from_json(wire.json)
         end
       end
 

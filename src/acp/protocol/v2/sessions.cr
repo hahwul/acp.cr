@@ -63,7 +63,10 @@ module ACP
       # transport settings are preserved in `json_unmapped`.
       struct McpServer
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessOpenObject
+
+        @[JSON::Field(ignore: true)]
+        @projected_fields : Hash(String, PreservedJson)?
 
         # MCP transport type such as `stdio` or `http`.
         @[JSON::Field(key: "type")]
@@ -75,36 +78,69 @@ module ACP
 
         # Encodes a standard stdio server with its required v2 discriminator.
         def self.stdio(server : Protocol::McpServerStdio) : McpServer
-          new("stdio", JSON.parse(server.to_json).as_h)
+          from_declaration(server, "stdio")
         end
 
         # Encodes a standard HTTP server.
         def self.http(server : Protocol::McpServerHttp) : McpServer
-          fields = JSON.parse(server.to_json).as_h
-          fields.delete("type")
-          new("http", fields)
+          from_declaration(server, "http")
         end
 
         # Encodes a server registered on the current ACP connection.
         def self.acp(server : Protocol::McpServerAcp) : McpServer
-          fields = server.to_json_any.as_h
-          fields.delete("type")
-          new("acp", fields)
+          from_declaration(server, "acp")
+        end
+
+        private def self.from_declaration(server : Protocol::McpServer, transport_type : String) : McpServer
+          wire = RawJson.new(JSON::PullParser.new(WireFrame.encode(server)))
+          type = RawJson.new(JSON::Any.new(transport_type))
+          from_json(wire.with_field("type", type).json)
+        end
+
+        protected def on_unknown_json_attribute(pull, key, key_location)
+          wire = RawJson.new(pull)
+          if wire.object? || wire.array?
+            preserved = PreservedMetadata.wrap(wire)
+            # A wide number in header or env metadata must not hide the
+            # editable list. In particular, deleting it must remove it on wire.
+            if !preserved.value && key.in?("headers", "env") && wire.elements?.try(&.all?(&.object?))
+              preserved = PreservedJson.new(wire, project_array_objects: true, project_nested_objects: true)
+            end
+            if (view = preserved.value) && WireFrame.encode(view) != wire.json
+              fields = @projected_fields ||= {} of String => PreservedJson
+              fields[key] = preserved
+              retain_unmapped_json(key, wire.json, projection: view)
+              return
+            end
+          end
+          @projected_fields.try(&.delete(key))
+          retain_unmapped_json(key, wire.json)
+        end
+
+        protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+          if (preserved = @projected_fields.try(&.[key]?)) && (view = preserved.value)
+            if view.as_h?.try(&.same?(value.as_h?)) || view.as_a?.try(&.same?(value.as_a?))
+              return preserved.raw.json
+            end
+          end
+          super
         end
 
         # Typed stdio configuration when the transport is stdio.
         def stdio_config : Protocol::McpServerStdio?
-          Protocol::McpServerStdio.from_json(to_json) if @transport_type == "stdio"
+          Protocol::McpServerStdio.from_json(WireFrame.encode(self)) if @transport_type == "stdio"
         rescue JSON::ParseException
           nil
         end
 
         # Typed HTTP configuration when the transport is HTTP.
         def http_config : Protocol::McpServerHttp?
-          Protocol::McpServerHttp.from_json(to_json) if @transport_type == "http"
+          Protocol::McpServerHttp.from_json(WireFrame.encode(self)) if @transport_type == "http"
         rescue JSON::ParseException
           nil
         end
+
+        def_equals_and_hash @transport_type, @json_unmapped, @raw_fields
       end
 
       # Parameters for creating a v2 session.
