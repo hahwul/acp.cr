@@ -3226,6 +3226,151 @@ describe "ACP v2 cancellation grants during session synchronization" do
   end
 end
 
+describe "ACP v2 replay retirement" do
+  {"a confirmed close", "a newer resume"}.each do |retirement|
+    it "releases a timed-out replay after #{retirement} and ignores its late reply" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"additionalDirectories":{}}}})
+      transport.replies["session/new"] = %("result":{"sessionId":"root"})
+      transport.replies["session/close"] = %("result":{})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work")
+
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) do
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", additional_directories: ["/old"], replay_from: ACP::Protocol::V2::ReplayFrom.start))
+      end
+      old = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+      transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+      transport.update("child", %({"sessionUpdate":"agent_message","messageId":"old","content":[]}))
+      transport.update("child", %({"sessionUpdate":"cursor_update","cursorId":"stale","anchor":{"type":"agent_message","messageId":"old","position":"after"}}))
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+      client.session_cursor("child", "stale").should be_nil
+
+      if retirement == "a confirmed close"
+        client.session_close("root")
+        client.session_workspace("root").should be_nil
+        transport.update("child", %({"sessionUpdate":"cursor_update","cursorId":"late","anchor":{"type":"agent_message","messageId":"old","position":"after"}}))
+        choice_state_barrier(client, transport)
+        client.session_cursor("child", "late").should be_nil
+      else
+        transport.update("root", %({"sessionUpdate":"replay_complete"}))
+        choice_state_barrier(client, transport)
+        transport.replies["session/resume"] = %("result":{})
+        client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", additional_directories: ["/new"]))
+      end
+
+      transport.replies["session/resume"] = %("result":{"availableCommands":[{"type":"command","name":"fresh","description":"Fresh"}]})
+      transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+        if method == "session/resume"
+          transport.update("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+          transport.update("child", %({"sessionUpdate":"agent_message","messageId":"new","content":[]}))
+          transport.update("child", %({"sessionUpdate":"cursor_update","cursorId":"fresh","anchor":{"type":"agent_message","messageId":"new","position":"after"}}))
+          transport.inject_raw(%({"jsonrpc":"2.0","id":#{old["id"]},"result":{"availableCommands":[{"type":"command","name":"stale","description":"Stale"}]}}))
+          transport.update("child", %({"sessionUpdate":"replay_complete"}))
+          transport.update("root", %({"sessionUpdate":"replay_complete"}))
+          transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+        end
+        nil
+      end
+      client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("root", "/work", additional_directories: ["/new"], replay_from: ACP::Protocol::V2::ReplayFrom.start))
+      client.session_state("root").not_nil!.state.should eq("running")
+      client.session_workspace("root").not_nil!.additional_directories.should eq(["/new"])
+      client.session_available_commands("root").not_nil!.map(&.name).should eq(["fresh"])
+      client.session_cursors("child").map(&.cursor_id).should eq(["fresh"])
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "releases the replay reservation when the late setup is evicted" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    next_answer(transport)
+
+    client.request_timeout = 0.001
+    129.times do |index|
+      params = ACP::Protocol::V2::SessionResumeParams.new("saved-#{index}", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+      next_answer(transport)["method"].should eq("session/resume")
+      next_answer(transport)["method"].should eq("$/cancel_request")
+    end
+
+    client.request_timeout = 2.0
+    transport.update("saved-0", %({"sessionUpdate":"agent_message","messageId":"old","content":[]}))
+    transport.update("saved-0", %({"sessionUpdate":"cursor_update","cursorId":"stale","anchor":{"type":"agent_message","messageId":"old","position":"after"}}))
+    choice_state_barrier(client, transport)
+    client.session_cursor("saved-0", "stale").should be_nil
+
+    transport.replies["session/resume"] = %("result":{})
+    transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      if method == "session/resume"
+        transport.update("saved-0", %({"sessionUpdate":"replay_complete"}))
+        transport.update("saved-0", %({"sessionUpdate":"state_update","state":"idle"}))
+      end
+      nil
+    end
+    params = ACP::Protocol::V2::SessionResumeParams.new("saved-0", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+    client.session_resume(params)
+    client.session_state("saved-0").not_nil!.state.should eq("idle")
+  ensure
+    client.try(&.close)
+  end
+
+  it "discards staged cursors when a still-pending resume is retired by close" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    transport.replies["session/new"] = %("result":{"sessionId":"root"})
+    transport.replies["session/close"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    client.session_new("/work")
+    next_answer(transport)
+    next_answer(transport)
+    transport.update("root", %({"sessionUpdate":"agent_message","messageId":"existing","content":[]}))
+    transport.update("root", %({"sessionUpdate":"cursor_update","cursorId":"published","anchor":{"type":"agent_message","messageId":"existing","position":"after"}}))
+    choice_state_barrier(client, transport)
+    next_answer(transport)["method"].should eq("_barrier")
+    client.session_cursor("root", "published").should_not be_nil
+
+    outcome = Channel(ACP::Protocol::V2::SessionResumeResult | Exception).new(1)
+    spawn do
+      params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start)
+      outcome.send(client.session_resume(params))
+    rescue ex
+      outcome.send(ex)
+    end
+    resume = next_answer(transport)
+    resume["method"].should eq("session/resume")
+    transport.update("root", %({"sessionUpdate":"agent_message","messageId":"old","content":[]}))
+    transport.update("root", %({"sessionUpdate":"cursor_update","cursorId":"stale","anchor":{"type":"agent_message","messageId":"old","position":"after"}}))
+    choice_state_barrier(client, transport)
+    client.session_cursor("root", "stale").should be_nil
+
+    client.session_close("root")
+    transport.update("root", %({"sessionUpdate":"replay_complete"}))
+    transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"result":{}}))
+    select
+    when result = outcome.receive
+      result.should be_a(ACP::Protocol::V2::SessionResumeResult)
+    when timeout(2.seconds)
+      fail "resume response was not delivered"
+    end
+    client.session_cursor("root", "stale").should be_nil
+    client.session_cursors("root").map(&.cursor_id).should eq(["published"])
+    client.session_state("root").should be_nil
+  ensure
+    client.try(&.close)
+  end
+end
+
 describe "ACP v2 cancellation replies" do
   it "accepts a terminal cancel result with wide optional metadata" do
     with_wide_stdio do |transport, feed, outgoing|
