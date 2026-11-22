@@ -20,6 +20,61 @@ module ACP
           input
         end
 
+        def self.validate_submission(form : RawJson, content : RawJson?) : Nil
+          return if content.nil? || content.null?
+
+          values = content.members? || invalid("Form submission content must be an object")
+          invalid("Ambiguous submitted field names") unless WireFrame.unique_members?(content.json, recursive: false)
+          decoded = schema(form)
+          if (required = decoded.required) && !required.all? { |name| values.has_key?(name) }
+            invalid("Form submission is missing a required field")
+          end
+
+          declared = form.field("properties").not_nil!.members?.not_nil!
+          values.each do |name, value|
+            definition = declared[name]? || invalid("Form submission includes an undeclared field")
+            if field = decoded.properties[name]?
+              invalid("Submitted value does not match its form field") unless valid_submission?(field, definition, value)
+            end
+          end
+        end
+
+        private def self.valid_submission?(field : ElicitationPropertySchema, definition : RawJson, value : RawJson) : Bool
+          case field.property_type
+          when "string"
+            text = value.as_s?
+            return false unless text && within_bounds?(text.size, field.min_length, field.max_length)
+            return false if (options = field.enum_values) && !options.includes?(text)
+            return false if (options = field.one_of) && !options.any? { |option| option.const_value == text }
+
+            true
+          when "integer"
+            input = value.as_i64?
+            !input.nil? && within_bounds?(input, field.minimum, field.maximum)
+          when "number"
+            return false if number(value, "number").nil?
+            minimum = definition.field("minimum")
+            maximum = definition.field("maximum")
+            (minimum.nil? || minimum.null? || compare_numbers(value, minimum) >= 0) &&
+              (maximum.nil? || maximum.null? || compare_numbers(value, maximum) <= 0)
+          when "boolean"
+            value.json.in?("true", "false")
+          when "array"
+            selections = value.elements?
+            return false unless selections && within_bounds?(selections.size, field.min_items, field.max_items)
+
+            items = field.items.not_nil!
+            options = items.enum_values || items.any_of.not_nil!.map(&.const_value)
+            selections.all? { |selection| (choice = selection.as_s?) && options.includes?(choice) }
+          else
+            false
+          end
+        end
+
+        private def self.within_bounds?(value, minimum, maximum) : Bool
+          (minimum.nil? || value >= minimum) && (maximum.nil? || value <= maximum)
+        end
+
         private def self.schema(form : RawJson) : ElicitationSchema
           fields = form.unambiguous_patch(required: {"type", "properties", "required"},
             optional: {"title", "description", "_meta"}).members?
@@ -77,9 +132,13 @@ module ACP
             end
             property.default = default.try(&.as_s?).try { |value| JSON::Any.new(value) }
           when "number", "integer"
-            property.minimum = constraint(fields["minimum"]?, "minimum") { |value| number(value, type) }
-            property.maximum = constraint(fields["maximum"]?, "maximum") { |value| number(value, type) }
-            check_range(property.minimum, property.maximum, "numeric value")
+            minimum = fields["minimum"]?
+            maximum = fields["maximum"]?
+            property.minimum = constraint(minimum, "minimum") { |value| number(value, type) }
+            property.maximum = constraint(maximum, "maximum") { |value| number(value, type) }
+            if minimum && maximum && !minimum.null? && !maximum.null? && compare_numbers(minimum, maximum) > 0
+              invalid("Form numeric value has a minimum above its maximum")
+            end
             property.default = default.try { |value| number(value, type) }.try { |value| JSON::Any.new(value) }
           when "boolean"
             case default.try(&.json)
@@ -156,6 +215,30 @@ module ACP
           return if value.nil? || value.null?
 
           (yield value) || invalid("Invalid form #{name}")
+        end
+
+        # Compare the decimal tokens without rounding them or expanding exponents.
+        private def self.compare_numbers(left : RawJson, right : RawJson) : Int32
+          left_sign, left_order, left_digits = decimal_parts(left)
+          right_sign, right_order, right_digits = decimal_parts(right)
+          return left_sign <=> right_sign unless left_sign == right_sign
+
+          magnitude = left_order <=> right_order
+          magnitude = left_digits <=> right_digits if magnitude.zero?
+          left_sign * magnitude
+        end
+
+        private def self.decimal_parts(value : RawJson) : {Int32, Int128, String}
+          parts = /\A(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?\z/.match(value.json)
+          invalid("Invalid form number") unless parts
+
+          fraction = parts[3]? || ""
+          digits = (parts[2] + fraction).lstrip('0')
+          return {0, 0_i128, ""} if digits.empty?
+
+          exponent = (parts[4]? || "0").to_i64? || invalid("Form number exponent is outside the supported range")
+          order = exponent.to_i128 + digits.bytesize - fraction.bytesize
+          {parts[1].empty? ? 1 : -1, order, digits.rstrip('0')}
         end
 
         private def self.unsigned_digits(value : RawJson) : String
