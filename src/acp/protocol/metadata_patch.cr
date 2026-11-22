@@ -22,9 +22,8 @@ module ACP
     end
 
     # :nodoc:
-    module LosslessMetadataPatch
-      include MetadataPatch
-
+    # Retains the wire value and presence independently of how it is applied.
+    module LosslessMetadataField
       @[JSON::Field(key: "_meta", presence: true, emit_null: true, ignore_serialize: !meta_present?, converter: ::ACP::Protocol::PreservedMetadata)]
       @metadata_wire : PreservedJson?
 
@@ -54,6 +53,28 @@ module ACP
           raw if raw.object?
         end
       end
+
+      # Sets an exact metadata object. Nil or JSON null sends an explicit clear.
+      def meta_raw=(value : RawJson?) : RawJson?
+        metadata = if value && !value.null?
+                     raise ArgumentError.new("Extension metadata must be an object or null") unless value.object?
+
+                     PreservedMetadata.wrap(value)
+                   end
+        @metadata_wire_present = true
+        @metadata_wire = metadata
+        value
+      end
+
+      protected def metadata_comparison
+        meta_raw.try { |wire| wire.to_json_any? || wire }
+      end
+    end
+
+    # :nodoc:
+    module LosslessMetadataPatch
+      include MetadataPatch
+      include LosslessMetadataField
 
       # Applies the patch to an exact metadata snapshot. A clear or a patch that leaves no keys returns nil.
       def apply_metadata_raw(previous : RawJson?) : RawJson?

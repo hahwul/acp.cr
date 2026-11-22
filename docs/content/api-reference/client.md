@@ -920,6 +920,13 @@ child state, capabilities, and configuration in those updates as history.
 During `session/resume`, updates may arrive before the response. The client
 publishes effective state and cancellation permission when the resume succeeds.
 
+In v1, `SessionMessageUpdate` reports a message between sessions, and
+`SessionMessageChunkUpdate` appends one content block. Both expose exact
+extension metadata through `meta_raw`. On message updates, an omitted
+`_meta` leaves the stored metadata in place, `null` clears it, and an object
+replaces it. Check `meta_present?` to distinguish the updates.
+[ACP v1 Subagents](https://agentclientprotocol.com/protocol/v1/subagents)
+
 ## MCP-over-ACP (draft)
 
 Register an MCP handler on an initialized ACP client and include its

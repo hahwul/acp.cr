@@ -8500,6 +8500,107 @@ describe "ACP v2 exact session state" do
     end
   end
 end
+describe "ACP v1 exact inter-session messages" do
+  it "delivers exact metadata and usable content across stdio updates and chunks" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(subagents: ACP::Protocol::SubagentCapabilities.new)
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      events = Channel(ACP::Protocol::SessionUpdateParams).new(4)
+      client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+        events.send(params)
+        nil
+      end
+      answer_identity_request(feed, outgoing, %q({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %q({"sessionId":"root"}))
+      client.session_new("/work")
+
+      send_update = ->(session_id : String, update : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{session_id.to_json},"update":#{update}}})
+      end
+      send_update.call("root", %q({"sessionUpdate":"subagent_update","sessionId":"child"}))
+      next_permission_event(events).update.as(ACP::Protocol::SubagentUpdate).session_id.should eq("child")
+
+      meta = %q({"example.test/count":18446744073709551615,"example.test/values":[0.123456789012345678901,"before"]})
+      content = %({"type":"text","text":"Fixture","_meta":#{meta}})
+      message = %({"sessionUpdate":"session_message","messageId":"m","senderSessionId":"root","recipientSessionId":"child","content":[false,#{content},{"type":"_future"}],"_meta":#{meta}})
+      send_update.call("child", message)
+      chunk = %({"sessionUpdate":"session_message_chunk","messageId":"m","content":#{content},"_meta":#{meta}})
+      send_update.call("child", chunk)
+      send_update.call("child", %q({"sessionUpdate":"session_message","messageId":"m","content":null,"_meta":null}))
+
+      first = next_permission_event(events)
+      first.session_id.should eq("child")
+      upsert = first.update.as(ACP::Protocol::SessionMessageUpdate)
+      upsert.content.not_nil!.size.should eq(1)
+      block = upsert.content.not_nil!.first.as(ACP::Protocol::TextContentBlock)
+      block.text.should eq("Fixture")
+      block.meta_raw.try(&.json).should eq(meta)
+      upsert.meta_present?.should be_true
+      upsert.meta_raw.try(&.json).should eq(meta)
+
+      upsert.meta.not_nil!["example.test/values"].as_a[1] = JSON::Any.new("after")
+      ACP::Protocol::RawJson.from_json(upsert.to_json).field("_meta").try(&.json).should eq(meta.sub("before", "after"))
+      appended = next_permission_event(events).update.as(ACP::Protocol::SessionMessageChunkUpdate)
+      appended.message_id.should eq("m")
+      appended.content.as(ACP::Protocol::TextContentBlock).meta_raw.try(&.json).should eq(meta)
+      appended.meta_raw.try(&.json).should eq(meta)
+
+      cleared = next_permission_event(events).update.as(ACP::Protocol::SessionMessageUpdate)
+      cleared.content_present?.should be_true
+      cleared.content.should be_nil
+      cleared.meta_present?.should be_true
+      cleared.meta.should be_nil
+      cleared.sender_session_id_present?.should be_false
+      clear_wire = ACP::Protocol::RawJson.from_json(cleared.to_json)
+      clear_wire.field("_meta").try(&.null?).should be_true
+      clear_wire.field("content").try(&.null?).should be_true
+      clear_wire.field("senderSessionId").should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "preserves omission, ignores malformed patch fields, and rejects ambiguous IDs" do
+    upsert = ACP::Protocol::SessionMessageUpdate.from_json(%q({"sessionUpdate":"session_message","messageId":"m","recipientMessageId":false,"senderSessionId":"root","senderSessionId":"root","content":false,"_meta":false}))
+    upsert.recipient_message_id_present?.should be_false
+    upsert.sender_session_id_present?.should be_false
+    upsert.content_present?.should be_false
+    upsert.meta_present?.should be_false
+    wire = ACP::Protocol::RawJson.from_json(upsert.to_json)
+    {"recipientMessageId", "senderSessionId", "content", "_meta"}.each do |key|
+      wire.field(key).should be_nil
+    end
+    upsert.meta_raw = ACP::Protocol::RawJson.from_json("{}")
+    upsert.meta_present?.should be_true
+    upsert.meta_raw.try(&.json).should eq("{}")
+    upsert.meta_raw = nil
+    upsert.meta_present?.should be_true
+    ACP::Protocol::RawJson.from_json(upsert.to_json).field("_meta").try(&.null?).should be_true
+
+    invalid = ACP::Protocol::SessionMessageUpdate.from_json(%q({"sessionUpdate":"session_message","messageId":"m","content":[false,{"type":"text","text":false}]}))
+    invalid.content_present?.should be_false
+    ACP::Protocol::RawJson.from_json(invalid.to_json).field("content").should be_nil
+    empty = ACP::Protocol::SessionMessageUpdate.from_json(%q({"sessionUpdate":"session_message","messageId":"m","content":[]}))
+    empty.content_present?.should be_true
+    empty.content.not_nil!.should be_empty
+
+    constructed = ACP::Protocol::SessionMessageUpdate.new("m")
+    constructed.meta = {"value" => JSON::Any.new(1.0)}
+    parsed = ACP::Protocol::SessionMessageUpdate.from_json(%q({"sessionUpdate":"session_message","messageId":"m","_meta":{"value":1.00}}))
+    constructed.should eq(parsed)
+    constructed.hash.should eq(parsed.hash)
+    upsert.should_not eq(invalid)
+
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::SessionUpdate.from_json(%q({"sessionUpdate":"session_message","messageId":"m","messageId":"m"}))
+    end
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::SessionUpdate.from_json(%q({"sessionUpdate":"session_message_chunk","messageId":"m","content":{"type":"text","text":"A"},"content":{"type":"text","text":"A"}}))
+    end
+  end
+end
+
 describe "ACP v2 subagent patch decoding" do
   it "keeps valid fields when optional child fields are malformed" do
     wire = %({"sessionId":"child","title":"Retained","description":false,"capabilities":[],"state":{"state":false},"cwd":"/work/child","additionalDirectories":[]})
