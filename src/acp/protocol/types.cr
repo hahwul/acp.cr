@@ -159,32 +159,25 @@ module ACP
 
     # :nodoc:
     module OptionalRawAuthMethods
-      def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)?
+      def self.from_json(pull : JSON::PullParser) : PreservedJson?
         unless pull.kind.begin_array?
           pull.skip
           return nil
         end
 
-        methods = [] of JSON::Any
-        pull.read_array do
-          raw = WireFrame.read_raw(pull)
-          begin
-            methods << JSON.parse(raw)
-          rescue JSON::ParseException
-            # Skip entries outside JSON::Any's range while retaining siblings.
-          end
-        end
-        methods
+        PreservedJson.new(RawJson.new(pull), project_array_objects: true, project_nested_objects: true)
       end
 
-      def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
-        value.to_json(json)
+      def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+        value.to_json(builder)
       end
     end
 
     # Result of the `initialize` method (Agent → Client).
     struct InitializeResult
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The ACP protocol version the agent supports.
       @[JSON::Field(key: "protocolVersion")]
@@ -194,32 +187,44 @@ module ACP
       @[JSON::Field(key: "agentCapabilities", converter: ::ACP::Protocol::DefaultCapabilityObject(::ACP::Protocol::AgentCapabilities))]
       property agent_capabilities : AgentCapabilities = AgentCapabilities.new
 
-      # Authentication methods the agent supports.
-      # If empty or nil, no authentication is required.
       @[JSON::Field(key: "authMethods", converter: ::ACP::Protocol::OptionalRawAuthMethods)]
-      property auth_methods : Array(JSON::Any)?
+      @auth_methods_wire : PreservedJson?
 
       # Metadata about the agent.
       # Note: in future versions of the protocol, this will be required.
       @[JSON::Field(key: "agentInfo", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::AgentInfo))]
       property agent_info : AgentInfo?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @protocol_version : UInt16,
         @agent_capabilities : AgentCapabilities = AgentCapabilities.new,
-        @auth_methods : Array(JSON::Any)? = nil,
+        auth_methods : Array(JSON::Any)? = nil,
         @agent_info : AgentInfo? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.auth_methods = auth_methods
+        self.meta = meta
+      end
+
+      # The advertised methods as editable JSON::Any values.
+      def auth_methods : Array(JSON::Any)?
+        @auth_methods_wire.try(&.value).try(&.as_a?)
+      end
+
+      # Replaces the advertised methods.
+      def auth_methods=(values : Array(JSON::Any)?) : Array(JSON::Any)?
+        @auth_methods_wire = values.try { |methods| PreservedJson.new(JSON::Any.new(methods)) }
+        values
+      end
+
+      # The advertised methods with their exact extension values and variants.
+      def auth_methods_raw : RawJson?
+        @auth_methods_wire.try(&.raw)
       end
 
       # Supported Agent-managed and terminal authentication descriptors.
       def typed_auth_methods : Array(AuthenticationMethod)
-        Protocol.typed_auth_methods(@auth_methods)
+        auth_methods_raw.try { |methods| Protocol.typed_auth_methods(methods) } || [] of AuthenticationMethod
       end
     end
 

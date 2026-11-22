@@ -592,8 +592,8 @@ module ACP
       has_id = envelope.try(&.has_key?("id"))
       response = has_id && !envelope.try(&.has_key?("method"))
       structured_error = response && envelope.try(&.["error"]?).try(&.as_h?)
-      ambiguous_initialize = response && result.try(&.has_key?("protocolVersion")) && ambiguous_initialize_reply?(line)
-      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || structured_error || ambiguous_initialize ||
+      initialize_result = response && result.try(&.has_key?("protocolVersion"))
+      if exact_params || versioned_result || choices_result || state_result || turn_usage_result || session_list_result || identity_result || result_metadata || structured_error || initialize_result ||
          (response && !Protocol::WireFrame.repeated_members(line, *Protocol::WireFrame::RESPONSE_FIELDS).empty?) ||
          (has_id && method && !Protocol::WireFrame.repeated_members(line, "id").empty?)
         Protocol::WireFrame.new(line, exact_params: true)
@@ -602,13 +602,6 @@ module ACP
       end
     rescue JSON::ParseException
       Protocol::WireFrame.new(line)
-    end
-
-    private def ambiguous_initialize_reply?(line : String) : Bool
-      if result = Protocol::WireFrame.field(line, "result")
-        return !Protocol::WireFrame.repeated_members(result, "protocolVersion").empty?
-      end
-      false
     end
   end
 

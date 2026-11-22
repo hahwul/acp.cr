@@ -123,8 +123,17 @@ module ACP
     # Agent info received during initialization.
     getter agent_info : Protocol::AgentInfo?
 
-    # Authentication methods the agent supports.
-    getter auth_methods : Array(JSON::Any)?
+    @v1_initialize_result : Protocol::InitializeResult?
+
+    # Authentication methods the agent supports as editable JSON::Any.
+    def auth_methods : Array(JSON::Any)?
+      @v1_initialize_result.try(&.auth_methods)
+    end
+
+    # Advertised authentication methods with exact extension values.
+    def auth_methods_raw : Protocol::RawJson?
+      @v1_initialize_result.try(&.auth_methods_raw)
+    end
 
     # The protocol version negotiated with the agent.
     getter negotiated_protocol_version : UInt16?
@@ -523,7 +532,7 @@ module ACP
         client_info: @client_info
       )
 
-      result = send_typed_request(Protocol::AgentMethod::INITIALIZE, params, Protocol::InitializeResult)
+      result = send_typed_request(Protocol::AgentMethod::INITIALIZE, params, Protocol::InitializeResult, exact_response: true)
 
       # The handshake is a negotiation: the agent returns the version it will
       # use, which may be lower than we requested. Accept any version we still
@@ -544,7 +553,7 @@ module ACP
       @agent_capabilities = result.agent_capabilities
       @v1_boolean_config_supported = !!params.client_capabilities.session.try(&.config_options).try(&.boolean)
       @agent_info = result.agent_info
-      @auth_methods = result.auth_methods
+      @v1_initialize_result = result
       @state = ClientState::Initialized
 
       ClientLog.info do
@@ -568,10 +577,14 @@ module ACP
 
       # A terminal descriptor can never be passed to the protocol method.
       # Inspect its discriminator even if its other fields could not decode.
-      method = @auth_methods.try(&.find { |entry| entry.as_h?.try(&.["id"]?).try(&.as_s?) == method_id })
+      method = advertised_auth_method(method_id)
       raise InvalidStateError.new("Authentication method #{method_id.inspect} was not advertised") unless method
-      if (kind = method["type"]?) && !kind.raw.nil? && kind.as_s? != "agent"
+      if (kind = method.field("type")) && !kind.null? && kind.as_s? != "agent"
         raise InvalidStateError.new("Authentication method #{method_id.inspect} requires a different flow")
+      end
+
+      unless Protocol.typed_auth_method(method).is_a?(Protocol::AuthMethod)
+        raise InvalidStateError.new("Authentication method #{method_id.inspect} has an invalid descriptor")
       end
 
       params = Protocol::AuthenticateParams.new(method_id, credentials)
@@ -582,7 +595,19 @@ module ACP
 
     # Decoded authentication methods from the initialize handshake.
     def typed_auth_methods : Array(Protocol::AuthenticationMethod)
-      Protocol.typed_auth_methods(@auth_methods)
+      @v1_initialize_result.try(&.typed_auth_methods) || [] of Protocol::AuthenticationMethod
+    end
+
+    private def advertised_auth_method(method_id : String) : Protocol::RawJson?
+      return unless methods = auth_methods_raw.try(&.elements?)
+
+      matching = methods.select { |method| method.field("id").try(&.as_s?) == method_id }
+      return unless matching.size == 1
+
+      method = matching.first
+      method if Protocol::WireFrame.repeated_members(method.json, "id", "type").empty?
+    rescue JSON::ParseException
+      nil
     end
 
     # Runs an advertised terminal login, then returns a new initialized client.
@@ -608,7 +633,7 @@ module ACP
         raise InvalidStateError.new("Terminal authentication requires an advertised capability and a process transport")
       end
 
-      method = typed_auth_methods.find { |candidate| candidate.id == method_id }.as?(Protocol::TerminalAuthMethod)
+      method = advertised_auth_method(method_id).try { |candidate| Protocol.typed_auth_method(candidate).as?(Protocol::TerminalAuthMethod) }
       raise InvalidStateError.new("Unknown terminal authentication method #{method_id.inspect}") unless method
       raise AuthenticationError.new("Terminal authentication declined") unless approve.call(method)
       ensure_terminal_auth_state
