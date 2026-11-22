@@ -1,5 +1,4 @@
 require "path"
-require "./optional_metadata"
 require "./raw_json"
 
 module ACP
@@ -86,6 +85,7 @@ module ACP
     # Workspace and optional saved session for an options preview.
     struct SessionOptionsParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Absolute working directory the Agent resolves settings against.
       getter cwd : String
@@ -98,19 +98,18 @@ module ACP
       @[JSON::Field(key: "additionalDirectories")]
       getter additional_directories : Array(String)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Builds a read-only options query.
       def initialize(
         @cwd : String,
         *,
         @session_id : String? = nil,
         @additional_directories : Array(String)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @cwd, @session_id, @additional_directories, metadata_comparison
     end
 
     # A configuration choice to apply when setting up a v1 session.

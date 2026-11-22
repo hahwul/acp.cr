@@ -647,7 +647,7 @@ module ACP
           if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
             raise ArgumentError.new("The ACP v2 session list directory must be absolute")
           end
-          @connection.request_typed(AgentMethod::SESSION_LIST, params, SessionListResponse, exact_response: true).page
+          @connection.request_exact(AgentMethod::SESSION_LIST, params, SessionListResponse).page
         end
       end
 
@@ -659,7 +659,7 @@ module ACP
             raise ArgumentError.new("ACP v2 session directories must be absolute")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult, exact_response: true)
+          @connection.request_exact(AgentMethod::SESSION_OPTIONS, params, Wire::SessionOptionsResult)
         end
       end
 
@@ -670,39 +670,59 @@ module ACP
 
       # Queries a session and its foreground snapshot without attaching to it.
       def session_status(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionStatusResult
+        session_status(Wire::SessionStatusParams.new(session_id, meta))
+      end
+
+      # Queries a session with typed parameters and optional extension metadata.
+      def session_status(params : Wire::SessionStatusParams) : Wire::SessionStatusResult
         @connection.with_request do
           unless session_capabilities.status
             raise InvalidStateError.new("The Agent did not advertise session.status")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_STATUS, Wire::SessionStatusParams.new(session_id, meta), Wire::SessionStatusResult, exact_response: true)
+          @connection.request_exact(AgentMethod::SESSION_STATUS, params, Wire::SessionStatusResult)
         end
       end
 
       # Sets the title of a session and returns the title the Agent stored.
       def session_set_title(session_id : String, title : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SetSessionTitleResult
+        session_set_title(Wire::SetSessionTitleParams.new(session_id, title, meta))
+      end
+
+      # Sets a session title with optional extension metadata.
+      def session_set_title(params : Wire::SetSessionTitleParams) : Wire::SetSessionTitleResult
         @connection.with_request do
           unless session_capabilities.title
             raise InvalidStateError.new("The Agent did not advertise session.title")
           end
 
-          @connection.request_typed(AgentMethod::SESSION_SET_TITLE, Wire::SetSessionTitleParams.new(session_id, title, meta), Wire::SetSessionTitleResult, exact_response: true)
+          @connection.request_exact(AgentMethod::SESSION_SET_TITLE, params, Wire::SetSessionTitleResult)
         end
       end
 
       # Closes and archives the session while preserving its saved history.
       def session_archive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionArchiveResult
+        session_archive(Wire::SessionArchiveParams.new(session_id, meta))
+      end
+
+      # Archives a session with optional extension metadata.
+      def session_archive(params : Wire::SessionArchiveParams) : Wire::SessionArchiveResult
         @connection.with_request do
           ensure_archive_support
-          @connection.request_typed(AgentMethod::SESSION_ARCHIVE, Wire::SessionArchiveParams.new(session_id, meta), Wire::SessionArchiveResult, exact_response: true)
+          @connection.request_exact(AgentMethod::SESSION_ARCHIVE, params, Wire::SessionArchiveResult)
         end
       end
 
       # Restores the session to default list results without attaching to it.
       def session_unarchive(session_id : String, *, meta : Hash(String, JSON::Any)? = nil) : Wire::SessionUnarchiveResult
+        session_unarchive(Wire::SessionUnarchiveParams.new(session_id, meta))
+      end
+
+      # Restores a session to default listing with optional extension metadata.
+      def session_unarchive(params : Wire::SessionUnarchiveParams) : Wire::SessionUnarchiveResult
         @connection.with_request do
           ensure_archive_support
-          @connection.request_typed(AgentMethod::SESSION_UNARCHIVE, Wire::SessionUnarchiveParams.new(session_id, meta), Wire::SessionUnarchiveResult, exact_response: true)
+          @connection.request_exact(AgentMethod::SESSION_UNARCHIVE, params, Wire::SessionUnarchiveResult)
         end
       end
 
@@ -752,18 +772,28 @@ module ACP
 
       # Closes a session and its background work.
       def session_close(session_id : String) : Wire::SessionCloseResult
+        session_close(Wire::SessionCloseParams.new(session_id))
+      end
+
+      # Closes a session with typed parameters and optional extension metadata.
+      def session_close(params : Wire::SessionCloseParams) : Wire::SessionCloseResult
         @connection.with_request do
           session_capabilities
-          @connection.retire_session(AgentMethod::SESSION_CLOSE, Wire::SessionCloseParams.new(session_id), Wire::SessionCloseResult)
+          @connection.retire_session(AgentMethod::SESSION_CLOSE, params, Wire::SessionCloseResult)
         end
       end
 
       # Deletes a session when the Agent advertises deletion.
       def session_delete(session_id : String) : Wire::SessionDeleteResult
+        session_delete(Wire::SessionDeleteParams.new(session_id))
+      end
+
+      # Deletes a saved session with optional extension metadata.
+      def session_delete(params : Wire::SessionDeleteParams) : Wire::SessionDeleteResult
         @connection.with_request do
           raise InvalidStateError.new("The Agent did not advertise session deletion") unless session_capabilities.delete
 
-          @connection.retire_session(AgentMethod::SESSION_DELETE, Wire::SessionDeleteParams.new(session_id), Wire::SessionDeleteResult)
+          @connection.retire_session(AgentMethod::SESSION_DELETE, params, Wire::SessionDeleteResult)
         end
       end
 

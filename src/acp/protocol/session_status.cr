@@ -1,4 +1,3 @@
-require "./optional_metadata"
 require "./raw_json"
 
 module ACP
@@ -34,18 +33,18 @@ module ACP
     # Parameters of the draft read-only session/status query.
     struct SessionStatusParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # Agent-owned ID of the session to inspect.
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a status query.
-      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@session_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, metadata_comparison
     end
 
     # Session status fields shared by the v1 and v2 responses.

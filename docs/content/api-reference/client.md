@@ -630,6 +630,10 @@ The client raises `InvalidStateError` for missing capabilities and
 [ACP v1 Session Setup](https://agentclientprotocol.com/protocol/v1/session-setup)
 [ACP v1 Prompt Turn](https://agentclientprotocol.com/protocol/v1/prompt-turn)
 
+The v1 and v2 clients accept typed parameters for session list, options,
+status, title, archive, unarchive, close, and delete requests. Set
+`meta_raw` on these parameters to send exact extension values.
+
 ### `#session_status` (draft)
 
 Call `client.session_status(session_id)` to query a session without attaching
