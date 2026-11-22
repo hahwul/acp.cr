@@ -271,6 +271,9 @@ module ACP
         include LosslessMetadata
         include LosslessContentField
 
+        # :nodoc:
+        WIRE_FIELDS = {"sessionUpdate", "messageId", "content", "_meta"}
+
         # Discriminator for this message's role.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String
@@ -283,6 +286,20 @@ module ACP
         def initialize(@session_update : String, @message_id : String, content : JSON::Any, meta : Hash(String, JSON::Any)? = nil)
           @content_wire = PreservedJson.new(content)
           self.meta = meta
+        end
+
+        # Reads an unambiguous chunk. A session-directed chunk requires usable display content.
+        def self.new(pull : JSON::PullParser) : self
+          location = pull.location
+          wire = RawJson.new(pull)
+          repeated = WireFrame.repeated_members(wire.json, *WIRE_FIELDS)
+          if repeated.any? { |field| field != "_meta" }
+            raise JSON::ParseException.new("Ambiguous ACP message chunk fields", *location)
+          end
+          wire = wire.without_field("_meta") if repeated.includes?("_meta")
+          chunk = previous_def(JSON::PullParser.new(wire.json))
+          Protocol::ContentBlock.from_v2_json(chunk.content_raw) if chunk.session_update == "session_message_chunk"
+          chunk
         end
 
         # Converts display content to a typed chunk with its message ID.
@@ -368,7 +385,8 @@ module ACP
 
         protected def on_unknown_json_attribute(pull, key, key_location)
           if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key) ||
-             StateFields::MEMBERS.includes?(key) || SubagentUpdate::WIRE_FIELDS.includes?(key)
+             StateFields::MEMBERS.includes?(key) || SubagentUpdate::WIRE_FIELDS.includes?(key) ||
+             SessionMessageUpdate::WIRE_FIELDS.includes?(key)
             if earlier = exact_unmapped_json(key)
               (@duplicate_fields ||= Set(String).new).add(key)
               fields = @earlier_fields ||= {} of String => Array(String)
@@ -386,6 +404,9 @@ module ACP
                             when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
                             when "state_update"                             then StateFields::MEMBERS
                             when "subagent_update"                          then SubagentUpdate::WIRE_FIELDS
+                            when "session_message"                          then SessionMessageUpdate::WIRE_FIELDS
+                            when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
+                              MessageChunkUpdate::WIRE_FIELDS
                             end
           if retained_fields
             @earlier_fields.try &.each do |key, values|

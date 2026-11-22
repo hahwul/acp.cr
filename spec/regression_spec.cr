@@ -6061,3 +6061,110 @@ describe "ACP v2 subagent patch decoding" do
     end
   end
 end
+describe "ACP v2 session-directed message patches" do
+  it "keeps usable patches when individual participant fields are malformed" do
+    wire = %({"sessionUpdate":"session_message","messageId":"local","senderSessionId":false,"recipientSessionId":"child","senderMessageId":null,"recipientMessageId":[],"content":[false,{"type":"text","text":"Hello"},{"type":"future","value":0.1234567890123456789}],"_meta":{"example.test/count":18446744073709551615}})
+    update = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+    update.message_id.should eq("local")
+    update.sender_session_id_present?.should be_false
+    update.recipient_session_id.should eq("child")
+    update.sender_message_id_present?.should be_true
+    update.sender_message_id.should be_nil
+    update.recipient_message_id_present?.should be_false
+    update.content_raw.not_nil!.elements?.not_nil!.size.should eq(3)
+    blocks = update.content_blocks.not_nil!
+    blocks.map(&.type).should eq(["text", "future"])
+    blocks.last.as(ACP::Protocol::UnknownContentBlock).raw.field("value").not_nil!.json.should eq("0.1234567890123456789")
+    update.meta_raw.not_nil!.field("example.test/count").not_nil!.json.should eq(UInt64::MAX.to_s)
+    encoded = ACP::Protocol::RawJson.from_json(update.to_json)
+    encoded.field("senderSessionId").should be_nil
+    encoded.field("recipientMessageId").should be_nil
+    encoded.field("senderMessageId").not_nil!.null?.should be_true
+  end
+
+  it "rejects a repeated local ID and treats repeated optional patch fields as omitted" do
+    wire = %({"sessionUpdate":"session_message","messageId":"old","messageId":"new","content":[]})
+    expect_raises(JSON::ParseException) { ACP::Protocol::V2::SessionMessageUpdate.from_json(wire) }
+    ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
+
+    wire = %({"sessionUpdate":"session_message","messageId":"local","senderSessionId":null,"senderSessionId":"another","recipientMessageId":"peer","content":null,"content":[],"_meta":null,"_meta":{"example.test/data":true}})
+    [ACP::Protocol::V2::SessionMessageUpdate.from_json(wire), ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::SessionMessageUpdate)].each do |update|
+      update.sender_session_id_present?.should be_false
+      update.recipient_message_id.should eq("peer")
+      update.content_present?.should be_false
+      update.meta_present?.should be_false
+    end
+  end
+
+  it "requires one usable content block and an unambiguous local ID for a streamed message" do
+    base = %("sessionUpdate":"session_message_chunk","messageId":"local")
+    [
+      %({#{base},"content":null}),
+      %({#{base},"content":{"type":"image","data":"bad","mimeType":"image/png"}}),
+      %({#{base},"content":{"type":"skill","name":"draft"}}),
+      %({#{base},"content":false,"content":{"type":"text","text":"Ambiguous"}}),
+      %({#{base},"messageId":"other","content":{"type":"text","text":"Ambiguous"}}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::MessageChunkUpdate.from_json(wire) }
+      ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
+    end
+
+    valid = %({#{base},"content":{"type":"text","text":"Kept"},"_meta":null,"_meta":{"example.test/value":true}})
+    chunk = ACP::Protocol::V2::SessionUpdate.from_json(valid).typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+    chunk.to_content_chunk.not_nil!.content.as(ACP::Protocol::TextContentBlock).text.should eq("Kept")
+    chunk.meta_raw.should be_nil
+  end
+
+  it "delivers each transcript's chunks and explicit links in receive order over stdio" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+      send_update = ->(sid : String, update : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":#{sid.to_json},"update":#{update}}})
+        next_exact_session_update(observed)
+      end
+      send_update.call("root", %({"sessionUpdate":"subagent_update","sessionId":"child"}))
+
+      first = send_update.call("child", %({"sessionUpdate":"session_message_chunk","messageId":"incoming","content":{"type":"future","detail":18446744073709551615},"_meta":{"example.test/chunk":0.1234567890123456789}}))
+      first.session_id.should eq("child")
+      chunk = first.update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+      chunk.message_id.should eq("incoming")
+      block = chunk.to_content_chunk.not_nil!.content.as(ACP::Protocol::UnknownContentBlock)
+      block.raw.field("detail").not_nil!.json.should eq(UInt64::MAX.to_s)
+      chunk.meta_raw.not_nil!.field("example.test/chunk").not_nil!.json.should eq("0.1234567890123456789")
+
+      equivalent = send_update.call("root", %({"sessionUpdate":"session_message","messageId":"incoming","recipientSessionId":"child"}))
+      equivalent.session_id.should eq("root")
+      coincident = equivalent.update.typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+      coincident.recipient_message_id_present?.should be_false
+
+      malformed = send_update.call("child", %({"sessionUpdate":"session_message_chunk","messageId":"incoming","content":false,"content":{"type":"text","text":"Ignored"}}))
+      malformed.update.typed.should be_nil
+      raw = malformed.raw.field("update").not_nil!
+      ACP::Protocol::WireFrame.repeated_members(raw.json, "content").should contain("content")
+
+      parent = send_update.call("root", %({"sessionUpdate":"session_message","messageId":"outgoing","recipientSessionId":"child","recipientMessageId":"incoming","senderMessageId":false,"content":[]}))
+      linked = parent.update.typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+      linked.recipient_message_id.should eq("incoming")
+      linked.sender_message_id_present?.should be_false
+      linked.content_present?.should be_true
+      linked.content_blocks.not_nil!.should be_empty
+
+      child = send_update.call("child", %({"sessionUpdate":"session_message","messageId":"incoming","senderSessionId":"root","senderMessageId":"outgoing","content":null}))
+      child.session_id.should eq("child")
+      delivered = child.update.typed.as(ACP::Protocol::V2::SessionMessageUpdate)
+      delivered.sender_session_id.should eq("root")
+      delivered.sender_message_id.should eq("outgoing")
+      delivered.content_present?.should be_true
+      delivered.content.should be_nil
+    ensure
+      client.try(&.close)
+    end
+  end
+end
