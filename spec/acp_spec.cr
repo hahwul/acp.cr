@@ -1819,15 +1819,17 @@ describe ACP::StdioTransport do
 
     msg = Hash(String, JSON::Any).new
     msg["jsonrpc"] = JSON::Any.new("2.0")
-    msg["method"] = JSON::Any.new("authenticate")
     creds = Hash(String, JSON::Any).new
     creds["token"] = JSON::Any.new("super-secret-bearer-token")
     msg["params"] = JSON::Any.new(creds)
-    transport.send(msg)
+    {"authenticate", "logout", "auth/login", "auth/logout", "auth/status"}.each do |method|
+      msg["method"] = JSON::Any.new(method)
+      transport.send(msg)
+    end
 
     log_output = captured.to_s
     log_output.should_not contain("super-secret-bearer-token")
-    log_output.should contain("[REDACTED]")
+    log_output.scan("[REDACTED]").size.should eq(5)
     log_output.should contain("authenticate")
 
     # Restore default logging so subsequent tests aren't affected.

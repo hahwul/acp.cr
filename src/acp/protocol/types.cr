@@ -237,6 +237,7 @@ module ACP
     # Params for the `authenticate` method (Client → Agent).
     struct AuthenticateParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The authentication method ID to use (from the agent's authMethods list).
       @[JSON::Field(key: "methodId")]
@@ -245,24 +246,25 @@ module ACP
       # Optional credentials or token data, depending on the auth method.
       property credentials : JSON::Any?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@method_id : String, @credentials : JSON::Any? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a request for an advertised Agent-managed method.
+      def initialize(@method_id : String, @credentials : JSON::Any? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @method_id, @credentials, metadata_comparison
     end
 
     # Result of the `authenticate` method. Empty object on success.
     struct AuthenticateResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a successful authentication result.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # ─── Logout Method ────────────────────────────────────────────────
@@ -271,25 +273,27 @@ module ACP
     # Params for the `logout` method (Client → Agent).
     struct LogoutParams
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a request to end authentication.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Result of the `logout` method (an empty object on success).
     struct LogoutResult
       include JSON::Serializable
+      include LosslessMetadata
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      # Creates a successful logout result.
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # ─── System Prompt ────────────────────────────────────────────────

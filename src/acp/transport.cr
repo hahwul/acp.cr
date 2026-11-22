@@ -20,6 +20,7 @@ require "./errors"
 require "./version"
 require "./protocol/types"
 require "./protocol/client_methods"
+require "./protocol/v2/methods"
 
 module ACP
   # Logger for transport-level diagnostics.
@@ -100,7 +101,16 @@ module ACP
     # transport redacts these from DEBUG-level frame logs so a session
     # with debug logging enabled does not write credentials/tokens to log
     # files. Add to this set if new methods carry secrets.
-    SENSITIVE_METHODS = Set{"authenticate", "auth/status_update", Protocol::AgentMethod::MCP_MESSAGE, Protocol::ProxyMethod::SUCCESSOR}
+    SENSITIVE_METHODS = Set{
+      Protocol::AgentMethod::AUTHENTICATE,
+      Protocol::AgentMethod::LOGOUT,
+      Protocol::AgentMethod::AUTH_STATUS,
+      Protocol::V2::AgentMethod::AUTH_LOGIN,
+      Protocol::V2::AgentMethod::AUTH_LOGOUT,
+      Protocol::ClientMethod::AUTH_STATUS_UPDATE,
+      Protocol::AgentMethod::MCP_MESSAGE,
+      Protocol::ProxyMethod::SUCCESSOR,
+    }
 
     # The channel that the reader fiber pushes parsed messages into.
     # A nil value signals that the reader has stopped (EOF or error).

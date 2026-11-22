@@ -100,6 +100,9 @@ The v2 client supports session creation, listing, resume and replay, prompts,
 configuration changes, close and delete. Register `on_request_permission`
 and `on_create_elicitation` to handle Agent requests. Authentication is
 available through `auth_login`, `auth_logout`, and `authenticate_terminal`.
+Pass `Protocol::V2::AuthLoginParams` or `Protocol::V2::AuthLogoutParams`
+to send authentication request metadata. Set `meta_raw` on the parameters
+or read it on the result to preserve exact JSON values.
 Use `meta_raw` on the initialize result or an advertised authentication
 method to read exact extension values from the Agent.
 Use `tool_call_cancel` and `terminal_cancel` when the entity announces a
@@ -505,11 +508,14 @@ Performs the ACP handshake with the agent. Transitions state from `Created` to `
 
 ```crystal
 client.authenticate(method_id : String) : Nil
+client.authenticate(params : ACP::Protocol::AuthenticateParams) : ACP::Protocol::AuthenticateResult
 ```
 
 Authenticates with the agent using an advertised Agent-managed method. Call
 after `initialize_connection` if authentication is required. Use
 `client.typed_auth_methods` to inspect the available flows.
+Pass typed parameters to send request metadata and receive the Agent's result.
+Set `meta_raw` on the parameters or read it on the result for exact JSON values.
 
 ### `#authenticate_terminal`
 
@@ -530,10 +536,12 @@ See [ACP Terminal Authentication](https://agentclientprotocol.com/protocol/v1/au
 ### `#logout`
 
 ```crystal
-client.logout : ACP::Protocol::LogoutResult
+client.logout(params : ACP::Protocol::LogoutParams = ACP::Protocol::LogoutParams.new) : ACP::Protocol::LogoutResult
 ```
 
 Ends the authenticated state (`logout`). Only call it when `agent_capabilities.try(&.auth).try(&.logout?)` is true. Active sessions may start failing with auth errors afterwards.
+Pass `LogoutParams` to attach request metadata. Both the parameters and result
+expose `meta_raw` for exact JSON values.
 
 ### `#auth_status` (draft)
 
