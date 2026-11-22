@@ -242,6 +242,11 @@ module ACP
       struct MessageUpdate
         include JSON::Serializable
 
+        # :nodoc:
+        REQUIRED_FIELDS = {"sessionUpdate", "messageId"}
+        OPTIONAL_FIELDS = {"content", "_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
+
         # Discriminator for this message's role.
         @[JSON::Field(key: "sessionUpdate")]
         getter session_update : String
@@ -255,6 +260,11 @@ module ACP
 
         # Creates a message upsert. Assign nil explicitly to clear a field.
         def initialize(@session_update : String, @message_id : String)
+        end
+
+        # Reads an upsert with an unambiguous message ID and omits conflicting patches.
+        def self.new(pull : JSON::PullParser) : self
+          previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
         end
 
         # Returns well-formed skill references in a user message in content order.
@@ -272,7 +282,9 @@ module ACP
         include LosslessContentField
 
         # :nodoc:
-        WIRE_FIELDS = {"sessionUpdate", "messageId", "content", "_meta"}
+        REQUIRED_FIELDS = {"sessionUpdate", "messageId", "content"}
+        OPTIONAL_FIELDS = {"_meta"}
+        WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
         # Discriminator for this message's role.
         @[JSON::Field(key: "sessionUpdate")]
@@ -288,17 +300,10 @@ module ACP
           self.meta = meta
         end
 
-        # Reads an unambiguous chunk. A session-directed chunk requires usable display content.
+        # Reads one usable display block or a draft skill reference in a user message.
         def self.new(pull : JSON::PullParser) : self
-          location = pull.location
-          wire = RawJson.new(pull)
-          repeated = WireFrame.repeated_members(wire.json, *WIRE_FIELDS)
-          if repeated.any? { |field| field != "_meta" }
-            raise JSON::ParseException.new("Ambiguous ACP message chunk fields", *location)
-          end
-          wire = wire.without_field("_meta") if repeated.includes?("_meta")
-          chunk = previous_def(JSON::PullParser.new(wire.json))
-          Protocol::ContentBlock.from_v2_json(chunk.content_raw) if chunk.session_update == "session_message_chunk"
+          chunk = previous_def(RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS))
+          Protocol::ContentBlock.from_v2_json(chunk.content_raw) unless chunk.skill_reference
           chunk
         end
 
@@ -406,10 +411,12 @@ module ACP
                             when "state_update"                             then StateFields::MEMBERS
                             when "subagent_update"                          then SubagentUpdate::WIRE_FIELDS
                             when "session_message"                          then SessionMessageUpdate::WIRE_FIELDS
-                            when "session_info_update"                      then SessionInfoUpdate::WIRE_FIELDS
-                            when "usage_update"                             then UsageUpdate::WIRE_FIELDS
-                            when "compaction_update"                        then CompactionUpdate::WIRE_FIELDS
-                            when "compaction_summary_chunk"                 then Protocol::CompactionSummaryChunkUpdate::V2_WIRE_FIELDS
+                            when "user_message", "agent_message", "agent_thought"
+                              MessageUpdate::WIRE_FIELDS
+                            when "session_info_update"      then SessionInfoUpdate::WIRE_FIELDS
+                            when "usage_update"             then UsageUpdate::WIRE_FIELDS
+                            when "compaction_update"        then CompactionUpdate::WIRE_FIELDS
+                            when "compaction_summary_chunk" then Protocol::CompactionSummaryChunkUpdate::V2_WIRE_FIELDS
                             when "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "session_message_chunk"
                               MessageChunkUpdate::WIRE_FIELDS
                             end

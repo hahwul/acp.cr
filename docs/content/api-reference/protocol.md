@@ -136,10 +136,17 @@ typed decoders. User-message skill references use the dedicated
 [ACP v2 content types](https://agentclientprotocol.com/protocol/v2/content#content-types)
 
 V2 full messages and session-directed messages expose `content_blocks`
-for display blocks and `content_raw` for the complete replacement.
+for display blocks and `content_raw` for the complete replacement. Ambiguous
+optional fields are treated as omitted. An explicit `null` clears the
+corresponding value.
+
 Message and compaction summary chunks provide `to_content_chunk` with
 exact `meta_raw`. Read a serialized v2 wrapper with
 `ContentChunk.from_v2_json`. Message chunks also expose `content_raw`.
+A message with an ambiguous ID or a chunk with unusable content has
+no typed update. The data remains available in `SessionUpdateParams#raw`.
+[ACP v2 message IDs](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#message-ids)
+
 Tool results and summary chunks provide `content_block`. Compaction
 updates expose `typed_summary` and `summary_raw`. List helpers skip
 malformed blocks and keep the usable blocks in wire order.

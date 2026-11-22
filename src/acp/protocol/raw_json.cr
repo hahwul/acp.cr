@@ -30,13 +30,18 @@ module ACP
       # :nodoc:
       def self.patch_parser(pull : JSON::PullParser, *, required : Tuple, optional : Tuple) : JSON::PullParser
         location = pull.location
-        wire = new(pull)
-        repeated = WireFrame.repeated_members(wire.json, *required, *optional)
+        wire = new(pull).unambiguous_patch(required: required, optional: optional, location: location)
+        JSON::PullParser.new(wire.json)
+      end
+
+      # Rejects repeated identity fields and removes conflicting optional fields.
+      # :nodoc:
+      def unambiguous_patch(*, required : Tuple, optional : Tuple, location : {Int32, Int32} = {1, 1}) : RawJson
+        repeated = WireFrame.repeated_members(@json, *required, *optional)
         if required.any? { |field| repeated.includes?(field) }
           raise JSON::ParseException.new("Ambiguous JSON patch fields: #{repeated.join(", ")}", *location)
         end
-        repeated.each { |field| wire = wire.without_field(field) }
-        JSON::PullParser.new(wire.json)
+        repeated.reduce(self) { |wire, field| wire.without_field(field) }
       end
 
       # Whether the value is a JSON object.
