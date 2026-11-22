@@ -8879,7 +8879,9 @@ describe "ACP v1 resource request parameters" do
       end
       client.on_agent_request = ->(method : String, params : JSON::Any) do
         calls << method
-        params
+        result = {"example.test/request" => params}
+        result["terminalId"] = JSON::Any.new("t") if method == "terminal/create"
+        JSON::Any.new(result)
       end
       request = ->(id : Int32, method : String, params : String) do
         feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":#{params}})
@@ -8930,9 +8932,9 @@ describe "ACP v1 resource request parameters" do
       calls.should be_empty
 
       write_params = %({"sessionId":"s","path":"/fixture","content":"example","_meta":false})
-      request.call(20, "fs/write_text_file", write_params)["result"].should eq(JSON.parse(write_params))
+      request.call(20, "fs/write_text_file", write_params)["result"]["example.test/request"].should eq(JSON.parse(write_params))
       create_params = %({"sessionId":"s","command":"fixture","outputByteLimit":-0})
-      request.call(21, "terminal/create", create_params)["result"]["outputByteLimit"].as_i.should eq(0)
+      request.call(21, "terminal/create", create_params)["result"]["example.test/request"]["outputByteLimit"].as_i.should eq(0)
       calls.should eq(["fs/write_text_file", "terminal/create"])
     ensure
       client.try(&.close)
@@ -9099,5 +9101,76 @@ describe "ACP v1 resource reply metadata" do
     client.try(&.close)
     feed.try(&.close)
     outgoing.try(&.close)
+  end
+end
+
+describe "ACP v1 generic resource replies" do
+  it "validates known success fields while preserving extensions and handler errors" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(
+        fs: ACP::Protocol::FsCapabilities.new(read_text_file: true, write_text_file: true), terminal: true)
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      spawn do
+        init = JSON.parse(outgoing.gets.not_nil!)
+        feed.puts build_init_response(init["id"].as_i64).delete('\n')
+      end
+      client.initialize_connection
+      reply = JSON.parse("{}")
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) { reply }
+      request = ->(id : Int32, method : String, params : String) do
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"method":#{method.to_json},"params":{"sessionId":"s",#{params}}})
+        answer = JSON.parse(outgoing.gets.not_nil!)
+        answer["id"].as_i.should eq(id)
+        answer
+      end
+
+      terminal = %("terminalId":"t")
+      create = %("command":"fixture")
+      file = %("path":"/fixture")
+      invalid_output = {
+        %({"output":""}),
+        %({"output":"","truncated":null}),
+        %({"truncated":false}),
+        %({"output":"","truncated":false,"exitStatus":[]}),
+        %({"output":"","truncated":false,"exitStatus":{"exitCode":4294967296}}),
+        %({"output":"","truncated":false,"exitStatus":{"_meta":false}}),
+      }
+      valid_output = %({"output":"","truncated":false,"exitStatus":{"exitCode":4294967295,"signal":null,"_meta":{"example.test/flag":true}}})
+      cases = {
+        {"fs/read_text_file", file, {"{}", %({"content":false})}, %({"content":"","example.test/extra":[1]})},
+        {"fs/write_text_file", %(#{file},"content":"fixture"), {"null", "[]"}, %({"_meta":{"example.test/flag":true}})},
+        {"terminal/create", create, {"{}", %({"terminalId":null})}, %({"terminalId":"t","note":true})},
+        {"terminal/output", terminal, invalid_output, valid_output},
+        {"terminal/wait_for_exit", terminal, { %({"exitCode":-1}), %({"signal":false}), "null" }, %({"exitCode":null,"signal":"fixture","detail":"accepted"})},
+        {"terminal/release", terminal, {"false"}, "{}"},
+        {"terminal/kill", terminal, { %({"_meta":[]}) }, %({"_meta":null})},
+      }
+      cases.each_with_index do |(method, params, invalid, valid), id|
+        invalid.each do |result|
+          reply = JSON.parse(result)
+          answer = request.call(id, method, params)
+          answer["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+        reply = JSON.parse(valid)
+        request.call(id, method, params)["result"].should eq(reply)
+      end
+
+      reply = JSON::Any.new({"content" => JSON::Any.new("fixture"), "example.test/value" => JSON::Any.new(Float64::NAN)})
+      request.call(90, "fs/read_text_file", file)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      nested = "[" * 511 + "0" + "]" * 511
+      reply = JSON.parse(%({"content":"fixture","example.test/nested":#{nested}}))
+      request.call(91, "fs/read_text_file", file)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+
+      reply = JSON.parse("42")
+      request.call(100, "_fixture", %("example":true))["result"].as_i.should eq(42)
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) : JSON::Any do
+        raise ACP::JsonRpcError.new(ACP::JsonRpcError::RESOURCE_NOT_FOUND, "Fixture missing", JSON.parse(%({"detail":"fixture"})))
+      end
+      error = request.call(101, "fs/read_text_file", file)["error"]
+      error["code"].as_i.should eq(ACP::JsonRpcError::RESOURCE_NOT_FOUND)
+      error["data"]["detail"].as_s.should eq("fixture")
+    ensure
+      client.try(&.close)
+    end
   end
 end

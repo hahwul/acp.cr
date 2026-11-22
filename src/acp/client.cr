@@ -2681,15 +2681,19 @@ module ACP
       wire = Protocol::WireFrame.encode(result)
       unless exact
         projection = begin
-          parser = JSON::Parser.new(wire)
-          parser.max_nesting -= 1 # Reserve the outer JSON-RPC object.
-          parser.parse
+          parse_agent_result(wire)
         rescue JSON::ParseException
           nil
         end
         return projection if projection && Protocol::WireFrame.encode(projection) == wire
       end
       Protocol::RawJson.from_json(wire)
+    end
+
+    private def parse_agent_result(wire : String) : JSON::Any
+      parser = JSON::Parser.new(wire)
+      parser.max_nesting -= 1 # Reserve the outer JSON-RPC object.
+      parser.parse
     end
 
     private def handle_v1_raw_form(params : JSON::Any?, params_json : String?) : AgentReply
@@ -2889,7 +2893,8 @@ module ACP
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
       end
       unless h = handler
-        return handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
+        reply = handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
+        return validate_v1_resource_reply(method_name, reply)
       end
 
       # Separate from the parse above: a JSON error raised by the handler's
@@ -2899,6 +2904,59 @@ module ACP
       rescue ex
         ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
         handler_error_reply(ex, ex.message || "Handler error")
+      end
+    end
+
+    private def validate_v1_resource_reply(method : String, reply : AgentReply) : AgentReply
+      return reply unless reply.is_a?(JSON::Any)
+
+      # Validate a wire-ready copy so a caller's mutable view cannot change the reply.
+      result = parse_agent_result(Protocol::WireFrame.encode(reply))
+      fields = result.as_h?
+      problem = fields ? v1_resource_reply_problem(method, fields) : "The result must be an object"
+      return result unless problem
+
+      Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Invalid result for #{method}. #{problem}")
+    rescue JSON::Error
+      Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Cannot serialize result for #{method}")
+    end
+
+    private def v1_resource_reply_problem(method : String, fields : Hash(String, JSON::Any)) : String?
+      return "Metadata must be an object or null" unless valid_resource_metadata?(fields)
+
+      case method
+      when Protocol::ClientMethod::FS_READ_TEXT_FILE
+        "File read results require string content" unless fields["content"]?.try(&.as_s?)
+      when Protocol::ClientMethod::TERMINAL_CREATE
+        "Terminal creation results require a string terminalId" unless fields["terminalId"]?.try(&.as_s?)
+      when Protocol::ClientMethod::TERMINAL_OUTPUT
+        unless fields["output"]?.try(&.as_s?) && !fields["truncated"]?.try(&.as_bool?).nil?
+          return "Terminal output results require string output and boolean truncated"
+        end
+        if (status = fields["exitStatus"]?) && !status.raw.nil?
+          status_fields = status.as_h?
+          return "Terminal exitStatus must be an object or null" unless status_fields
+          return "Terminal exitStatus metadata must be an object or null" unless valid_resource_metadata?(status_fields)
+
+          v1_exit_status_problem(status_fields)
+        end
+      when Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT
+        v1_exit_status_problem(fields)
+      end
+    end
+
+    private def valid_resource_metadata?(fields : Hash(String, JSON::Any)) : Bool
+      metadata = fields["_meta"]?
+      metadata.nil? || metadata.raw.nil? || !metadata.as_h?.nil?
+    end
+
+    private def v1_exit_status_problem(fields : Hash(String, JSON::Any)) : String?
+      if (code = fields["exitCode"]?) && !code.raw.nil?
+        number = code.as_i64?
+        return "Terminal exitCode must be an unsigned 32-bit integer or null" unless number && 0 <= number <= UInt32::MAX
+      end
+      if (signal = fields["signal"]?) && !signal.raw.nil? && !signal.as_s?
+        "Terminal signal must be a string or null"
       end
     end
 
