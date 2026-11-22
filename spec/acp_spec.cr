@@ -10667,3 +10667,108 @@ describe ACP::V2::CompactionStore do
     tight_store.compaction("main", "c").not_nil!.status.should eq("failed")
   end
 end
+
+describe ACP::V2::SessionDetailsStore do
+  it "applies current session details delivered after replay and before the resume reply" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::SessionDetailsStore.new
+    observed = Channel(Bool).new(8)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(note))
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+    store.session_info("s").should be_nil
+    store.session_usage("s").should be_nil
+    transport.update("s", %({"sessionUpdate":"session_info_update","title":"Original","updatedAt":"2026-11-22T07:00:00Z"}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"usage_update","used":2,"size":10,"cost":{"amount":0.5,"currency":"USD"}}))
+    take_v2_frame(observed).should be_true
+
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}))
+        transport.update("s", %({"sessionUpdate":"session_info_update","title":null}))
+        transport.update("s", %({"sessionUpdate":"usage_update","used":4,"size":8}))
+      end
+      nil
+    end
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    take_v2_frame(observed).should be_false
+    take_v2_frame(observed).should be_false
+    take_v2_frame(observed).should be_true
+    take_v2_frame(observed).should be_true
+    store.session_info("s").not_nil!.title.should be_nil
+    store.session_info("s").not_nil!.updated_at.should eq("2026-11-22T07:00:00Z")
+    usage = store.session_usage("s").not_nil!
+    usage.used.should eq(4_u64)
+    usage.size.should eq(8_u64)
+    usage.usage_ratio.should eq(0.5)
+    usage.cost.not_nil!.currency.should eq("USD")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps exact usage counts, cost, and independently patched metadata by session" do
+    store = ACP::V2::SessionDetailsStore.new
+    observe = ->(session : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{fields}})))
+    end
+    wide = UInt64::MAX.to_s
+    precise = "0.123456789012345678901"
+    observe.call("main", %({"sessionUpdate":"session_info_update","title":"Title","updatedAt":"2026-11-22T09:00:00+09:00","_meta":{"wide":#{wide}}})).should be_true
+    observe.call("main", %({"sessionUpdate":"session_info_update","title":false,"updatedAt":"invalid","_meta":{"detail":#{precise}}})).should be_true
+    observe.call("main", %({"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":#{precise},"currency":"USD"},"_meta":{"drop":true}})).should be_true
+    observe.call("main", %({"sessionUpdate":"usage_update","used":#{wide},"size":0,"cost":{"amount":"invalid","currency":"USD"},"_meta":{"drop":null,"wide":#{wide}}})).should be_true
+    observe.call("child", %({"sessionUpdate":"usage_update","used":2,"size":8,"cost":{"amount":1.0,"currency":"credits"}})).should be_true
+    info = store.session_info("main").not_nil!
+    usage = store.session_usage("main").not_nil!
+    info.title.should eq("Title")
+    info.updated_at.should eq("2026-11-22T09:00:00+09:00")
+    info.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    info.meta_raw.not_nil!.field("detail").not_nil!.json.should eq(precise)
+    usage.used.should eq(UInt64::MAX)
+    usage.usage_ratio.should eq(0.0)
+    usage.cost_raw.not_nil!.field("amount").not_nil!.json.should eq(precise)
+    usage.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    usage.meta_raw.not_nil!.field("drop").should be_nil
+    usage.meta_raw.not_nil!.field("detail").should be_nil
+
+    observe.call("main", %({"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":2.0,"currency":"tokens"}})).should be_true
+    store.session_usage("main").not_nil!.cost.not_nil!.currency.should eq("tokens")
+    observe.call("main", %({"sessionUpdate":"usage_update","used":2,"size":2,"cost":null,"_meta":null})).should be_true
+    store.session_usage("main").not_nil!.cost_raw.should be_nil
+    store.session_usage("main").not_nil!.meta_raw.should be_nil
+    store.forget_session("main").should be_true
+    store.forget_session("main").should be_false
+    store.session_info("main").should be_nil
+    store.session_usage("main").should be_nil
+    store.session_usage("child").not_nil!.cost.not_nil!.currency.should eq("credits")
+  end
+
+  it "bounds retained details while keeping current counts when optional usage fields exceed the budget" do
+    store = ACP::V2::SessionDetailsStore.new(session_limit: 1, session_byte_limit: 80)
+    observe = ->(session : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{session.to_json},"update":#{fields}})))
+    end
+    observe.call("main", %({"sessionUpdate":"session_info_update","title":"Title"})).should be_true
+    observe.call("other", %({"sessionUpdate":"session_info_update","title":"Other"})).should be_false
+    observe.call("main", %({"sessionUpdate":"usage_update","used":5,"size":10,"cost":{"amount":1,"currency":"USD"}})).should be_true
+    excess = ("x" * 100).to_json
+    observe.call("main", %({"sessionUpdate":"session_info_update","title":#{excess}})).should be_false
+    observe.call("main", %({"sessionUpdate":"usage_update","used":8,"size":10,"cost":{"amount":5,"currency":"USD"},"_meta":{"large":#{excess}}})).should be_true
+    store.session_info("main").not_nil!.title.should eq("Title")
+    usage = store.session_usage("main").not_nil!
+    usage.used.should eq(8_u64)
+    usage.cost.not_nil!.amount.should eq(5.0)
+    usage.meta_raw.should be_nil
+    observe.call("main", %({"sessionUpdate":"usage_update","used":9,"size":10,"cost":null,"_meta":{"large":#{excess}}})).should be_true
+    store.session_usage("main").not_nil!.cost_raw.should be_nil
+    store.session_usage("other").should be_nil
+  end
+end

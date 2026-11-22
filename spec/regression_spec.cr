@@ -6250,6 +6250,28 @@ describe "ACP v2 session detail patch decoding" do
     expect_raises(JSON::ParseException) { ACP::Protocol::V2::UsageUpdate.from_json(%({#{base},"used":1})) }
   end
 
+  it "preserves the exact v2 cost amount across typed reads, metadata edits, and serialization" do
+    amount = "10000000000000000001"
+    number = "0.123456789012345678901"
+    update = ACP::Protocol::V2::UsageUpdate.from_json(%({"used":1,"size":10,"cost":{"amount":#{amount},"currency":"credits","_meta":{"number":#{number},"edit":false}}}))
+    update.cost.not_nil!.amount.should eq(1e19)
+    update.cost_raw.not_nil!.field("amount").not_nil!.json.should eq(amount)
+    update.cost.not_nil!.meta.not_nil!["edit"] = JSON::Any.new(true)
+    serialized = ACP::Protocol::RawJson.from_json(update.to_json).field("cost").not_nil!
+    serialized.field("amount").not_nil!.json.should eq(amount)
+    serialized.field("_meta").not_nil!.field("number").not_nil!.json.should eq(number)
+    serialized.field("_meta").not_nil!.field("edit").not_nil!.json.should eq("true")
+    update.cost = ACP::Protocol::Cost.new(0.5, "USD")
+    update.cost_raw.not_nil!.field("amount").not_nil!.json.should eq("0.5")
+    round_trip = ACP::Protocol::V2::UsageUpdate.from_json(update.to_json)
+    round_trip.should eq(update)
+    round_trip.hash.should eq(update.hash)
+    update.cost = nil
+    update.cost_present?.should be_true
+    update.cost_raw.should be_nil
+    ACP::Protocol::RawJson.from_json(update.to_json).field("cost").not_nil!.null?.should be_true
+  end
+
   it "keeps valid compaction fields and rejects unusable streamed summaries" do
     base = %("sessionUpdate":"compaction_update","compactionId":"c")
     update = ACP::Protocol::V2::SessionUpdate.from_json(%({#{base},"status":false,"error":"Kept","summary":[false,{"type":"text","text":"Summary"}]})).typed.as(ACP::Protocol::V2::CompactionUpdate)

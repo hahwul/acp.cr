@@ -324,7 +324,9 @@ received content and its exact values.
 `SessionInfoUpdate`, `UsageUpdate`, and `CompactionUpdate` distinguish omitted
 fields from clears and apply metadata patches by key. Invalid optional fields
 leave the previous value in place. `updated_at` preserves the reported RFC 3339
-string. A compaction summary patch replaces or clears accumulated content, and
+string. `UsageUpdate#cost_raw` preserves the original cumulative cost amount
+and metadata. `cost` exposes its typed `Float64` projection. A compaction
+summary patch replaces or clears accumulated content, and
 usable summary chunks append in receive order. Raw notifications retain the
 original values.
 [ACP v2 compaction and usage](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#session-compaction)
