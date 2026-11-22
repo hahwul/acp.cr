@@ -23,7 +23,7 @@ module ACP
 
       private class Connection < ACP::Client
         property on_v2_update : (Protocol::V2::SessionUpdateParams -> Nil)?
-        property on_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
+        property on_v2_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
 
         def initialization_result : Protocol::V2::InitializeResult?
           v2_initialization_result
@@ -332,7 +332,7 @@ module ACP
         end
 
         private def handle_v2_permission(input : Wire::RequestPermissionParams, offered_ids : Array(String)) : AgentReply
-          result = @on_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
+          result = @on_v2_request_permission.try(&.call(input)) || Wire::RequestPermissionResult.cancelled
           validate_permission_reply(JSON.parse(result.to_json), offered_ids, allow_future: true)
         rescue ex
           ClientLog.error { "Error handling permission request: #{ex.message}" }
@@ -422,7 +422,14 @@ module ACP
       delegate on_disconnect, :"on_disconnect=", to: @connection
 
       # Handler for permission requests. The default outcome is cancelled.
-      delegate on_request_permission, :"on_request_permission=", to: @connection
+      def on_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
+        @connection.on_v2_request_permission
+      end
+
+      # Sets the handler for permission requests.
+      def on_request_permission=(handler : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?)
+        @connection.on_v2_request_permission = handler
+      end
 
       # Callback for advertised elicitation modes and their URL completion.
       delegate on_create_elicitation, :"on_create_elicitation=", on_elicitation_complete, :"on_elicitation_complete=", to: @connection

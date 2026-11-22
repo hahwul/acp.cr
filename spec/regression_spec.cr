@@ -1248,6 +1248,115 @@ describe "ACP v1 tool call collections" do
   end
 end
 
+describe "ACP v1 typed permission requests" do
+  it "decodes exact metadata and tool contents from permission parameters" do
+    metadata = %({"example.test/count":18446744073709551615})
+    wire = %({"sessionId":"s","toolCall":{"toolCallId":"tool","name":"inspect","toolName":false,"rawInput":18446744073709551615,"content":[{"type":"terminal","terminalId":"terminal","_meta":#{metadata}}],"_meta":#{metadata}},"options":[{"optionId":"reject","name":"Reject","kind":"reject_once","_meta":#{metadata}}],"_meta":#{metadata}})
+    input = ACP::Protocol::RequestPermissionParams.from_json(wire)
+    input.tool_call.tool_call_id.should eq("tool")
+    input.tool_call.name.should eq("inspect")
+    input.tool_call.tool_name.should be_nil
+    parsed = ACP::Protocol::RawJson.from_json(input.to_json)
+    parsed.field("toolCall").not_nil!.field("rawInput").not_nil!.json.should eq("18446744073709551615")
+    parsed.field("options").not_nil!.elements?.not_nil!.first.field("_meta").not_nil!.json.should eq(metadata)
+    parsed.field("_meta").not_nil!.json.should eq(metadata)
+  end
+
+  it "gives the typed handler exact input and checks its choice against the original options" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"s"}))
+      client.session_new("/work")
+
+      requests = Channel(ACP::Protocol::RequestPermissionParams).new(2)
+      fallback_calls = 0
+      client.on_agent_request = ->(_method : String, _params : JSON::Any) do
+        fallback_calls += 1
+        JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
+      end
+      client.on_request_permission = ->(request : ACP::Protocol::RequestPermissionParams) do
+        requests.send(request)
+        option = request.options.first
+        request.options.clear
+        selected = request.request_id == "choose" ? option.option_id : "unavailable"
+        ACP::Protocol::RequestPermissionResult.selected(selected)
+      end
+      params = %({"sessionId":"s","toolCall":{"toolCallId":"tool","title":"Inspect count","rawInput":{"count":18446744073709551615},"rawOutput":0.123456789012345678901},"options":[{"optionId":"reject","name":"Reject","kind":"reject_once"}]})
+      feed.puts %({"jsonrpc":"2.0","id":"choose","method":"session/request_permission","params":#{params}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq("choose")
+      reply["result"]["outcome"]["optionId"].should eq("reject")
+      received = requests.receive
+      received.session_id.should eq("s")
+      received.request_id.should eq("choose")
+      received.tool_call.raw_input_raw.not_nil!.field("count").not_nil!.json.should eq("18446744073709551615")
+      received.tool_call.raw_output_raw.not_nil!.json.should eq("0.123456789012345678901")
+      ACP::Protocol::RawJson.from_json(received.to_json).field("requestId").should be_nil
+
+      feed.puts %({"jsonrpc":"2.0","id":"other","method":"session/request_permission","params":#{params}})
+      JSON.parse(outgoing.gets.not_nil!)["error"]["code"].should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      other = requests.receive
+      other.request_id.should eq("other")
+      received.should_not eq(other)
+      fallback_calls.should eq(0)
+
+      client.on_request_permission = nil
+      ordinary = %({"sessionId":"s","toolCall":{"toolCallId":"tool"},"options":[{"optionId":"reject","name":"Reject","kind":"reject_once"}]})
+      feed.puts %({"jsonrpc":"2.0","id":"legacy","method":"session/request_permission","params":#{ordinary}})
+      JSON.parse(outgoing.gets.not_nil!)["result"]["outcome"]["outcome"].should eq("cancelled")
+      fallback_calls.should eq(1)
+    ensure
+      client.try(&.close)
+    end
+  end
+  it "correlates cancellation and sends only the cancelled outcome" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"s"}))
+      client.session_new("/work")
+
+      started = Channel(ACP::Protocol::RequestId?).new(1)
+      released = Channel(Nil).new
+      completed = Channel(Nil).new(1)
+      client.on_request_permission = ->(request : ACP::Protocol::RequestPermissionParams) do
+        started.send(request.request_id)
+        released.receive?
+        completed.send(nil)
+        ACP::Protocol::RequestPermissionResult.selected(request.options.first.option_id)
+      end
+      feed.puts %({"jsonrpc":"2.0","id":"review","method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"tool","rawInput":18446744073709551615},"options":[{"optionId":"reject","name":"Reject","kind":"reject_once"}]}})
+      next_permission_event(started).should eq("review")
+      feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"review"}})
+      reply = JSON.parse(outgoing.gets.not_nil!)
+      reply["id"].should eq("review")
+      reply["result"]["outcome"]["outcome"].should eq("cancelled")
+
+      released.close
+      next_permission_event(completed)
+      spawn do
+        frame = JSON.parse(outgoing.gets.not_nil!)
+        if frame["method"]? == "_barrier"
+          reply = %({"jsonrpc":"2.0","id":#{frame["id"]},"result":{}})
+        else
+          barrier = JSON.parse(outgoing.gets.not_nil!)
+          reply = %({"jsonrpc":"2.0","id":#{barrier["id"]},"result":{"unexpectedReply":true}})
+        end
+        feed.puts reply
+      end
+      client.ext_method("barrier").should eq(JSON.parse("{}"))
+    ensure
+      released.try(&.close)
+      client.try(&.close)
+    end
+  end
+end
+
 # ─── R23: a blocked agent-request handler must not stall the dispatcher ──
 #
 # prompt-turn#cancellation: after `session/cancel` the Agent answers the

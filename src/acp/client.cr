@@ -86,6 +86,9 @@ module ACP
   # Handler for `terminal/kill` requests from the agent.
   alias KillTerminalHandler = Protocol::KillTerminalParams -> Protocol::KillTerminalResult
 
+  # Handler for `session/request_permission` requests from the agent.
+  alias RequestPermissionHandler = Protocol::RequestPermissionParams -> Protocol::RequestPermissionResult
+
   # Handler for `elicitation/create` requests from the agent.
   alias CreateElicitationHandler = Protocol::CreateElicitationParams -> Protocol::CreateElicitationResult
 
@@ -231,6 +234,10 @@ module ACP
     # Set this when advertising the `terminal` capability.
     property on_kill_terminal : KillTerminalHandler?
 
+    # Handler for `session/request_permission` with exact tool data.
+    # Takes precedence over `on_agent_request` for this method.
+    property on_request_permission : RequestPermissionHandler?
+
     # Handler for `elicitation/create` — ask the user for input.
     # Set this when advertising `elicitation` capabilities. A request for a
     # mode not advertised there is answered with -32602 without reaching it.
@@ -360,7 +367,11 @@ module ACP
       # Set (under `@pending_mutex`) once the request's terminal reply is claimed.
       property? answered : Bool = false
 
-      def initialize(@method : String, @session_id : String?, @cancellation : Channel(Nil)? = nil)
+      def initialize(@method : String, @session_id : String?, @cancellation : Channel(Nil)? = nil, *, @typed_permission = false)
+      end
+
+      def reserve_id? : Bool
+        @typed_permission || @method == Protocol::ClientMethod::ELICITATION_CREATE
       end
     end
 
@@ -612,6 +623,7 @@ module ACP
       replacement.prompt_timeout = @prompt_timeout
       replacement.on_update = @on_update
       replacement.on_agent_request = @on_agent_request
+      replacement.on_request_permission = @on_request_permission
       replacement.on_notification = @on_notification
       replacement.on_disconnect = @on_disconnect
       replacement.on_auth_status_update = @on_auth_status_update
@@ -2515,13 +2527,15 @@ module ACP
           end
           params_json ||= Protocol::WireFrame.field(wire_frame.json, "params") if wire_frame
         end
-      elsif wire_frame && method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
-        exact_params = params_json || Protocol::WireFrame.field(wire_frame.json, "params")
-        if ambiguous_permission_request?(wire_frame, exact_params)
+      elsif method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
+        permission_handler = @on_request_permission unless v2_wire?
+        params_json ||= wire_frame.try { |frame| Protocol::WireFrame.field(frame.json, "params") }
+        repeated_version = permission_handler && wire_frame.try { |frame| !Protocol::WireFrame.repeated_members(frame.json, "jsonrpc").empty? }
+        if permission_handler && (msg["jsonrpc"]?.try(&.as_s?) != "2.0" || repeated_version || msg["result"]? || msg["error"]?)
+          rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_REQUEST, "Invalid JSON-RPC permission request")
+        elsif wire_frame && ambiguous_permission_request?(wire_frame, params_json)
           rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous permission request fields")
         end
-        # v1 handlers take a JSON::Any projection. v2 decodes the exact fields.
-        params_json = v2_wire? ? exact_params : (params_json unless wire_frame.representable)
       elsif wire_frame && method_name == Protocol::ClientMethod::ELICITATION_CREATE
         if !Protocol::WireFrame.repeated_members(wire_frame.json, "method", "params").empty?
           rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous elicitation request fields")
@@ -2540,7 +2554,7 @@ module ACP
       unless rejection
         session_id = params.try(&.as_h?).try(&.["sessionId"]?).try(&.as_s?)
         signal = Channel(Nil).new if v2_wire? && method_name == Protocol::ClientMethod::ELICITATION_CREATE
-        entry = InFlightRequest.new(method_name, session_id, signal)
+        entry = InFlightRequest.new(method_name, session_id, signal, typed_permission: !permission_handler.nil?)
       end
       if id && !track_agent_request(id, method_name, entry)
         rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_REQUEST, "Request ID is already outstanding")
@@ -2558,6 +2572,8 @@ module ACP
       end
       prepared = if creation = terminal
                    -> { handle_v1_terminal_create(params, params_json, creation) }
+                 elsif handler = permission_handler
+                   -> { handle_typed_permission_request(handler, id, params, params_json).as(AgentReply) }
                  else
                    entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
                  end
@@ -2570,7 +2586,7 @@ module ACP
           begin
             sent = send_agent_request_reply(reply_id, method_name, terminal, reply)
           ensure
-            completion = settle_elicitation_reply(id, entry, sent)
+            completion = settle_agent_input_reply(id, entry, sent)
           end
           enqueue_elicitation_completion(completion) if completion
         end
@@ -2682,11 +2698,13 @@ module ACP
       end
     end
 
-    # Keep an active elicitation cancellable if its request ID is reused.
+    # Protect active typed user input if its request ID is reused.
     private def track_agent_request(id : Protocol::RequestId, method : String, entry : InFlightRequest?) : Bool
       @pending_mutex.synchronize do
         existing = @in_flight[id]?
-        next false if existing && {method, existing.method}.includes?(Protocol::ClientMethod::ELICITATION_CREATE)
+        if existing && (existing.reserve_id? || entry.try(&.reserve_id?) || method == Protocol::ClientMethod::ELICITATION_CREATE)
+          next false
+        end
 
         @in_flight[id] = entry if entry
         true
@@ -2950,7 +2968,7 @@ module ACP
       claimed ||= claim_agent_request(id, entry)
       raise ex
     ensure
-      if claimed && (completion = settle_elicitation_reply(id, entry, sent))
+      if claimed && (completion = settle_agent_input_reply(id, entry, sent))
         enqueue_elicitation_completion(completion)
       end
     end
@@ -2984,13 +3002,15 @@ module ACP
       error
     end
 
-    # Commits only the reply that won against cancellation. Completion can
-    # arrive while the user callback is still returning its decision.
-    private def settle_elicitation_reply(id : Protocol::RequestId?, entry : InFlightRequest?, reply : AgentReply?) : ElicitationCompletion?
-      return unless entry && entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+    # Releases a reserved request ID after its reply. An elicitation can
+    # receive a completion while the callback is still returning its decision.
+    private def settle_agent_input_reply(id : Protocol::RequestId?, entry : InFlightRequest?, reply : AgentReply?) : ElicitationCompletion?
+      return unless entry && entry.reserve_id?
 
       @pending_mutex.synchronize do
         @in_flight.delete(id) if id && @in_flight[id]?.try(&.same?(entry))
+        next unless entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+
         entry.cancellation.try(&.close) unless reply
         elicitation = entry.url_elicitation
         next unless elicitation && @url_elicitations[elicitation.id]?.try(&.same?(elicitation))
@@ -3273,11 +3293,34 @@ module ACP
       end
     end
 
+    private def handle_typed_permission_request(handler : RequestPermissionHandler, id : Protocol::RequestId?, params : JSON::Any?, params_json : String?) : AgentReply
+      input = begin
+        wire = params_json || Protocol::WireFrame.encode(params)
+        request = Protocol::RequestPermissionParams.from_json(wire)
+        tool = Protocol::WireFrame.field(wire, "toolCall")
+        unless request.tool_call.tool_call_id && tool && Protocol::WireFrame.repeated_members(tool, "toolCallId").empty?
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Permission request requires an unambiguous tool call ID")
+        end
+        request
+      rescue JSON::ParseException
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Malformed ACP v1 permission request")
+      end
+      offered_ids = input.options.map(&.option_id)
+      if offered_ids.uniq.size != offered_ids.size
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Permission request options must have unique IDs")
+      end
+      input.request_id = id
+      validate_permission_reply(JSON.parse(handler.call(input).to_json), offered_ids)
+    rescue ex
+      ClientLog.error { "Error handling permission request: #{ex.message}" }
+      handler_error_reply(ex, "Permission handler error: #{ex.message}")
+    end
+
     # Handles a `session/request_permission` request from the agent.
     # Delegates to the on_agent_request handler or auto-denies.
     private def handle_permission_request(params : JSON::Any?, params_json : String?) : AgentReply
       if handler = @on_agent_request
-        return unrepresentable_request_params if params_json
+        return unrepresentable_request_params unless raw_notification_representable?(params_json)
         options = params.try(&.as_h?).try(&.["options"]?).try(&.as_a?)
         offered_ids = options.try(&.compact_map { |option| option.as_h?.try(&.["optionId"]?).try(&.as_s?) }) || [] of String
         begin
@@ -3377,13 +3420,13 @@ module ACP
       spawn(name: "acp-session-input-cancel") { answer_cancelled_session_inputs(pending) }
     end
 
-    # Clears URL completion state immediately but keeps its RPC ID reserved
-    # through the cancel reply. The caller holds @pending_mutex.
+    # Clears URL completion state and retains reserved IDs through the cancel
+    # reply. The caller holds @pending_mutex.
     private def claim_cancelled_input(id : Protocol::RequestId, req : InFlightRequest) : Nil
       req.answered = true
       req.cancellation.try(&.close)
       abandon_url_elicitation(req)
-      @in_flight.delete(id) unless req.method == Protocol::ClientMethod::ELICITATION_CREATE
+      @in_flight.delete(id) unless req.reserve_id?
     end
 
     # Resolves claimed user input independently from the callback fibers.
@@ -3398,7 +3441,7 @@ module ACP
       rescue ex : TransportError | IO::Error
         ClientLog.debug { "Could not answer cancelled input id=#{id}: #{ex.message}" }
       ensure
-        settle_elicitation_reply(id, req, nil)
+        settle_agent_input_reply(id, req, nil)
       end
     end
 
@@ -3418,7 +3461,7 @@ module ACP
     end
 
     # Claims an agent request's answer unless cancellation already won.
-    # Elicitations retain the ID until the reply write ends.
+    # Typed user input retains the ID until the reply write ends.
     # Untracked (null-id) requests are always answered.
     private def claim_agent_request(id : Protocol::RequestId?, entry : InFlightRequest?) : Bool
       return true unless id && entry
@@ -3427,7 +3470,7 @@ module ACP
         # still in flight, the map holds only the newer one, and whichever of
         # the two finishes first must not make the other look cancelled.
         return false if entry.answered?
-        if entry.method == Protocol::ClientMethod::ELICITATION_CREATE
+        if entry.reserve_id?
           entry.answered = true
         elsif @in_flight[id]?.try(&.same?(entry))
           @in_flight.delete(id)
@@ -3484,7 +3527,7 @@ module ACP
         rescue ex : TransportError
           ClientLog.debug { "Could not answer cancelled request id=#{id}: #{ex.message}" }
         ensure
-          settle_elicitation_reply(id, entry, nil)
+          settle_agent_input_reply(id, entry, nil)
         end
       end
 

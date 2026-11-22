@@ -346,60 +346,40 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
   nil
 end
 
-# Step 4: Set up the agent request handler (for permission requests, etc.).
-# Each agent request runs in its own fiber, so concurrent permission
-# requests are serialized here to keep one picker on stdin at a time.
+# Step 4: Handle permission requests one at a time on stdin.
 permission_prompt = Mutex.new
-client.on_agent_request = ->(method : String, params : JSON::Any) do
-  case method
-  when "session/request_permission"
-    # Parse the permission request.
-    permission_prompt.synchronize do
-      perm_params = ACP::Protocol::RequestPermissionParams.from_json(params.to_json)
+client.on_request_permission = ->(request : ACP::Protocol::RequestPermissionParams) do
+  permission_prompt.synchronize do
+    ExampleTerminal.puts STDERR, ""
+    Term.header("Permission Request")
 
-      ExampleTerminal.puts STDERR, ""
-      Term.header("Permission Request")
-
-      # Show tool call info.
-      tc = perm_params.tool_call
-      if name = tc.tool_name
-        Term.info("Tool: #{name}")
-      end
-      if title = tc.title
-        Term.info("Action: #{title}")
-      end
-      if input = tc.input
-        Term.info("Input: #{input.to_json}")
-      end
-
-      # Build options list for the picker.
-      options = perm_params.options.map do |opt|
-        {id: opt.id, label: opt.label}
-      end
-
-      selected = Term.pick("Choose an action:", options)
-
-      # The ACP RequestPermissionResponse `outcome` is a nested object:
-      # {"outcome": {"outcome": "selected", "optionId": "..."}} or
-      # {"outcome": {"outcome": "cancelled"}}. Use the library's typed builders
-      # so the wire shape is correct — agents reject the flat form.
-      if selected
-        JSON.parse(ACP::Protocol::RequestPermissionResult.selected(selected).to_json)
-      else
-        JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
-      end
-    rescue ex
-      Term.error("Error parsing permission request: #{ex.message}")
-      JSON.parse(ACP::Protocol::RequestPermissionResult.cancelled.to_json)
+    tool = request.tool_call
+    if name = tool.name || tool.tool_name
+      Term.info("Tool: #{name}")
     end
-  else
-    Term.warn("Agent called unknown method: #{method}")
-    Term.info("Params: #{params.to_json}")
-    # Raise so the client dispatcher replies with a real JSON-RPC error
-    # response. (Returning a value here is sent verbatim as the RPC *result*,
-    # so returning {"error": ...} would masquerade as a successful result.)
-    raise "Client does not handle method: #{method}"
+    if title = tool.title
+      Term.info("Action: #{title}")
+    end
+    if input = tool.raw_input_raw || tool.input_raw
+      Term.info("Input: #{input.json}")
+    end
+
+    options = request.options.map { |option| {id: option.option_id, label: option.name} }
+    if selected = Term.pick("Choose an action:", options)
+      ACP::Protocol::RequestPermissionResult.selected(selected)
+    else
+      ACP::Protocol::RequestPermissionResult.cancelled
+    end
+  rescue ex
+    Term.error("Error handling permission request: #{ex.message}")
+    ACP::Protocol::RequestPermissionResult.cancelled
   end
+end
+
+client.on_agent_request = ->(method : String, params : JSON::Any) do
+  Term.warn("Agent called unknown method: #{method}")
+  Term.info("Params: #{params.to_json}")
+  raise "Client does not handle method: #{method}"
 end
 
 # Step 5: Initialize the connection.
