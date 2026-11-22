@@ -1,5 +1,6 @@
 require "path"
 require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -151,41 +152,59 @@ module ACP
     end
 
     # :nodoc:
-    module OptionalOptionList
-      def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
-        values = [] of JSON::Any
-        if pull.kind.begin_array?
-          pull.read_array do
-            json = WireFrame.read_raw(pull)
-            begin
-              value = JSON.parse(json)
-              values << value if value.as_h?
-            rescue JSON::Error
-              # Keep other options when an entry cannot be represented.
-            end
-          end
-        else
-          pull.skip
+    module SelectableOptionArray
+      def self.from_json(pull : JSON::PullParser, *, object_entries_only : Bool = false) : PreservedJson
+        unless pull.kind.begin_array?
+          raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
         end
-        values
+        wire = RawJson.new(pull)
+        if object_entries_only
+          items = wire.elements?.not_nil!
+          objects = items.select(&.object?)
+          if objects.size != items.size
+            wire = RawJson.new(JSON::PullParser.new(WireFrame.encode(objects)))
+          end
+        end
+        if (value = wire.to_json_any?) && WireFrame.encode(value) == wire.json
+          return PreservedJson.new(value)
+        end
+
+        PreservedJson.new(wire, project_array_objects: true, project_nested_objects: true)
       end
 
-      def self.to_json(values : Array(JSON::Any), json : JSON::Builder) : Nil
-        values.to_json(json)
+      def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
+        value.to_json(json)
       end
     end
 
     # :nodoc:
     module RequiredOptionList
-      def self.from_json(pull : JSON::PullParser) : Array(JSON::Any)
-        unless pull.kind.begin_array?
-          raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
-        end
-        OptionalOptionList.from_json(pull)
+      def self.from_json(pull : JSON::PullParser) : PreservedJson
+        SelectableOptionArray.from_json(pull, object_entries_only: true)
       end
 
-      def self.to_json(value : Array(JSON::Any), json : JSON::Builder) : Nil
+      def self.to_json(value : PreservedJson, json : JSON::Builder) : Nil
         value.to_json(json)
+      end
+    end
+
+    # :nodoc:
+    module ConfigOptionEquality
+      def_equals_and_hash comparison_value
+
+      protected def comparison_value
+        comparable_json(self)
+      end
+
+      private def comparable_json(value) : JSON::Any | String
+        # Match the former JSON::Any comparison for representable choices.
+        # Fall back to the exact wire value when a number exceeds that range.
+        wire = WireFrame.encode(value)
+        begin
+          JSON.parse(wire)
+        rescue JSON::ParseException
+          wire
+        end
       end
     end
 
