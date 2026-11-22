@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Decode ACP v2 session info, usage, and compaction patches independently of malformed optional fields.
 - Apply ACP v2 session-directed message fields independently and reject ambiguous message identities and malformed streamed content.
 - Apply ACP v2 child session patches consistently in typed callbacks and the child cache, with exact metadata and validated workspace roots.
 - Preserve exact ACP v2 session state, background work, and idle error and usage payloads through typed snapshots.

@@ -999,6 +999,11 @@ module ACP
       include LosslessContentField
       include ChunkContentHelper
 
+      # :nodoc:
+      V2_REQUIRED_FIELDS = {"sessionUpdate", "compactionId", "content"}
+      V2_OPTIONAL_FIELDS = {"_meta"}
+      V2_WIRE_FIELDS     = V2_REQUIRED_FIELDS + V2_OPTIONAL_FIELDS
+
       # The compaction this chunk belongs to (required).
       @[JSON::Field(key: "compactionId")]
       property compaction_id : String
@@ -1013,9 +1018,11 @@ module ACP
         self.meta = meta
       end
 
-      # Reads a v2 summary chunk with an open content discriminator.
+      # Reads a v2 summary chunk with unambiguous fields and usable open content.
       def self.from_v2_json(json : String) : self
-        chunk = from_json(json)
+        parser = RawJson.patch_parser(JSON::PullParser.new(json), required: V2_REQUIRED_FIELDS, optional: V2_OPTIONAL_FIELDS)
+        chunk = new(parser)
+        ContentBlock.from_v2_json(chunk.content_raw)
         chunk.enable_open_content
         chunk
       end
