@@ -3158,6 +3158,129 @@ describe "ACP v2 cancellation grants during session synchronization" do
   ensure
     client.try(&.close)
   end
+
+  {true, false}.each do |attached|
+    scope = attached ? "attached" : "detached"
+    it "preserves newer live state when an older resume confirms the #{scope} root" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{"additionalDirectories":{}}}})
+      transport.replies["session/new"] = %("result":{"sessionId":"root"})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      client.session_new("/work") if attached
+
+      client.request_timeout = 0.01
+      older = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", additional_directories: ["/old"])
+      expect_raises(ACP::RequestTimeoutError) { client.session_resume(older) }
+      first = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+      transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+
+      observed = Channel(String?).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        if note.update.session_update == "_inspect"
+          observed.send(client.session_state("root").try(&.state))
+        end
+        nil
+      end
+      transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+        if method == "session/resume"
+          transport.update("root", %({"sessionUpdate":"state_update","state":"requires_action"}))
+          transport.inject_raw(%({"jsonrpc":"2.0","id":#{first["id"]},"result":{}}))
+          transport.update("root", %({"sessionUpdate":"_inspect"}))
+        end
+        nil
+      end
+      transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Retry failed"})
+      newer = ACP::Protocol::V2::SessionResumeParams.new("root", "/work", additional_directories: ["/new"])
+      expect_raises(ACP::JsonRpcError, /Retry failed/) { client.session_resume(newer) }
+      select
+      when state = observed.receive
+        state.should eq("requires_action")
+      when timeout(2.seconds)
+        fail "did not observe state between resume replies"
+      end
+      client.session_state("root").not_nil!.state.should eq("requires_action")
+      client.session_workspace("root").not_nil!.additional_directories.should eq(["/old"])
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  {true, false}.each do |oversized|
+    expected = oversized ? "unknown" : "requires_action"
+    it "reports #{expected} when the newer detached resume has also timed out" do
+      transport = ChoiceStateTransport.new
+      transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      client.initialize_connection
+      params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work")
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+      first = transport.sent_messages.find! { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+      transport.update("root", %({"sessionUpdate":"state_update","state":"running"}))
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+      padding = oversized ? "x" * (64 * 1024) : ""
+      transport.update("root", %({"sessionUpdate":"state_update","state":"requires_action","_meta":{"padding":#{padding.to_json}}}))
+      transport.inject_raw(%({"jsonrpc":"2.0","id":#{first["id"]},"result":{}}))
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+      client.session_state("root").not_nil!.state.should eq(expected)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the latest observed state while a third resume has not sent a snapshot" do
+    transport = ChoiceStateTransport.new
+    transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    client.initialize_connection
+    params = ACP::Protocol::V2::SessionResumeParams.new("root", "/work")
+    {"running", "requires_action"}.each do |state|
+      client.request_timeout = 0.01
+      expect_raises(ACP::RequestTimeoutError) { client.session_resume(params) }
+      transport.update("root", %({"sessionUpdate":"state_update","state":#{state.to_json}}))
+      client.request_timeout = 2.0
+      choice_state_barrier(client, transport)
+    end
+    first, second = transport.sent_messages.select { |frame| frame["method"]?.try(&.as_s?) == "session/resume" }
+    observed = Channel(String?).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(client.session_state("root").try(&.state)) if note.update.session_update == "_inspect"
+      nil
+    end
+    transport.before_reply = ->(method : String, _request : Hash(String, JSON::Any)) do
+      if method == "session/resume"
+        {first, second}.each do |resume|
+          transport.inject_raw(%({"jsonrpc":"2.0","id":#{resume["id"]},"result":{}}))
+          transport.update("root", %({"sessionUpdate":"_inspect"}))
+        end
+      end
+      nil
+    end
+    transport.replies["session/resume"] = %("error":{"code":-32603,"message":"Retry failed"})
+    expect_raises(ACP::JsonRpcError, /Retry failed/) { client.session_resume(params) }
+    2.times do
+      select
+      when state = observed.receive
+        state.should eq("requires_action")
+      when timeout(2.seconds)
+        fail "did not observe state between resume replies"
+      end
+    end
+  ensure
+    client.try(&.close)
+  end
+
   it "reserves a detached root ID while its timed-out resume is still on the wire" do
     transport = ChoiceStateTransport.new
     transport.replies["initialize"] = %("result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
