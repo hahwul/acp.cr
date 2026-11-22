@@ -109,6 +109,14 @@ fit in `JSON::Any` go to `on_notification`. The typed completion exposes
 exact metadata through `meta_raw`.
 [ACP v2 URL Completion](https://agentclientprotocol.com/protocol/v2/elicitation#url-completion)
 
+An elicitation with `request_id` belongs to an outstanding Client request
+on the same connection. The client rejects a request-scoped elicitation
+with `toolCallId`. The callback's local `cancellation` channel closes when
+the elicitation is cancelled, its originating request ends before an input
+reply is sent, or the connection closes. Use the channel to dismiss a form
+or URL consent prompt that is still open.
+[ACP v2 Elicitation](https://agentclientprotocol.com/protocol/v2/elicitation#creating-an-elicitation)
+
 For `session_prompt`, supply at least one content block. An optional
 `idempotency_key` must contain 1 to 255 characters. Session setup requires
 absolute Agent paths, unique MCP server names, and an absolute executable
