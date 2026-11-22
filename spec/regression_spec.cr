@@ -1088,6 +1088,90 @@ describe "ACP::Protocol::SessionInfoUpdate field presence" do
   end
 end
 
+describe "ACP v1 raw tool call notifications" do
+  it "delivers tool input and output with exact JSON through the typed stdio callback" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work")
+
+      updates = Channel(ACP::Protocol::SessionUpdate).new(3)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        updates.send(note.update)
+        nil
+      end
+      input = %({"count":18446744073709551615,"label":"inventory"})
+      output = %([18446744073709551615,0.123456789012345678901])
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"tool_call","toolCallId":"tool","title":"Count inventory","rawInput":#{input}}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"type":"tool_call_update","toolCallId":"tool","status":"completed","rawOutput":#{output}}}})
+      decimal = "0.123456789012345678901"
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","rawOutput":#{decimal}}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when update = updates.receive
+        started = update.as(ACP::Protocol::ToolCallUpdate)
+        started.title.should eq("Count inventory")
+        started.raw_input.should be_nil
+        started.raw_input_raw.not_nil!.json.should eq(input)
+        ACP::Protocol::RawJson.from_json(started.to_json).field("rawInput").should eq(started.raw_input_raw)
+        ACP::Protocol::ToolCallUpdate.from_json(started.to_json).should eq(started)
+      else
+        fail "tool call did not reach the typed callback"
+      end
+      select
+      when update = updates.receive
+        completed = update.as(ACP::Protocol::ToolCallStatusUpdate)
+        completed.status.should eq("completed")
+        completed.raw_output.should be_nil
+        completed.raw_output_raw.not_nil!.json.should eq(output)
+        ACP::Protocol::RawJson.from_json(completed.to_json).field("rawOutput").should eq(completed.raw_output_raw)
+      else
+        fail "tool call update did not reach the typed callback"
+      end
+      select
+      when update = updates.receive
+        completed = update.as(ACP::Protocol::ToolCallStatusUpdate)
+        completed.raw_output.should eq(JSON.parse(decimal))
+        completed.raw_output_raw.not_nil!.json.should eq(decimal)
+      else
+        fail "tool call update with a decimal did not reach the typed callback"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the existing construction, comparison, and null semantics" do
+    type = ACP::Protocol::ToolCallStatusUpdate
+    update = type.from_json(%({"sessionUpdate":"tool_call_update","toolCallId":"tool","rawInput":null,"rawOutput":false}))
+    built = type.new("tool", raw_output: JSON::Any.new(false))
+    update.should eq(built)
+    update.hash.should eq(built.hash)
+    update.raw_input.should be_nil
+    update.raw_input_raw.should be_nil
+    update.raw_output_raw.not_nil!.json.should eq("false")
+    JSON.parse(update.to_json)["rawInput"]?.should be_nil
+
+    update.raw_input = JSON::Any.new(nil)
+    update.raw_input_raw.not_nil!.null?.should be_true
+    JSON.parse(update.to_json)["rawInput"]?.should eq(JSON::Any.new(nil))
+    update.raw_input = nil
+    JSON.parse(update.to_json)["rawInput"]?.should be_nil
+  end
+
+  it "keeps the original decimals when a representable input object is edited" do
+    update = ACP::Protocol::ToolCallStatusUpdate.from_json(%({"sessionUpdate":"tool_call_update","toolCallId":"tool","rawInput":{"ratio":0.123456789012345678901,"label":"old"}}))
+    update.raw_input.not_nil!.as_h["label"] = JSON::Any.new("new")
+    input = ACP::Protocol::RawJson.from_json(update.to_json).field("rawInput").not_nil!
+    input.field("ratio").not_nil!.json.should eq("0.123456789012345678901")
+    input.field("label").not_nil!.as_s?.should eq("new")
+  end
+end
+
 # ─── R23: a blocked agent-request handler must not stall the dispatcher ──
 #
 # prompt-turn#cancellation: after `session/cancel` the Agent answers the
