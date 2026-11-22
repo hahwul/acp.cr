@@ -289,6 +289,37 @@ module ACP
         decode(block, 1, 1, v2: true)
       end
 
+      # Validates a standard block for submission in an ACP v2 prompt.
+      # :nodoc:
+      def self.from_v2_prompt(block : RawJson) : ContentBlock
+        content = from_json(block.json)
+        case content
+        when ImageContentBlock, AudioContentBlock
+          if content.is_a?(ImageContentBlock) && (uri = content.uri) && !Protocol.absolute_uri?(uri)
+            raise ArgumentError.new("ACP v2 image prompts require an absolute URI when one is supplied")
+          end
+          unless Protocol.standard_base64?(content.data)
+            raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data")
+          end
+        when ResourceLinkContentBlock
+          unless Protocol.absolute_uri?(content.uri)
+            raise ArgumentError.new("ACP v2 resource links require an absolute URI")
+          end
+          if (size = block.field("size")) && !size.null? && content.size_bytes.nil?
+            raise ArgumentError.new("ACP v2 resource link sizes must be non-negative UInt64 integers")
+          end
+        when ResourceContentBlock
+          uri = content.uri
+          blob = content.blob
+          unless uri && Protocol.absolute_uri?(uri) && (content.text || (blob && Protocol.standard_base64?(blob)))
+            raise ArgumentError.new("Malformed ACP v2 embedded resource")
+          end
+        end
+        content
+      rescue JSON::ParseException
+        raise ArgumentError.new("Malformed ACP v2 prompt content block")
+      end
+
       # Reads usable v2 display blocks from an array in wire order.
       # :nodoc:
       def self.decode_v2_array(array : RawJson) : Array(ContentBlock)?

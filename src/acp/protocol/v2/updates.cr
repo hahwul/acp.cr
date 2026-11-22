@@ -342,6 +342,7 @@ module ACP
       # Replaces the suggestions for the next user prompt.
       struct PromptSuggestionsUpdate
         include JSON::Serializable
+        include LosslessMetadata
 
         # Discriminator for this session update.
         @[JSON::Field(key: "sessionUpdate")]
@@ -351,13 +352,12 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::PromptSuggestionList(::ACP::Protocol::V2::PromptSuggestion))]
         getter suggestions : Array(PromptSuggestion)
 
-        # Extension metadata scoped to the replacement.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        getter meta : Hash(String, JSON::Any)?
-
         # Creates a replacement list for a v2 session.
-        def initialize(@suggestions : Array(PromptSuggestion), @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@suggestions : Array(PromptSuggestion), meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @session_update, @suggestions, metadata_comparison
       end
 
       # An open v2 session update. The raw payload remains available for
@@ -381,6 +381,9 @@ module ACP
 
         @[JSON::Field(ignore: true)]
         @earlier_fields : Hash(String, Array(String))?
+
+        @[JSON::Field(ignore: true)]
+        @filtered_suggestions : PreservedJson?
 
         # Creates an update with its variant payload.
         def initialize(@session_update : String, @json_unmapped : Hash(String, JSON::Any) = {} of String => JSON::Any)
@@ -444,6 +447,13 @@ module ACP
           true
         end
 
+        protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
+          if key == "suggestions" && (retained = @filtered_suggestions) && (view = value.as_a?)
+            return retained.raw_with_array(view).json
+          end
+          super
+        end
+
         # Filters prompt suggestions while keeping the original JSON of the usable entries.
         # :nodoc:
         def filter_prompt_suggestions(types : Set(String)) : JSON::Any?
@@ -451,23 +461,24 @@ module ACP
           pull = JSON::PullParser.new(raw)
           return unless pull.kind.begin_array?
 
-          suggestions = [] of PromptSuggestion
-          filtered = JSON.build do |builder|
+          candidates = [] of PromptSuggestion
+          json = JSON.build do |builder|
             builder.array do
               pull.read_array do
                 candidate = WireFrame.read_raw(pull)
-                # Duplicate members can change the meaning for a downstream parser.
-                suggestion = Protocol::PromptSuggestionList(PromptSuggestion).decode_usable(candidate, unique_members: true)
+                suggestion = Protocol::PromptSuggestionList(PromptSuggestion).decode_usable(candidate)
                 if suggestion && suggestion.allowed?(types)
-                  suggestions << suggestion
+                  candidates << suggestion
                   builder.raw(candidate)
                 end
               end
             end
           end
-          projection = JSON.parse(WireFrame.encode(suggestions))
-          retain_unmapped_json("suggestions", filtered, projection: projection)
-          projection
+          filtered = RawJson.new(JSON::PullParser.new(json))
+          retained = PreservedJson.new(filtered, project_array_objects: true, project_nested_objects: true)
+          @filtered_suggestions = retained
+          retain_unmapped_json("suggestions", filtered.json, projection: retained.value)
+          Protocol::PromptSuggestionList(PromptSuggestion).notification_projection(candidates)
         end
 
         # Returns the typed form of a recognized session update.

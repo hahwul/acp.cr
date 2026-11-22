@@ -504,6 +504,12 @@ module ACP
           self.meta = meta
         end
 
+        # Builds a prompt from exact JSON blocks, such as an accepted suggestion.
+        def self.new(session_id : String, prompt : RawJson, idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+          blocks = ContentBlockArray.from_json(JSON::PullParser.new(prompt.json))
+          new(session_id, blocks, idempotency_key, meta)
+        end
+
         # Builds a prompt from typed v2 content and skill references.
         def self.new(session_id : String, prompt : Array(Protocol::ContentBlock) | Array(PromptContentBlock),
                      idempotency_key : String? = nil, meta : Hash(String, JSON::Any)? = nil)

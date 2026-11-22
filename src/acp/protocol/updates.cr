@@ -220,18 +220,19 @@ module ACP
 
     # Replaces the suggestions for the next user prompt.
     struct PromptSuggestionsUpdate < SessionUpdate
+      include LosslessMetadata
+
       # Suggestions in Agent priority order. An empty list withdraws them.
       @[JSON::Field(converter: ::ACP::Protocol::PromptSuggestionList(::ACP::Protocol::PromptSuggestion))]
       getter suggestions : Array(PromptSuggestion)
 
-      # Extension metadata scoped to the replacement.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Creates a replacement list for the session.
-      def initialize(@suggestions : Array(PromptSuggestion), @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@suggestions : Array(PromptSuggestion), meta : Hash(String, JSON::Any)? = nil)
         @session_update = "prompt_suggestions_update"
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_update, @suggestions, metadata_comparison
     end
 
     # ═══════════════════════════════════════════════════════════════════

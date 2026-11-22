@@ -1031,8 +1031,14 @@ candidates in the Agent's order and skip entire unusable candidates. Start
 with an empty list when you open or restore a session.
 
 After the user accepts a suggestion, pass its `prompt` to `session_prompt`
-in v1 or to `Protocol::V2::SessionPromptParams.new` in v2. Call the request
-outside the dispatcher callback. [ACP Prompt Suggestions Proposal](https://github.com/agentclientprotocol/agent-client-protocol/blob/94824f11ec78f7a6699323a9342e47fa5edf2530/docs/rfds/prompt-suggestions.mdx)
+in v1. In v2, pass `prompt_raw` to
+`Protocol::V2::SessionPromptParams.new(session_id, suggestion.prompt_raw)`
+to retain the original block fields and exact numbers. Call the request
+outside the dispatcher callback. Both versions expose exact update and
+suggestion metadata through `meta_raw`. The generic `on_notification`
+callback only offers candidates whose prompt fits in `JSON::Any`. Use
+the typed `on_update` callback to receive the full list with exact values.
+[ACP Prompt Suggestions Proposal](https://agentclientprotocol.com/rfds/prompt-suggestions)
 
 ## Session cursors (draft)
 

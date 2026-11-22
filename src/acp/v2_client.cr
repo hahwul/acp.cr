@@ -1023,40 +1023,9 @@ module ACP
             end
             next
           end
-          validate_standard_prompt_block(block)
+          Protocol::ContentBlock.from_v2_prompt(block)
         end
         skills
-      end
-
-      private def validate_standard_prompt_block(block : Protocol::RawJson) : Nil
-        case content = Protocol::ContentBlock.from_json(block.json)
-        when Protocol::ImageContentBlock
-          if (uri = content.uri) && !Protocol.absolute_uri?(uri)
-            raise ArgumentError.new("ACP v2 image prompts require an absolute URI when one is supplied")
-          end
-          validate_prompt_media(content.data)
-        when Protocol::AudioContentBlock
-          validate_prompt_media(content.data)
-        when Protocol::ResourceLinkContentBlock
-          unless Protocol.absolute_uri?(content.uri)
-            raise ArgumentError.new("ACP v2 resource links require an absolute URI")
-          end
-          if (size = block.field("size")) && !size.null? && content.size_bytes.nil?
-            raise ArgumentError.new("ACP v2 resource link sizes must be non-negative UInt64 integers")
-          end
-        when Protocol::ResourceContentBlock
-          uri = content.uri
-          blob = content.blob
-          unless uri && Protocol.absolute_uri?(uri) && (content.text || (blob && Protocol.standard_base64?(blob)))
-            raise ArgumentError.new("Malformed ACP v2 embedded resource")
-          end
-        end
-      rescue JSON::ParseException
-        raise ArgumentError.new("Malformed ACP v2 prompt content block")
-      end
-
-      private def validate_prompt_media(data : String) : Nil
-        raise ArgumentError.new("ACP v2 image and audio prompts require Base64 data") unless Protocol.standard_base64?(data)
       end
 
       private def advertised_auth_method(method_id : String) : Wire::AuthMethod?
