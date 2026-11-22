@@ -81,11 +81,13 @@ module ACP
     private alias Cursors = Hash(String, CursorEntry)
 
     private class Replay
+      getter root_session_id : String
       getter? full : Bool
+      property? written = false
       getter staged = {} of String => Cursors
       getter sessions = Set(String).new
 
-      def initialize(@full : Bool)
+      def initialize(@root_session_id : String, @full : Bool)
       end
     end
 
@@ -157,18 +159,26 @@ module ACP
       records[patch.cursor_id] = CursorEntry.new(cursor, revision)
     end
 
-    def start_replay(request_id : String, session_id : String, *, full : Bool) : Nil
+    def reserve_replay(request_id : String, session_id : String, *, full : Bool) : Nil
       if @replaying.has_key?(session_id)
         raise InvalidStateError.new("A session replay is already pending for #{session_id.inspect}")
       end
 
-      replay = Replay.new(full)
+      replay = Replay.new(session_id, full)
+      replay.sessions.add(session_id)
       @replay_requests[request_id] = replay
-      stage(replay, session_id)
+      @replaying[session_id] = replay
+    end
+
+    def replay_written(request_id : String) : Nil
+      if replay = @replay_requests[request_id]?
+        replay.written = true
+        stage(replay, replay.root_session_id)
+      end
     end
 
     def include_child(parent_id : String, child_id : String) : Nil
-      if (replay = @replaying[parent_id]?) && !@replaying.has_key?(child_id)
+      if (replay = @replaying[parent_id]?) && replay.written? && !@replaying.has_key?(child_id)
         stage(replay, child_id)
       end
     end

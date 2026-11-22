@@ -193,9 +193,13 @@ module ACP
       if setup = @setups[id]?
         setup.state_revision = @state_revision
         setup.write_order = order
-        if @v2 && setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
-          # An already attached root can keep its current entities without replay.
-          clear_descendant_runtime(sid, include_root_entities: !!setup.replay_markers || !@root_states.has_key?(sid))
+        if sid = setup.session_id
+          if @v2 && setup.method == Protocol::AgentMethod::SESSION_RESUME
+            # An already attached root can keep its current entities without replay.
+            clear_descendant_runtime(sid, include_root_entities: !!setup.replay_markers || !@root_states.has_key?(sid))
+          elsif !@v2 && setup.method.in?(Protocol::AgentMethod::SESSION_LOAD, Protocol::AgentMethod::SESSION_RESUME)
+            clear_descendant_runtime(sid)
+          end
         end
       end
     end
@@ -266,7 +270,6 @@ module ACP
         if @setup_by_session.has_key?(sid)
           raise InvalidStateError.new("A session setup is already pending for #{sid.inspect}")
         end
-        clear_descendant_runtime(sid) unless @v2
       when Protocol::AgentMethod::SESSION_FORK
         return unless sid
       when Protocol::AgentMethod::SESSION_NEW
@@ -377,7 +380,7 @@ module ACP
 
         if attach_result(method, Protocol::WireFrame.result_json(response, frame))
           finish_resume(sid, setup)
-        elsif !@v2 || setup.written?
+        elsif setup.written?
           clear_descendant_runtime(sid, include_root_entities: !@root_states.has_key?(sid))
         end
       when Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_FORK
@@ -588,12 +591,13 @@ module ACP
     end
 
     def replaying?(session_id : String) : Bool
-      setup_for(session_id).try(&.method) == Protocol::AgentMethod::SESSION_LOAD
+      setup = setup_for(session_id)
+      !!setup && setup.written? && setup.method == Protocol::AgentMethod::SESSION_LOAD
     end
 
     def current_updates?(session_id : String) : Bool
       ids = ancestors(session_id)
-      if (setup = setup_for_ancestors(ids)) && (!@v2 || setup.written?)
+      if (setup = setup_for_ancestors(ids)) && setup.written?
         return false if setup.retired?
 
         if markers = setup.replay_markers
@@ -606,7 +610,7 @@ module ACP
 
     private def runtime_sync_pending?(session_id : String) : Bool
       ids = ancestors(session_id)
-      if (setup = setup_for_ancestors(ids)) && (!@v2 || setup.written?)
+      if (setup = setup_for_ancestors(ids)) && setup.written?
         return true
       end
       @unconfirmed_roots.includes?(ids.last) || !late_resume(ids.last).nil?
