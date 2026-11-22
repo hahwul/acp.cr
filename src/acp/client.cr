@@ -1688,7 +1688,7 @@ module ACP
           @session_choices.finish_change(id_str)
           @initialize_request = nil if @initialize_request == id_str
           @suggestion_loads.delete(id_str)
-          @subagent_registry.request_finished(id_str)
+          @subagent_registry.request_finished(id_str, &->discard_session_replay(String))
           settle_early_plan_sessions if creating_session
           @cursor_registry.try(&.finish_replay(id_str))
           claim_request_elicitations(id) if pending && v2_wire?
@@ -1952,7 +1952,7 @@ module ACP
               @late_session_retirements[id] = LateSessionRetirement.new(session_id, order, pending.close_on_missing)
               @late_session_retirements.shift if @late_session_retirements.size > MAX_LATE_SESSION_RETIREMENTS
             end
-            @subagent_registry.request_timed_out(id)
+            @subagent_registry.request_timed_out(id, &->discard_session_replay(String))
             settle_early_plan_sessions if pending.creating_session
             initialization = v2_wire? && @initialize_request == id
             @v2_contract_unknown.set(true) if initialization
@@ -2238,10 +2238,10 @@ module ACP
           end
           if error = created_session_response_error(request.creating_session, request.fork_source, msg, wire_frame)
             response = error
-            @subagent_registry.request_finished(id_str)
+            @subagent_registry.request_finished(id_str, &->discard_session_replay(String))
           else
             retired_setup = @subagent_registry.retired_setup?(id_str)
-            @subagent_registry.request_finished(id_str, msg, wire_frame)
+            @subagent_registry.request_finished(id_str, msg, wire_frame, &->discard_session_replay(String))
             request.on_response.try(&.call(initializing && wire_frame ? wire_frame : response))
             if !response.is_a?(ProtocolError) && !retired_setup && (observer = request.on_result) && (result = Protocol::WireFrame.result_json(msg, wire_frame))
               observer.call(result)
@@ -2265,7 +2265,7 @@ module ACP
             @session_choices.retirement_failed(session_id)
           end
           nil
-        elsif resumed = @subagent_registry.finish_late_resume(id_str, msg, wire_frame, rejected: !response_error_code(msg).nil?)
+        elsif resumed = @subagent_registry.finish_late_resume(id_str, msg, wire_frame, rejected: !response_error_code(msg).nil?, &->discard_session_replay(String))
           observed_reply = true
           session_id, result = resumed
           apply_session_choices(session_id, result, reattach: true) if result
@@ -2355,13 +2355,20 @@ module ACP
         return
       end
 
-      closed_sessions = @subagent_registry.close_runtime(session_id, order)
+      closed_sessions = @subagent_registry.close_runtime(session_id, order, &->discard_session_replay(String))
       closed_sessions.each do |sid|
         retire_plan_ids(sid, order)
         @session_choices.drop(sid)
       end
       forget_active_session(session_id)
       closed_sessions
+    end
+
+    # Drops uncommitted replay state for a setup the runtime registry has retired.
+    # The caller holds the pending mutex.
+    private def discard_session_replay(request_id : String) : Nil
+      @cursor_registry.try(&.finish_replay(request_id))
+      @session_choices.finish_attachment(request_id)
     end
 
     # The caller holds @pending_mutex. A late close retires its own attachment.
@@ -3535,7 +3542,11 @@ module ACP
     # Records cursor state before notifying an application handler.
     protected def observe_cursor_update(session_id : String, update : Protocol::CursorUpdate) : Nil
       @pending_mutex.synchronize do
-        @cursor_registry.try(&.observe(session_id, update)) unless @disconnected
+        return if @disconnected
+
+        return if v2_wire? && !@subagent_registry.accepts_cursor_updates?(session_id)
+
+        @cursor_registry.try(&.observe(session_id, update))
       end
     end
 

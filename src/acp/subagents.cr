@@ -50,6 +50,7 @@ module ACP
     end
 
     private class SetupRequest
+      getter request_id : String
       getter method : String
       getter session_id : String?
       getter workspace : SessionWorkspace?
@@ -59,7 +60,7 @@ module ACP
       property? retired = false
       property state : Protocol::RawJson?
 
-      def initialize(@method : String, @session_id : String?, @workspace : SessionWorkspace?,
+      def initialize(@request_id : String, @method : String, @session_id : String?, @workspace : SessionWorkspace?,
                      @replay_markers : Set(String)?)
       end
 
@@ -158,6 +159,17 @@ module ACP
 
     def closed_runtime?(session_id : String) : Bool
       @closed_roots.includes?(ancestors(session_id).last)
+    end
+
+    # A closed or unconfirmed root needs a new written setup before cursor updates can apply.
+    def accepts_cursor_updates?(session_id : String) : Bool
+      root = ancestors(session_id).last
+      return true unless @closed_roots.includes?(root) || @unconfirmed_roots.includes?(root)
+
+      pending = @setup_by_session[root]?
+      return true if pending && pending.written? && !pending.retired?
+
+      !late_resume(root).nil?
     end
 
     # Returns the order for an attached session or an in-flight reattachment.
@@ -279,14 +291,14 @@ module ACP
 
       workspace = workspace_from_params(params)
       replay_markers = Set(String).new if @v2 && method == Protocol::AgentMethod::SESSION_RESUME && !params.try(&.["replayFrom"]?).try(&.raw).nil?
-      setup = SetupRequest.new(method, sid, workspace, replay_markers)
+      setup = SetupRequest.new(id, method, sid, workspace, replay_markers)
       @setups[id] = setup
       if sid && (method == Protocol::AgentMethod::SESSION_LOAD || method == Protocol::AgentMethod::SESSION_RESUME)
         @setup_by_session[sid] = setup
       end
     end
 
-    def request_timed_out(id : String) : Nil
+    def request_timed_out(id : String, &discard_setup : String -> Nil) : Nil
       if @v2 && (setup = @setups[id]?) && !setup.retired? && setup.method == Protocol::AgentMethod::SESSION_RESUME && (sid = setup.session_id)
         @setups.delete(id)
         @setup_by_session.delete(sid)
@@ -295,27 +307,28 @@ module ACP
         end
         @late_resumes[id] = setup
         if @late_resumes.size > MAX_LATE_RESUMES
-          _, evicted = @late_resumes.shift
+          evicted_id, evicted = @late_resumes.shift
           @unconfirmed_roots.add(evicted.session_id.not_nil!)
+          discard_setup.call(evicted_id)
         end
       else
         if !@v2 && (setup = @setups[id]?) && !setup.creates_session? && !setup.retired? && (sid = setup.session_id)
           @workspace.delete(sid)
         end
-        request_finished(id)
+        request_finished(id, &discard_setup)
       end
     end
 
     # Preserve provisional updates until the actual result retires or
     # activates the attachment, even after the client stops waiting.
-    def finish_late_resume(id : String, response : JSON::Any, frame : Protocol::WireFrame?, *, rejected : Bool) : {String, String?}?
+    def finish_late_resume(id : String, response : JSON::Any, frame : Protocol::WireFrame?, *, rejected : Bool, &discard_setup : String -> Nil) : {String, String?}?
       return unless (setup = @late_resumes.delete(id)) && (sid = setup.session_id)
       return {sid, nil} if child?(sid)
 
       if response["jsonrpc"]?.try(&.as_s?) == "2.0"
         result = Protocol::WireFrame.result_json(response, frame)
         if result && attach_result(setup.method, result)
-          finish_resume(sid, setup)
+          finish_resume(sid, setup, &discard_setup)
           return {sid, result}
         end
       end
@@ -331,7 +344,7 @@ module ACP
       {sid, nil}
     end
 
-    private def finish_resume(session_id : String, setup : SetupRequest) : Nil
+    private def finish_resume(session_id : String, setup : SetupRequest, &discard_setup : String -> Nil) : Nil
       @closed_roots.delete(session_id)
       if workspace = setup.workspace
         @workspace[session_id] = workspace
@@ -341,7 +354,7 @@ module ACP
       order = setup.write_order.not_nil!
       if @v2
         attach_root_state(session_id, setup.state || root_state(session_id) || UNKNOWN_STATE, order)
-        discard_late_resumes(session_id, before: order)
+        discard_late_resumes(session_id, before: order, &discard_setup)
         @unconfirmed_roots.delete(session_id)
       else
         @v1_attachments[session_id] = order
@@ -365,7 +378,7 @@ module ACP
     end
 
     # Applies a response at the dispatch boundary, before the next update.
-    def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil) : Nil
+    def request_finished(id : String, response : JSON::Any? = nil, frame : Protocol::WireFrame? = nil, &discard_setup : String -> Nil) : Nil
       return unless setup = @setups.delete(id)
       sid = setup.session_id
       method = setup.method
@@ -379,7 +392,7 @@ module ACP
         return if setup.retired?
 
         if attach_result(method, Protocol::WireFrame.result_json(response, frame))
-          finish_resume(sid, setup)
+          finish_resume(sid, setup, &discard_setup)
         elsif setup.written?
           clear_descendant_runtime(sid, include_root_entities: !@root_states.has_key?(sid))
         end
@@ -406,21 +419,26 @@ module ACP
       @root_states[session_id] = RootState.new(snapshot, order)
     end
 
-    private def discard_late_resumes(session_id : String, *, before order : UInt64) : Nil
-      @late_resumes.reject! do |_id, setup|
-        setup.session_id == session_id && setup.write_order.not_nil! < order
+    private def discard_late_resumes(session_id : String, *, before order : UInt64, &discard_setup : String -> Nil) : Nil
+      @late_resumes.reject! do |id, setup|
+        retiring = setup.session_id == session_id && setup.write_order.not_nil! < order
+        discard_setup.call(id) if retiring
+        retiring
       end
     end
 
     # Releases runtime tracking and returns the affected session IDs.
-    def close_runtime(session_id : String, order : UInt64? = nil) : Array(String)
+    def close_runtime(session_id : String, order : UInt64? = nil, &discard_setup : String -> Nil) : Array(String)
       preserve_after = nil
       if order
         @closed_roots.add(session_id) if reserved_root?(session_id)
-        discard_late_resumes(session_id, before: order)
+        discard_late_resumes(session_id, before: order, &discard_setup)
         if pending = @setup_by_session[session_id]?
           if written = pending.write_order
-            pending.retired = true if written < order
+            if written < order
+              pending.retired = true
+              discard_setup.call(pending.request_id) if @v2
+            end
             preserve_after = order if written > order
           end
         end
