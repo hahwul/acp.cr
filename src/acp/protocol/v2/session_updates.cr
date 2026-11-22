@@ -137,47 +137,10 @@ module ACP
         WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
         # :nodoc:
-        struct RetainedCost
-          getter cost : Protocol::Cost
-
-          def initialize(@cost : Protocol::Cost, @source : RawJson? = nil)
-            @original_meta = @cost.meta_raw
-          end
-
-          def_equals_and_hash @cost
-
-          def raw : RawJson
-            return RawJson.new(JSON::PullParser.new(WireFrame.encode(@cost))) unless source = @source
-
-            meta = @cost.meta_raw
-            return source if meta.try(&.json) == @original_meta.try(&.json)
-
-            meta ? source.with_field("_meta", meta) : source.without_field("_meta")
-          end
-
-          def to_json(builder : JSON::Builder) : Nil
-            raw.to_json(builder)
-          end
-        end
+        alias RetainedCost = Protocol::RetainedCost
 
         # :nodoc:
-        module OptionalCost
-          def self.from_json(pull : JSON::PullParser) : RetainedCost?
-            wire = RawJson.new(RawJson.patch_parser(pull, required: {"amount", "currency"}, optional: {"_meta"}))
-            return unless token = wire.field("amount")
-
-            kind = JSON::PullParser.new(token.json).kind
-            return unless kind.int? || kind.float?
-            return unless (amount = token.json.to_f64?) && amount.finite?
-
-            # Normalize only the typed projection. Forward the Agent's exact amount.
-            cost = Protocol::Cost.from_json(wire.with_field("amount", RawJson.new(JSON::Any.new(amount))).json)
-            wire = wire.without_field("_meta") if wire.field("_meta") && !cost.meta_raw
-            RetainedCost.new(cost, wire)
-          rescue JSON::ParseException
-            nil
-          end
-        end
+        alias OptionalCost = Protocol::RetainedCost::Optional
 
         # Session update discriminator.
         @[JSON::Field(key: "sessionUpdate")]

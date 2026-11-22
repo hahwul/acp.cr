@@ -7122,6 +7122,112 @@ describe "ACP v1 exact session and turn replies" do
   end
 end
 
+describe "ACP v1 usage notifications" do
+  it "keeps required counts when optional cost and metadata are malformed" do
+    fields = %("sessionUpdate":"usage_update","used":10,"size":100)
+    [
+      "null",
+      "false",
+      "[]",
+      %({"currency":"credits"}),
+      %({"amount":"1","currency":"credits"}),
+      %({"amount":1e999,"currency":"credits"}),
+      %({"amount":1,"amount":2,"currency":"credits"}),
+    ].each do |cost|
+      usage = ACP::Protocol::SessionUpdate.from_json(%({#{fields},"cost":#{cost},"_meta":false})).as(ACP::Protocol::UsageUpdate)
+      usage.used.should eq(10_u64)
+      usage.size.should eq(100_u64)
+      usage.usage_ratio.should eq(0.1)
+      usage.cost.should be_nil
+      usage.cost_raw.should be_nil
+      usage.meta.should be_nil
+      ACP::Protocol::RawJson.from_json(usage.to_json).field("cost").should be_nil
+    end
+
+    expect_raises(JSON::ParseException) do
+      ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate":"usage_update","used":-1,"size":100}))
+    end
+  end
+
+  it "delivers exact cost and metadata through a typed stdio callback" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work")
+
+      updates = Channel(ACP::Protocol::UsageUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        if usage = note.update.as?(ACP::Protocol::UsageUpdate)
+          updates.send(usage)
+        end
+        nil
+      end
+      amount = "10000000000000000001"
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":1.23000000000000000001})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"type":"usage_update","used":9223372036854775808,"size":18446744073709551615,"cost":{"amount":#{amount},"currency":"credits","_meta":#{metadata}},"_meta":#{metadata}}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when usage = updates.receive
+        usage.used.should eq(9223372036854775808_u64)
+        usage.size.should eq(UInt64::MAX)
+        usage.cost.not_nil!.amount.should eq(1e19)
+        usage.cost.not_nil!.currency.should eq("credits")
+        usage.meta_raw.not_nil!.json.should eq(metadata)
+        usage.cost_raw.not_nil!.field("amount").not_nil!.json.should eq(amount)
+        serialized = ACP::Protocol::RawJson.from_json(usage.to_json)
+        serialized.field("_meta").not_nil!.json.should eq(metadata)
+        serialized.field("cost").not_nil!.field("amount").not_nil!.json.should eq(amount)
+        usage.cost.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      else
+        fail "usage update did not reach the typed callback"
+      end
+
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"usage_update","used":5,"size":20,"cost":{"amount":false,"currency":"credits"},"_meta":#{metadata}}}})
+      select
+      when usage = updates.receive
+        usage.used.should eq(5_u64)
+        usage.size.should eq(20_u64)
+        usage.cost.should be_nil
+        usage.meta_raw.not_nil!.json.should eq(metadata)
+      when timeout(2.seconds)
+        fail "usage counts did not reach the callback after a malformed cost"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the original decimal cost when editing its metadata" do
+    amount = "0.123456789012345678901"
+    usage = ACP::Protocol::UsageUpdate.from_json(%({"sessionUpdate":"usage_update","used":10,"size":100,"cost":{"amount":#{amount},"currency":"USD","_meta":{"edit":false}}}))
+    usage.cost.not_nil!.meta.not_nil!["edit"] = JSON::Any.new(true)
+    raw = ACP::Protocol::RawJson.from_json(usage.to_json).field("cost").not_nil!
+    raw.field("amount").not_nil!.json.should eq(amount)
+    raw.field("_meta").not_nil!.field("edit").not_nil!.json.should eq("true")
+    usage.cost_raw.should eq(raw)
+
+    usage.cost = ACP::Protocol::Cost.new(0.5, "USD")
+    ACP::Protocol::RawJson.from_json(usage.to_json).field("cost").not_nil!.field("amount").not_nil!.json.should eq("0.5")
+    decoded = ACP::Protocol::UsageUpdate.from_json(usage.to_json)
+    decoded.should eq(usage)
+    decoded.hash.should eq(usage.hash)
+    usage.cost = nil
+    ACP::Protocol::RawJson.from_json(usage.to_json).field("cost").should be_nil
+  end
+
+  it "compares wide counts, typed cost, and metadata independently" do
+    fields = %("sessionUpdate":"usage_update","used":1,"size":18446744073709551615)
+    left = ACP::Protocol::UsageUpdate.from_json(%({#{fields},"cost":{"amount":1,"currency":"USD"},"_meta":{"a":1,"b":2}}))
+    right = ACP::Protocol::UsageUpdate.from_json(%({#{fields},"cost":{"amount":1.0,"currency":"USD"},"_meta":{"b":2,"a":1}}))
+    left.should eq(right)
+    left.hash.should eq(right.hash)
+  end
+end
+
 describe "ACP v1 slash command advertisements" do
   it "keeps usable commands when other entries or optional inputs are malformed" do
     entries = %([false,{"name":false,"description":"Invalid"},{"name":"incomplete"},{"name":"help","description":"Help","input":{"hint":false}},{"name":"plan","description":"Plan","input":{"hint":"Topic","_meta":false},"_meta":true}])
