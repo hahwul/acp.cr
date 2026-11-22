@@ -86,6 +86,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add `ACP::V2::MessageStore` for messages, streamed content, and session-directed message links.
 - Add `ACP::V2::PlanStore` for current checklist, Markdown, and extension plan snapshots.
 - Add `ACP::V2::ToolCallStore` for tool-call state, streamed content, and permission tool patches.
 - Add `ACP::V2::TerminalStore` for bounded Agent-owned terminal output and display state.

@@ -10403,3 +10403,145 @@ describe ACP::V2::PlanStore do
     unlimited.plan("session", "a").not_nil!.plan.type.should eq("markdown")
   end
 end
+
+describe ACP::V2::MessageStore do
+  it "applies replay replacements and subsequent chunks by message kind in receive order" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"s"})
+    transport.replies["session/resume"] = %("result":{})
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::MessageStore.new
+    observed = Channel(Bool).new(12)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(note))
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+
+    transport.update("s", %({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":"old"},"_meta":{"chunk":true}}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"agent_message","messageId":"m","_meta":{"retained":true}}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"user_message_chunk","messageId":"m","content":{"type":"skill","name":"describe"}}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"agent_thought","messageId":"m"}))
+    take_v2_frame(observed).should be_true
+    transport.update("s", %({"sessionUpdate":"session_message","messageId":"m","recipientSessionId":"child"}))
+    take_v2_frame(observed).should be_true
+    store.messages("s").map(&.kind).should eq([ACP::V2::MessageKind::Agent, ACP::V2::MessageKind::User, ACP::V2::MessageKind::Thought, ACP::V2::MessageKind::Session])
+    store.message("s", ACP::V2::MessageKind::Agent, "m").not_nil!.content_blocks.first.as(ACP::Protocol::TextContentBlock).text.should eq("old")
+
+    transport.before_reply = ->(method : String) do
+      if method == "session/resume"
+        transport.update("s", %({"sessionUpdate":"agent_message","messageId":"m","content":[],"_meta":{"replayed":true}}))
+        transport.update("s", %({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":"replayed"}}))
+        transport.update("s", %({"sessionUpdate":"replay_complete"}))
+        transport.update("s", %({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}))
+      end
+      nil
+    end
+    client.session_resume(ACP::Protocol::V2::SessionResumeParams.new("s", "/work", replay_from: ACP::Protocol::V2::ReplayFrom.start))
+    take_v2_frame(observed).should be_true
+    take_v2_frame(observed).should be_true
+    take_v2_frame(observed).should be_false
+    take_v2_frame(observed).should be_false
+    transport.update("s", %({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"text","text":" live"}}))
+    take_v2_frame(observed).should be_true
+    agent = store.message("s", ACP::V2::MessageKind::Agent, "m").not_nil!
+    agent.content_blocks.map(&.as(ACP::Protocol::TextContentBlock).text).should eq(["replayed", " live"])
+    agent.meta_raw.not_nil!.field("retained").not_nil!.json.should eq("true")
+    agent.meta_raw.not_nil!.field("replayed").not_nil!.json.should eq("true")
+    agent.meta_raw.not_nil!.field("chunk").should be_nil
+    store.message("s", ACP::V2::MessageKind::User, "m").not_nil!.skill_references.map(&.name).should eq(["describe"])
+  ensure
+    client.try(&.close)
+  end
+
+  it "patches directed links, preserves exact blocks, and keeps separate transcripts" do
+    store = ACP::V2::MessageStore.new
+    observe = ->(sid : String, fields : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":#{sid.to_json},"update":#{fields}})))
+    end
+    kind = ACP::V2::MessageKind::Session
+    wide = "18446744073709551615"
+    fraction = "0.123456789012345678901"
+    observe.call("main", %({"sessionUpdate":"session_message_chunk","messageId":"m","content":{"type":"_diagram","count":#{wide}}})).should be_true
+    observe.call("main", %({"sessionUpdate":"session_message","messageId":"m","senderSessionId":"main","recipientSessionId":"child","senderMessageId":"m","recipientMessageId":"peer","_meta":{"fraction":#{fraction},"drop":1}})).should be_true
+    observe.call("child", %({"sessionUpdate":"session_message","messageId":"m","senderSessionId":"main","recipientSessionId":"child","senderMessageId":"m"})).should be_true
+    observe.call("main", %({"sessionUpdate":"session_message","messageId":"m","recipientSessionId":false,"recipientMessageId":null,"content":{},"_meta":{"drop":null}})).should be_true
+
+    message = store.message("main", kind, "m").not_nil!
+    message.session_id.should eq("main")
+    message.sender_session_id.should eq("main")
+    message.sender_message_id.should eq("m")
+    message.recipient_session_id.should eq("child")
+    message.recipient_message_id.should be_nil
+    message.content_blocks.first.as(ACP::Protocol::UnknownContentBlock).raw.field("count").not_nil!.json.should eq(wide)
+    message.meta_raw.not_nil!.field("fraction").not_nil!.json.should eq(fraction)
+    message.meta_raw.not_nil!.field("drop").should be_nil
+    message.content_raw.clear
+    store.message("main", kind, "m").not_nil!.content_raw.size.should eq(1)
+
+    observe.call("main", %({"sessionUpdate":"session_message","messageId":"m","content":[false,{"type":"_diagram","count":#{wide}}]})).should be_true
+    replacement = store.message("main", kind, "m").not_nil!
+    replacement.content_raw.map(&.json).should eq(["false", %({"type":"_diagram","count":#{wide}})])
+    replacement.content_blocks.first.as(ACP::Protocol::UnknownContentBlock).raw.field("count").not_nil!.json.should eq(wide)
+
+    observe.call("main", %({"sessionUpdate":"session_message","messageId":"m","content":null,"_meta":null})).should be_true
+    store.message("main", kind, "m").not_nil!.content_raw.should be_empty
+    store.message("main", kind, "m").not_nil!.meta_raw.should be_nil
+    store.forget_session("main").should be_true
+    store.forget_session("main").should be_false
+    store.message("child", kind, "m").not_nil!.sender_session_id.should eq("main")
+  end
+
+  it "records retention gaps and resumes appending after an accepted content replacement" do
+    store = ACP::V2::MessageStore.new(message_limit: 1, message_byte_limit: 160)
+    params = ->(fields : String) do
+      ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"main","update":#{fields}}))
+    end
+    kind = ACP::V2::MessageKind::Session
+    chunk = ->(text : String) { params.call(%({"sessionUpdate":"session_message_chunk","messageId":"m","content":{"type":"text","text":#{text.to_json}}})) }
+    excess = "x" * 200
+    oversized_link = params.call(%({"sessionUpdate":"session_message","messageId":"m","recipientSessionId":#{excess.to_json}}))
+    oversized_replacement = params.call(%({"sessionUpdate":"session_message","messageId":"m","content":[{"type":"text","text":#{excess.to_json}}]}))
+    store.observe(chunk.call("start")).should be_true
+    store.observe(oversized_link).should be_false
+    store.observe(params.call(%({"sessionUpdate":"user_message","messageId":"m"}))).should be_false
+    store.messages("main").size.should eq(1)
+    store.message("main", kind, "m").not_nil!.recipient_session_id.should be_nil
+    store.message("main", kind, "m").not_nil!.content_incomplete?.should be_false
+
+    store.observe(chunk.call(excess)).should be_true
+    store.observe(chunk.call("suffix")).should be_false
+    snapshot = store.message("main", kind, "m").not_nil!
+    snapshot.content_incomplete?.should be_true
+    snapshot.content_blocks.first.as(ACP::Protocol::TextContentBlock).text.should eq("start")
+
+    store.observe(oversized_replacement).should be_true
+    store.observe(chunk.call("suffix")).should be_false
+    store.message("main", kind, "m").not_nil!.content_raw.should be_empty
+    store.observe(params.call(%({"sessionUpdate":"session_message","messageId":"m","content":[{"type":"text","text":"new"}]}))).should be_true
+    store.observe(chunk.call(" suffix")).should be_true
+    recovered = store.message("main", kind, "m").not_nil!
+    recovered.content_incomplete?.should be_false
+    recovered.content_blocks.map(&.as(ACP::Protocol::TextContentBlock).text).should eq(["new", " suffix"])
+
+    oversized_link_with_clear = params.call(%({"sessionUpdate":"session_message","messageId":"m","recipientSessionId":#{excess.to_json},"content":[]}))
+    store.observe(oversized_link_with_clear).should be_true
+    store.message("main", kind, "m").not_nil!.content_raw.should be_empty
+    store.message("main", kind, "m").not_nil!.content_incomplete?.should be_false
+    store.observe(chunk.call("again")).should be_true
+    store.message("main", kind, "m").not_nil!.recipient_session_id.should be_nil
+
+    store.forget_session("main").should be_true
+    store.observe(chunk.call(excess)).should be_true
+    store.observe(chunk.call("suffix")).should be_false
+    store.message("main", kind, "m").not_nil!.content_incomplete?.should be_true
+
+    unlimited = ACP::V2::MessageStore.new(message_limit: nil, message_byte_limit: nil)
+    unlimited.observe(oversized_link).should be_true
+    unlimited.message("main", kind, "m").not_nil!.recipient_session_id.should eq(excess)
+  end
+end
