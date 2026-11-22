@@ -4065,8 +4065,9 @@ describe "ACP v2 open content blocks" do
     full = ACP::Protocol::V2::MessageUpdate.from_json(%({"sessionUpdate":"user_message","messageId":"m","content":[#{ambiguous_type},#{valid},#{ambiguous_name}]}))
     full.skill_references.map(&.name).should eq(["notes"])
     [ambiguous_type, ambiguous_name].each do |block|
-      chunk = ACP::Protocol::V2::MessageChunkUpdate.from_json(%({"sessionUpdate":"user_message_chunk","messageId":"m","content":#{block}}))
-      chunk.skill_reference.should be_nil
+      wire = %({"sessionUpdate":"user_message_chunk","messageId":"m","content":#{block}})
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::MessageChunkUpdate.from_json(wire) }
+      ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.should be_nil
     end
   end
 
@@ -5677,9 +5678,9 @@ describe "ACP v2 display media and resources" do
       message_blob.blob.should eq("+/8=")
       message_blob.resource_raw.field("_meta").not_nil!.field("example.test/value").not_nil!.json.should eq(UInt64::MAX.to_s)
 
-      chunk = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
-      chunk.content_raw.json.should eq(invalid_audio)
-      chunk.to_content_chunk.should be_nil
+      chunk = next_exact_session_update(observed)
+      chunk.update.typed.should be_nil
+      chunk.raw.field("update").not_nil!.field("content").not_nil!.json.should eq(invalid_audio)
       tool = next_exact_session_update(observed).update.typed.as(ACP::Protocol::V2::ToolCallUpdate)
       tool.content.not_nil!.size.should eq(1)
       tool.content.not_nil!.first.content_block.as(ACP::Protocol::ResourceContentBlock).resource_raw.json.should eq(message_blob.resource_raw.json)
@@ -6423,6 +6424,133 @@ describe "ACP session list response recovery" do
         feed.puts %({"jsonrpc":"2.0","id":#{request["id"]},"result":{"sessions":[]}})
       end
       client.session_list.has_more?.should be_false
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v2 transcript message decoding" do
+  it "rejects ambiguous upsert identities and leaves conflicting optional fields out of the patch" do
+    {"user_message", "agent_message", "agent_thought"}.each do |kind|
+      identity = %({"sessionUpdate":#{kind.to_json},"messageId":"original","messageId":"other"})
+      expect_raises(JSON::ParseException) { ACP::Protocol::V2::MessageUpdate.from_json(identity) }
+      ACP::Protocol::V2::SessionUpdate.from_json(identity).typed.should be_nil
+
+      ambiguous_content = %({"sessionUpdate":#{kind.to_json},"messageId":"m",
+        "content":null,"content":[],"_meta":{"example.test/sequence":18446744073709551615}})
+      direct = ACP::Protocol::V2::MessageUpdate.from_json(ambiguous_content)
+      open = ACP::Protocol::V2::SessionUpdate.from_json(ambiguous_content)
+      [direct, open.typed.as(ACP::Protocol::V2::MessageUpdate)].each do |update|
+        update.content_present?.should be_false
+        update.meta_present?.should be_true
+        update.meta_raw.not_nil!.field("example.test/sequence").not_nil!.json.should eq(UInt64::MAX.to_s)
+      end
+
+      ambiguous_meta = %({"sessionUpdate":#{kind.to_json},"messageId":"m",
+        "_meta":null,"_meta":{"value":true},"content":null})
+      update = ACP::Protocol::V2::SessionUpdate.from_json(ambiguous_meta).typed.as(ACP::Protocol::V2::MessageUpdate)
+      update.meta_present?.should be_false
+      update.content_present?.should be_true
+      update.content.should be_nil
+    end
+  end
+
+  it "requires one usable block in each streamed message and accepts a draft user skill" do
+    custom = %({"type":"_example.test/chart","value":0.1234567890123456789})
+    skill = %({"type":"skill","name":"plugin:notes"})
+    {"user_message_chunk", "agent_message_chunk", "agent_thought_chunk"}.each do |kind|
+      base = %("sessionUpdate":#{kind.to_json},"messageId":"m")
+      [
+        %({#{base}}),
+        %({#{base},"content":null}),
+        %({#{base},"content":{"type":"text","text":false}}),
+        %({#{base},"content":{"type":"image","data":"!","mimeType":"image/png"}}),
+        %({#{base},"content":#{custom},"content":#{custom}}),
+        %({#{base},"messageId":"other","content":#{custom}}),
+      ].each do |invalid|
+        expect_raises(JSON::ParseException) { ACP::Protocol::V2::MessageChunkUpdate.from_json(invalid) }
+        ACP::Protocol::V2::SessionUpdate.from_json(invalid).typed.should be_nil
+      end
+
+      wire = %({#{base},"content":#{custom},"_meta":{"label":"first"},"_meta":null})
+      chunk = ACP::Protocol::V2::SessionUpdate.from_json(wire).typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+      chunk.meta_raw.should be_nil
+      display = chunk.to_content_chunk.not_nil!
+      display.message_id.should eq("m")
+      display.content.as(ACP::Protocol::UnknownContentBlock).raw.json.should eq(custom)
+
+      skill_update = ACP::Protocol::V2::SessionUpdate.from_json(%({#{base},"content":#{skill}})).typed
+      if kind == "user_message_chunk"
+        reference = skill_update.as(ACP::Protocol::V2::MessageChunkUpdate)
+        reference.skill_reference.not_nil!.name.should eq("plugin:notes")
+        reference.to_content_chunk.should be_nil
+      else
+        skill_update.should be_nil
+      end
+    end
+  end
+
+  it "checks the identity of serialized v2 content wrappers without requiring a compaction message ID" do
+    content = %("content":{"type":"text","text":"Usable"})
+    [
+      %({#{content},"messageId":"first","messageId":"second"}),
+      %({#{content},"messageId":false}),
+      %({#{content},#{content}}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::ContentChunk.from_v2_json(wire) }
+    end
+
+    decoded = ACP::Protocol::ContentChunk.from_v2_json(%({#{content},"_meta":null,"_meta":{"scoped":true}}))
+    decoded.message_id.should be_nil
+    decoded.meta_raw.should be_nil
+    decoded.text.should eq("Usable")
+  end
+
+  it "delivers chunk-first messages and their patches in order while keeping invalid wire content" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      observed = Channel(ACP::Protocol::V2::SessionUpdateParams).new(1)
+      client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+        observed.send(note)
+        nil
+      end
+      initialize_wide_v2(client, feed, outgoing, session_id: "root")
+      send_update = ->(wire : String) do
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":#{wire}}})
+        next_exact_session_update(observed)
+      end
+
+      {"user_message", "agent_thought", "agent_message"}.each do |kind|
+        wire = %({"sessionUpdate":#{"#{kind}_chunk".to_json},"messageId":"same","content":{"type":"text","text":#{kind.to_json}}})
+        first = send_update.call(wire).update.typed.as(ACP::Protocol::V2::MessageChunkUpdate)
+        first.session_update.should eq("#{kind}_chunk")
+        first.message_id.should eq("same")
+        first.to_content_chunk.not_nil!.content.as(ACP::Protocol::TextContentBlock).text.should eq(kind)
+      end
+
+      ambiguous = send_update.call(%({"sessionUpdate":"agent_thought","messageId":"same","messageId":"other"}))
+      ambiguous.update.typed.should be_nil
+      ambiguous.raw.field("update").not_nil!.json.scan(%("messageId")).size.should eq(2)
+
+      invalid_media = %({"type":"audio","mimeType":"audio/wav","data":"!!!"})
+      malformed = send_update.call(%({"sessionUpdate":"agent_message_chunk","messageId":"same","content":#{invalid_media}}))
+      malformed.update.typed.should be_nil
+      malformed.raw.field("update").not_nil!.field("content").not_nil!.json.should eq(invalid_media)
+
+      content = %([{"type":"text","text":"replacement"},false,{"type":"future","value":18446744073709551615}])
+      patch = send_update.call(%({"sessionUpdate":"agent_message","messageId":"same","content":#{content},"_meta":null}))
+      message = patch.update.typed.as(ACP::Protocol::V2::MessageUpdate)
+      message.message_id.should eq("same")
+      message.content_present?.should be_true
+      message.content_blocks.not_nil!.map(&.type).should eq(["text", "future"])
+      message.content_raw.not_nil!.json.should eq(content)
+      message.meta_present?.should be_true
+      message.meta_raw.should be_nil
+
+      next_chunk = send_update.call(%({"sessionUpdate":"agent_message_chunk","messageId":"same","content":{"type":"text","text":"append"}}))
+      next_chunk.update.typed.as(ACP::Protocol::V2::MessageChunkUpdate).to_content_chunk.not_nil!.content.as(ACP::Protocol::TextContentBlock).text.should eq("append")
     ensure
       client.try(&.close)
     end

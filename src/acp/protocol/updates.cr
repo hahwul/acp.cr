@@ -77,11 +77,14 @@ module ACP
 
       # Reads a serialized v2 chunk wrapper with open display content.
       def self.from_v2_json(json : String) : self
-        wire = RawJson.from_json(json)
+        wire = RawJson.from_json(json).unambiguous_patch(required: {"content", "messageId"}, optional: {"_meta"})
         unless block = wire.field("content")
           raise JSON::SerializableError.new("Missing required content", to_s, "content", 1, 1, nil)
         end
-        new(ContentBlock.from_v2_json(block), meta_raw: wire.field("_meta"), message_id: wire.field("messageId").try(&.as_s?))
+        if (id = wire.field("messageId")) && !id.null?
+          message_id = id.as_s? || raise JSON::SerializableError.new("Invalid message ID", to_s, "messageId", 1, 1, nil)
+        end
+        new(ContentBlock.from_v2_json(block), meta_raw: wire.field("_meta"), message_id: message_id)
       end
 
       # Convenience: returns the text if the content is a TextContentBlock.
