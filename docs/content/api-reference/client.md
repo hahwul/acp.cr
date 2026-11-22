@@ -201,6 +201,37 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Plan state
+
+Feed each connection's v2 session updates to a `PlanStore` in receive order.
+A `plan_update` replaces the complete plan with that ID in its session.
+
+```crystal
+plans = ACP::V2::PlanStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  plans.observe(update)
+  nil
+end
+
+snapshot = plans.plan(session_id, plan_id)
+current = snapshot.try(&.plan.typed)
+```
+
+`plans(session_id)` lists retained snapshots. `plan_raw` keeps exact JSON
+for checklist, Markdown, and extension plans. `meta_raw` holds metadata
+from the update envelope. A removal deletes the corresponding snapshot.
+
+The store defaults to 128 plans across sessions and 256 KiB of serialized
+state per plan. Set `plan_limit:` or `plan_byte_limit:` to change a limit,
+or pass `nil` to remove it. `observe` returns `true` when an update stores
+or discards a snapshot. An oversized replacement discards any previous
+snapshot with that ID so the display can clear outdated content.
+
+Use `forget_session` to discard one session's plan state. To rebuild from
+full replay while keeping the current view available, feed the replay into
+a fresh store and switch each session's view after its own `replay_complete`.
+[ACP v2 plan updates](https://agentclientprotocol.com/protocol/v2/agent-plan#updating-plans) · [Replay completion](https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete)
+
 ### Tool-call state
 
 Create a `ToolCallStore` per connection and feed it v2 session updates in

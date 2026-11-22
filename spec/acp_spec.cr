@@ -10303,3 +10303,103 @@ describe ACP::V2::ToolCallStore do
     unlimited.tool_call("main", "t").not_nil!.title.should eq("Discarded")
   end
 end
+
+describe ACP::V2::PlanStore do
+  it "observes received plan replacements and removals for the addressed session" do
+    transport = V2TestTransport.new
+    transport.replies["session/new"] = %("result":{"sessionId":"main"})
+    client = ACP::V2::Client.new(transport)
+    store = ACP::V2::PlanStore.new
+    observed = Channel(Bool).new(2)
+    client.on_update = ->(note : ACP::Protocol::V2::SessionUpdateParams) do
+      observed.send(store.observe(note))
+      nil
+    end
+    client.initialize_connection
+    client.session_new("/work")
+    transport.replies["session/new"] = %("result":{"sessionId":"other"})
+    client.session_new("/work")
+
+    items = %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[{"content":"First","priority":"high","status":"pending"}]}})
+    transport.update("main", items)
+    take_v2_frame(observed).should be_true
+    transport.update("other", items)
+    take_v2_frame(observed).should be_true
+    initial = store.plan("main", "p").not_nil!.plan.typed.as(ACP::Protocol::PlanItems)
+    initial.entries.map(&.content).should eq(["First"])
+    transport.update("main", %({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"p","content":"# Replacement"}}))
+    take_v2_frame(observed).should be_true
+    store.plan("main", "p").not_nil!.plan.typed.as(ACP::Protocol::PlanMarkdown).content.should eq("# Replacement")
+    transport.update("main", %({"sessionUpdate":"plan_update","plan":{"type":"_diagram","planId":"p","nodes":[1]}}))
+    take_v2_frame(observed).should be_true
+    replacement = store.plan("main", "p").not_nil!
+    replacement.plan.type.should eq("_diagram")
+    replacement.plan.typed.should be_nil
+    replacement.plan_raw.field("nodes").not_nil!.json.should eq("[1]")
+
+    transport.update("main", %({"sessionUpdate":"plan_removed","planId":"p"}))
+    take_v2_frame(observed).should be_true
+    store.plan("main", "p").should be_nil
+    store.plan("other", "p").not_nil!.plan.type.should eq("items")
+  ensure
+    client.try(&.close)
+  end
+
+  it "keeps exact plan and envelope metadata and returns detached snapshots" do
+    store = ACP::V2::PlanStore.new
+    observe = ->(update : String) do
+      store.observe(ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"session","update":#{update}})))
+    end
+    wide = "18446744073709551615"
+    fraction = "0.123456789012345678901"
+    observe.call(%({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"a","entries":[{"content":"First","priority":"high","status":"_queued","_meta":{"wide":#{wide}}}],"_meta":{"fraction":#{fraction}}},"_meta":{"wide":#{wide}}})).should be_true
+    observe.call(%({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"b","entries":[]}})).should be_true
+    observe.call(%({"sessionUpdate":"plan_removed","planId":"unknown"})).should be_false
+    snapshots = store.plans("session")
+    snapshots.map(&.plan_id).should eq(["a", "b"])
+    snapshot = snapshots.first
+    snapshot.session_id.should eq("session")
+    snapshot.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    snapshot.plan.meta_raw.not_nil!.field("fraction").not_nil!.json.should eq(fraction)
+    entries = snapshot.plan.typed.as(ACP::Protocol::PlanItems).entries
+    entries.first.status.should eq("_queued")
+    entries.first.meta_raw.not_nil!.field("wide").not_nil!.json.should eq(wide)
+    entries.clear
+    snapshots.clear
+    snapshot.plan.typed.as(ACP::Protocol::PlanItems).entries.size.should eq(1)
+    store.plans("session").size.should eq(2)
+
+    observe.call(%({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"a","entries":[]}})).should be_true
+    current = store.plan("session", "a").not_nil!
+    current.meta_raw.should be_nil
+    current.plan.meta_raw.should be_nil
+    current.plan.typed.as(ACP::Protocol::PlanItems).entries.should be_empty
+    store.forget_session("session").should be_true
+    store.forget_session("session").should be_false
+    store.plans("session").should be_empty
+  end
+
+  it "bounds retained plans and clears a stale snapshot after an over-budget replacement" do
+    store = ACP::V2::PlanStore.new(plan_limit: 1, plan_byte_limit: 128)
+    params = ->(update : String) do
+      ACP::Protocol::V2::SessionUpdateParams.from_json(%({"sessionId":"session","update":#{update}}))
+    end
+    a = %({"type":"items","planId":"a","entries":[]})
+    b = %({"type":"items","planId":"b","entries":[]})
+    update = ->(plan : String) { params.call(%({"sessionUpdate":"plan_update","plan":#{plan}})) }
+    store.observe(update.call(a)).should be_true
+    store.observe(update.call(b)).should be_false
+    store.observe(params.call(%({"sessionUpdate":"plan_update","plan":#{a},"plan":#{b}}))).should be_false
+    store.observe(update.call(%({"type":"markdown","planId":"a","content":null}))).should be_false
+    store.plan("session", "a").not_nil!.plan.type.should eq("items")
+    large = update.call(%({"type":"markdown","planId":"a","content":#{("x" * 200).to_json}}))
+    store.observe(large).should be_true
+    store.plan("session", "a").should be_nil
+    store.observe(large).should be_false
+    store.observe(update.call(b)).should be_true
+
+    unlimited = ACP::V2::PlanStore.new(plan_limit: nil, plan_byte_limit: nil)
+    unlimited.observe(large).should be_true
+    unlimited.plan("session", "a").not_nil!.plan.type.should eq("markdown")
+  end
+end
