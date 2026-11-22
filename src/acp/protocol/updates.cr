@@ -63,7 +63,7 @@ module ACP
       property content : ContentBlock
 
       # Optional ID linking this chunk to other chunks of the same message.
-      @[JSON::Field(key: "messageId")]
+      @[JSON::Field(key: "messageId", converter: ::ACP::Protocol::OptionalContentValue(String))]
       property message_id : String?
 
       # Creates a chunk with optional extension metadata.
@@ -74,8 +74,12 @@ module ACP
       # Creates a chunk from exact extension metadata.
       def initialize(@content : ContentBlock, *, meta_raw : RawJson?, @message_id : String? = nil)
         if meta_raw && meta_raw.object?
-          @metadata_wire = PreservedJson.new(meta_raw, project_object_members: true)
+          self.meta_raw = meta_raw
         end
+      end
+
+      # :nodoc:
+      def initialize(@content : ContentBlock, *, @metadata_wire : PreservedJson?, @message_id : String? = nil)
       end
 
       # Reads a serialized v2 chunk wrapper with open display content.
@@ -240,28 +244,17 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-setup#loading-a-session
     struct UserMessageChunkUpdate < SessionUpdate
       include JSON::Serializable
-
-      # The content chunk. Kept as JSON::Any for backward compatibility
-      # with agents that may send varying formats.
-      property content : JSON::Any
-
-      # Optional ID correlating every chunk of the same logical message.
-      @[JSON::Field(key: "messageId")]
-      property message_id : String?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMessageChunk
 
       def initialize(
-        @content : JSON::Any,
+        content : JSON::Any,
         @message_id : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "user_message_chunk"
+        @content_wire = PreservedJson.new(content)
+        self.meta = meta
       end
-
-      include ChunkContentHelper
     end
 
     # ─── Agent Message Chunk ───────────────────────────────────────────
@@ -270,28 +263,17 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/prompt-turn#3-agent-reports-output
     struct AgentMessageChunkUpdate < SessionUpdate
       include JSON::Serializable
-
-      # The content chunk. Kept as JSON::Any for backward compatibility
-      # with agents that may send varying formats.
-      property content : JSON::Any
-
-      # Optional ID correlating every chunk of the same logical message.
-      @[JSON::Field(key: "messageId")]
-      property message_id : String?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMessageChunk
 
       def initialize(
-        @content : JSON::Any,
+        content : JSON::Any,
         @message_id : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "agent_message_chunk"
+        @content_wire = PreservedJson.new(content)
+        self.meta = meta
       end
-
-      include ChunkContentHelper
     end
 
     # ─── Agent Thought Chunk ───────────────────────────────────────────
@@ -300,28 +282,17 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/prompt-turn
     struct AgentThoughtChunkUpdate < SessionUpdate
       include JSON::Serializable
-
-      # The content chunk. Kept as JSON::Any for backward compatibility
-      # with agents that may send varying formats.
-      property content : JSON::Any
-
-      # Optional ID correlating every chunk of the same logical message.
-      @[JSON::Field(key: "messageId")]
-      property message_id : String?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMessageChunk
 
       def initialize(
-        @content : JSON::Any,
+        content : JSON::Any,
         @message_id : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "agent_thought_chunk"
+        @content_wire = PreservedJson.new(content)
+        self.meta = meta
       end
-
-      include ChunkContentHelper
 
       # Backward-compatible alias for `text`. Some agents send a `title` field.
       def title : String
