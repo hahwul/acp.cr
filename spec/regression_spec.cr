@@ -7416,3 +7416,265 @@ describe "Permission result validation" do
     outgoing.try(&.close)
   end
 end
+
+private class PausedElicitationReplyStdio < ACP::StdioTransport
+  getter replying = Channel(Nil).new(1)
+  getter release = Channel(Nil).new(1)
+  property? fail_write : Bool = false
+  property paused_action = "accept"
+
+  def send(message : Hash(String, JSON::Any)) : Nil
+    if message["result"]?.try(&.["action"]?).try(&.as_s?) == @paused_action
+      @replying.send(nil)
+      @release.receive?
+      raise ACP::TransportError.new("Fixture write failure") if @fail_write
+    end
+    super
+  end
+end
+
+describe "URL elicitation completion correlation" do
+  {1, 2}.each do |version|
+    it "delivers each accepted v#{version} URL completion once and ignores malformed or unknown IDs" do
+      with_wide_stdio do |transport, feed, outgoing|
+        caps = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+        if version == 2
+          v2 = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(elicitation: caps))
+          client = v2
+          initialize_wide_v2(v2, feed, outgoing)
+        else
+          client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+        end
+        received = [] of String
+        checkpoints = Channel(Nil).new(1)
+        client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+          params.message == "Accept" ? ACP::Protocol::CreateElicitationResult.accept : ACP::Protocol::CreateElicitationResult.decline
+        end
+        client.on_elicitation_complete = ->(note : ACP::Protocol::CompleteElicitationParams) { received << note.elicitation_id; nil }
+        client.on_notification = ->(method : String, params : JSON::Any?) do
+          case method
+          when "_checkpoint"          then checkpoints.send(nil)
+          when "elicitation/complete" then received << "raw:#{params.not_nil!["elicitationId"].as_s}"
+          end
+          nil
+        end
+        completion = ->(fields : String) { feed.puts %({"jsonrpc":"2.0","method":"elicitation/complete",#{fields}}) }
+        create = ->(id : Int32, fields : String, message : String) do
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"mode":"url","sessionId":"s","message":#{message.to_json},"url":"https://example.test/interaction",#{fields}}})
+          JSON.parse(outgoing.gets.not_nil!)
+        end
+        barrier = -> do
+          feed.puts %({"jsonrpc":"2.0","method":"_checkpoint"})
+          next_permission_event(checkpoints)
+        end
+
+        completion.call(%("params":{"elicitationId":"first"}))
+        barrier.call
+        received.should be_empty
+        create.call(1, %("elicitationId":"first"), "Accept")["result"]["action"].as_s.should eq("accept")
+        create.call(2, %("elicitationId":"first"), "Accept")["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        create.call(3, %("elicitationId":"other","elicitationId":"forged"), "Accept")["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INVALID_PARAMS)
+        completion.call(%("params":{"elicitationId":"other","elicitationId":"first"}))
+        completion.call(%("params":{"elicitationId":"first"},"params":{"elicitationId":"first"}))
+        barrier.call
+        received.should be_empty
+        2.times { completion.call(%("params":{"elicitationId":"first","_meta":false})) }
+        barrier.call
+        received.should eq(["first"])
+
+        create.call(4, %("elicitationId":"first"), "Decline")["result"]["action"].as_s.should eq("decline")
+        completion.call(%("params":{"elicitationId":"first"}))
+        barrier.call
+        received.should eq(["first"])
+
+        client.on_elicitation_complete = nil
+        create.call(5, %("elicitationId":"first"), "Accept")["result"]["action"].as_s.should eq("accept")
+        2.times { completion.call(%("params":{"elicitationId":"first"})) }
+        barrier.call
+        received.should eq(["first", "raw:first"])
+        create.call(6, %("elicitationId":"wide"), "Accept")["result"]["action"].as_s.should eq("accept")
+        completion.call(%("params":{"elicitationId":"wide","_meta":{"wide":18446744073709551615}}))
+        barrier.call
+        received.should eq(["first", "raw:first"])
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "holds an early completion until the callback accepts and drops it when the Agent cancels" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+      client = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(elicitation: caps))
+      initialize_wide_v2(client, feed, outgoing)
+      entered = Channel(Nil).new(1)
+      release = Channel(Nil).new(1)
+      checkpoints = Channel(Nil).new(1)
+      delivered = Channel(String).new(4)
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+        entered.send(nil)
+        release.receive?
+        ACP::Protocol::CreateElicitationResult.accept
+      end
+      client.on_elicitation_complete = ->(note : ACP::Protocol::CompleteElicitationParams) do
+        delivered.send(note.meta_raw.not_nil!.json)
+        nil
+      end
+      client.on_notification = ->(method : String, _params : JSON::Any?) do
+        checkpoints.send(nil) if method == "_checkpoint"
+        nil
+      end
+      barrier = -> do
+        feed.puts %({"jsonrpc":"2.0","method":"_checkpoint"})
+        next_permission_event(checkpoints)
+      end
+
+      {"cancelled", "accepted"}.each do |id|
+        feed.puts %({"jsonrpc":"2.0","id":#{id.to_json},"method":"elicitation/create","params":{"mode":"url","sessionId":"s","message":"Open","url":"https://example.test/interaction","elicitationId":"same"}})
+        next_permission_event(entered)
+        feed.puts %({"jsonrpc":"2.0","method":"elicitation/complete","params":{"elicitationId":"same","_meta":{"wide":18446744073709551615}}})
+        barrier.call
+        select
+        when delivered.receive
+          fail "completion was delivered before a decision"
+        else
+        end
+
+        if id == "cancelled"
+          feed.puts %({"jsonrpc":"2.0","id":"cancelled","method":"elicitation/create","params":{"mode":"url","sessionId":"s","message":"Second","url":"https://example.test/interaction","elicitationId":"same"}})
+          collision = JSON.parse(outgoing.gets.not_nil!)
+          collision["id"].raw.should be_nil
+          collision["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+          feed.puts %({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"cancelled"}})
+          JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("cancel")
+          release.send(nil)
+          barrier.call
+        else
+          release.send(nil)
+          JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("accept")
+          next_permission_event(delivered).should eq(%({"wide":18446744073709551615}))
+        end
+      end
+    ensure
+      release.try(&.close)
+      client.try(&.close)
+    end
+  end
+
+  it "waits for an acceptance write and dispatches the completion alongside wire notifications" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedElicitationReplyStdio.new(reader, writer)
+    caps = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+    held = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    delivered = Channel(Nil).new(1)
+    events = [] of String
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { ACP::Protocol::CreateElicitationResult.accept }
+    client.on_notification = ->(method : String, _params : JSON::Any?) do
+      case method
+      when "_hold"
+        events << "hold"
+        held.send(nil)
+        release.receive?
+        events << "released"
+      when "elicitation/complete"
+        events << "completion"
+        delivered.send(nil)
+      end
+      nil
+    end
+    create = ->(id : Int32) { feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"mode":"url","sessionId":"s","message":"Open","url":"https://example.test/interaction","elicitationId":"held"}}) }
+    complete = -> { feed.puts %({"jsonrpc":"2.0","method":"elicitation/complete","params":{"elicitationId":"held"}}) }
+
+    transport.fail_write = true
+    create.call(1)
+    next_permission_event(transport.replying)
+    complete.call
+    feed.puts %({"jsonrpc":"2.0","method":"_hold"})
+    next_permission_event(held)
+    events.should eq(["hold"])
+    transport.release.send(nil)
+    Fiber.yield
+    release.send(nil)
+    transport.fail_write = false
+
+    create.call(2)
+    next_permission_event(transport.replying)
+    {
+      %("params":{"mode":"url","sessionId":"s","message":"Open","url":"https://example.test/interaction","elicitationId":"other"}),
+      %("params":{},"params":{}),
+    }.each do |params|
+      feed.puts %({"jsonrpc":"2.0","id":2,"method":"elicitation/create",#{params}})
+      collision = JSON.parse(outgoing.gets.not_nil!)
+      collision["id"].raw.should be_nil
+      collision["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+    end
+    events.should eq(["hold", "released"])
+    events.clear
+    complete.call
+    feed.puts %({"jsonrpc":"2.0","method":"_hold"})
+    next_permission_event(held)
+    events.should eq(["hold"])
+
+    transport.release.send(nil)
+    JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("accept")
+    Fiber.yield
+    events.should eq(["hold"])
+    release.send(nil)
+
+    next_permission_event(delivered)
+    events.should eq(["hold", "released", "completion"])
+  ensure
+    release.try(&.close)
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "keeps a v1 elicitation request ID reserved during its session cancel reply" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = PausedElicitationReplyStdio.new(reader, writer)
+    transport.paused_action = "cancel"
+    elicitation = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+    caps = ACP::Protocol::ClientCapabilities.new(elicitation: elicitation, subagents: ACP::Protocol::SubagentCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: caps)
+    entered = Channel(Nil).new(1)
+    release = Channel(Nil).new(1)
+    finished = Channel(Nil).new(1)
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+      entered.send(nil)
+      release.receive?
+      ACP::Protocol::CreateElicitationResult.decline
+    end
+    create = ->(elicitation_id : String) do
+      feed.puts %({"jsonrpc":"2.0","id":1,"method":"elicitation/create","params":{"mode":"url","sessionId":"s","message":"Open","url":"https://example.test/interaction","elicitationId":#{elicitation_id.to_json}}})
+    end
+    create.call("first")
+    next_permission_event(entered)
+    spawn do
+      client.session_cancel("s")
+      finished.send(nil)
+    end
+    JSON.parse(outgoing.gets.not_nil!)["method"].as_s.should eq("session/cancel")
+    next_permission_event(transport.replying)
+    create.call("second")
+    collision = JSON.parse(outgoing.gets.not_nil!)
+    collision["id"].raw.should be_nil
+    collision["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_REQUEST)
+    transport.release.send(nil)
+    JSON.parse(outgoing.gets.not_nil!)["result"]["action"].as_s.should eq("cancel")
+    next_permission_event(finished)
+  ensure
+    release.try(&.close)
+    transport.try { |fixture| fixture.release.close }
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+end

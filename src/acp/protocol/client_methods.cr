@@ -734,16 +734,20 @@ module ACP
     # (`CompleteElicitationNotification`).
     struct CompleteElicitationParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The `elicitationId` of the original URL-mode request (required).
       @[JSON::Field(key: "elicitationId")]
       property elicitation_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Creates a completion for a URL elicitation.
+      def initialize(@elicitation_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
+      end
 
-      def initialize(@elicitation_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Reads a completion with one unambiguous elicitation ID.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "elicitationId"))
       end
     end
 
