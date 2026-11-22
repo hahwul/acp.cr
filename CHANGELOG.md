@@ -86,6 +86,7 @@
 - Fix cancellation fiber leak, authentication parsing crash, and the `ACP_LOG_LEVEL` default mismatch in the `interactive_client` example
 
 ### Features
+- Add `ACP::V2::ToolCallStore` for tool-call state, streamed content, and permission tool patches.
 - Add `ACP::V2::TerminalStore` for bounded Agent-owned terminal output and display state.
 - Track ACP v2 foreground and background snapshots for attached sessions. Preserve state across prompt acknowledgements, replay, and session resume.
 - Read the latest ACP v2 command advertisements per session, with exact JSON for extension commands and one shared list for skill validation.

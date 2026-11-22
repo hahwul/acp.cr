@@ -389,7 +389,7 @@ module ACP
         end
 
         protected def on_unknown_json_attribute(pull, key, key_location)
-          if TERMINAL_WIRE_FIELDS.includes?(key) || TOOL_CHUNK_WIRE_FIELDS.includes?(key) ||
+          if TERMINAL_WIRE_FIELDS.includes?(key) || ToolCallUpdate::WIRE_FIELDS.includes?(key) ||
              StateFields::MEMBERS.includes?(key) || SubagentUpdate::WIRE_FIELDS.includes?(key) ||
              SessionMessageUpdate::WIRE_FIELDS.includes?(key) || SessionInfoUpdate::WIRE_FIELDS.includes?(key) ||
              UsageUpdate::WIRE_FIELDS.includes?(key) || CompactionUpdate::WIRE_FIELDS.includes?(key)
@@ -407,6 +407,7 @@ module ACP
         protected def on_to_json(json)
           retained_fields = case @session_update
                             when "terminal_update", "terminal_output_chunk" then TERMINAL_WIRE_FIELDS
+                            when "tool_call_update"                         then ToolCallUpdate::WIRE_FIELDS
                             when "tool_call_content_chunk"                  then TOOL_CHUNK_WIRE_FIELDS
                             when "state_update"                             then StateFields::MEMBERS
                             when "subagent_update"                          then SubagentUpdate::WIRE_FIELDS
