@@ -16,6 +16,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Validate standard string formats in ACP v2 form submissions.
 - Validate submitted ACP v2 form values and support exact custom content through `CreateElicitationResult.accept_raw`.
 - Validate ACP v2 elicitation form schemas before invoking the callback and preserve the original schema through `requested_schema_raw`.
 - Bind ACP v2 request-scoped elicitations to their pending Client requests and dismiss pending input when the originating request ends.

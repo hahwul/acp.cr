@@ -5614,6 +5614,7 @@ describe "ACP v2 display media and resources" do
                 {"src":"https:icon.png"},{"src":"https:///icon.png"},
                 {"src":"https://user@example.test/icon.png"},
                 {"src":"https://example%20test/icon.png"},{"src":"https://example.test:65536/icon.png"},
+                {"src":"https://example.test:2147483648/icon.png"},{"src":"https://[1%25scope]/icon.png"},
                 {"src":"https://%5Bexample.test%5D/icon.png"},
                 {"src":"data:icon.png"},{"src":"data:text/plain;base64,YQ=="},
                 {"src":"data:text/plain;base64,YQ==","mimeType":"image/png"},
@@ -8211,6 +8212,76 @@ describe "ACP v2 form elicitation replies" do
       reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
       reply["error"]["message"].as_s.should eq("Cannot send exact elicitation content")
       client.closed?.should be_false
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v2 elicitation string formats" do
+  it "checks the four standard formats for typed and exact submissions" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = request_elicitation_client(transport)
+      result = ACP::Protocol::CreateElicitationResult.accept
+      client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { result }
+      initialize_wide_v2(client, feed, outgoing)
+
+      {
+        {"email", "name+tag@example.test", true},
+        {"email", %("a @ b"@[IPv6:2001:db8::1]), true},
+        {"email", "name@[192.0.2.1]", true},
+        {"email", "name@[IPv6:2001:db8::192.000.2.1]", true},
+        {"email", "name..tag@example.test", false},
+        {"email", "Name <name@example.test>", false},
+        {"email", "name@-example.test", false},
+        {"email", "name@[256.0.2.1]", false},
+        {"email", "name@[IPv6:fe80::1%eth0]", false},
+        {"email", "name@[IPv6:1:2:3:4:5:6:7::]", false},
+        {"email", "name@example.test.", false},
+        {"email", "name@example.test.\n", false},
+        {"uri", "urn:isbn:9780141036144", true},
+        {"uri", "https://[2001:db8::1]/resource%20name", true},
+        {"uri", "catalog://user:pass@host:2147483648/entry", true},
+        {"uri", "catalog://[2001:db8::1]:2147483648/entry", true},
+        {"uri", "https://[1%25scope]/", false},
+        {"uri", "https://example.test:invalid/path", false},
+        {"uri", "relative/resource", false},
+        {"uri", "https://example.test/%zz", false},
+        {"uri", "https://example.test/two words", false},
+        {"date", "2000-02-29", true},
+        {"date", "1900-02-29", false},
+        {"date", "2026-2-01", false},
+        {"date", "2026-00-01", false},
+        {"date", "2026-02-00", false},
+        {"date-time", "2024-02-29t23:59:59.123456789123z", true},
+        {"date-time", "1990-12-31T15:59:60-08:00", true},
+        {"date-time", "2015-07-01T05:29:60+05:30", true},
+        {"date-time", "2026-01-01T12:00:00-00:00", true},
+        {"date-time", "2026-01-01T12:00:00", false},
+        {"date-time", "2026-01-01 12:00:00Z", false},
+        {"date-time", "2026-01-01T24:00:00Z", false},
+        {"date-time", "2026-01-01T12:00:00+24:00", false},
+        {"date-time", "2026-01-01T12:00:00+00:60", false},
+        {"date-time", "2026-01-01T23:59:60Z", false},
+        {"date-time", "2026-01-31T23:59:61Z", false},
+        {"_future_format", "plain text", true},
+      }.each_with_index do |(format, value, valid), id|
+        fields = {"value" => value} of String => ACP::Protocol::ElicitationContentValue
+        result = if id.even?
+                   ACP::Protocol::CreateElicitationResult.accept(fields)
+                 else
+                   ACP::Protocol::CreateElicitationResult.accept_raw(ACP::Protocol::RawJson.from_json(fields.to_json))
+                 end
+        schema = %({"type":"object","properties":{"value":{"type":"string","format":#{format.to_json}}}})
+        feed.puts form_elicitation_frame(id, schema)
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(id)
+        if valid
+          reply["result"]?.try(&.["content"]["value"].as_s).should eq(value)
+        else
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
     ensure
       client.try(&.close)
     end
