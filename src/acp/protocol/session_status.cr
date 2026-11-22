@@ -6,13 +6,11 @@ module ACP
     # Agent capability marker for draft session status queries.
     struct SessionStatusCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates an optional status capability.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
@@ -29,6 +27,8 @@ module ACP
       def self.to_json(value : SessionStatusCapabilities, builder : JSON::Builder) : Nil
         value.to_json(builder)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Parameters of the draft read-only session/status query.

@@ -1938,6 +1938,100 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact negotiated capability metadata" do
+  it "keeps v1 metadata on the client and agent capability trees" do
+    with_wide_stdio do |transport, feed, outgoing|
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      caps = ACP::Protocol::ClientCapabilities.from_json(%({"fs":{"readTextFile":true,"_meta":#{metadata}},"_meta":#{metadata}}))
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      client.request_timeout = 2.0
+      offers = Channel(ACP::Protocol::RawJson).new(1)
+      spawn do
+        frame = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        offers.send(frame.field("params").not_nil!.field("clientCapabilities").not_nil!)
+        id = frame.field("id").not_nil!.json
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"auth":{"status":{"_meta":#{metadata}},"logout":{}},"sessionCapabilities":{"status":{"_meta":#{metadata}},"_meta":#{metadata}},"_meta":#{metadata}}}})
+      end
+      result = client.initialize_connection
+      offered = next_permission_event(offers)
+      offered.field("_meta").not_nil!.json.should eq(metadata)
+      offered.field("fs").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+      result.agent_capabilities.load_session?.should be_true
+      result.agent_capabilities.meta_raw.not_nil!.json.should eq(metadata)
+      auth = result.agent_capabilities.auth.not_nil!
+      auth.logout?.should be_true
+      auth.status.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      answer_identity_request(feed, outgoing, %({"state":"unauthenticated"}))
+      client.auth_status.state.should eq("unauthenticated")
+      result.agent_capabilities.session_capabilities.not_nil!.status.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      agent = ACP::Protocol::RawJson.from_json(result.agent_capabilities.to_json)
+      agent.field("_meta").not_nil!.json.should eq(metadata)
+      sessions = agent.field("sessionCapabilities").not_nil!
+      sessions.field("_meta").not_nil!.json.should eq(metadata)
+      sessions.field("status").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps v2 metadata on the client and agent capability trees" do
+    with_wide_stdio do |transport, feed, outgoing|
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      caps = ACP::Protocol::V2::ClientCapabilities.from_json(%({"session":{"commands":{"skill":{"_meta":#{metadata}}},"_meta":#{metadata}},"_meta":#{metadata}}))
+      client = ACP::V2::Client.new(transport, capabilities: caps)
+      client.request_timeout = 2.0
+      offers = Channel(ACP::Protocol::RawJson).new(1)
+      spawn do
+        frame = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+        offers.send(frame.field("params").not_nil!.field("capabilities").not_nil!)
+        id = frame.field("id").not_nil!.json
+        feed.puts %({"jsonrpc":"2.0","id":#{id},"result":{"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"auth":{"status":{"_meta":#{metadata}}},"session":{"prompt":{"image":{},"_meta":#{metadata}},"_meta":#{metadata}},"_meta":#{metadata}}}})
+      end
+      result = client.initialize_connection
+      offered = next_permission_event(offers)
+      offered.field("_meta").not_nil!.json.should eq(metadata)
+      sessions = offered.field("session").not_nil!
+      sessions.field("_meta").not_nil!.json.should eq(metadata)
+      sessions.field("commands").not_nil!.field("skill").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+      result.capabilities.session.not_nil!.prompt.not_nil!.image.should_not be_nil
+      result.capabilities.meta_raw.not_nil!.json.should eq(metadata)
+      result.capabilities.auth_status?.should be_true
+      answer_identity_request(feed, outgoing, %({"state":"unauthenticated"}))
+      client.auth_status.state.should eq("unauthenticated")
+      result.capabilities.session.not_nil!.prompt.not_nil!.meta_raw.not_nil!.json.should eq(metadata)
+      agent = ACP::Protocol::RawJson.from_json(result.capabilities.to_json)
+      agent.field("_meta").not_nil!.json.should eq(metadata)
+      agent.field("session").not_nil!.field("prompt").not_nil!.field("_meta").not_nil!.json.should eq(metadata)
+    ensure
+      client.try(&.close)
+    end
+  end
+  it "retains typed v2 status markers without enabling other shapes" do
+    type = ACP::Protocol::V2::AgentCapabilities
+    decimal = "0.123456789012345678901"
+    caps = type.from_json(%({"auth":{"status":{"_meta":{"example.test/ratio":#{decimal}}}}}))
+    caps.auth_status?.should be_true
+    raw = ACP::Protocol::RawJson.from_json(caps.to_json)
+    raw.field("auth").not_nil!.field("status").not_nil!.field("_meta").not_nil!.field("example.test/ratio").not_nil!.json.should eq(decimal)
+    ["[]", "true", "null", "42"].each do |status|
+      type.from_json(%({"auth":{"status":#{status}}})).auth_status?.should be_false
+    end
+  end
+
+  it "compares capability fields structurally and tolerates malformed extension metadata" do
+    type = ACP::Protocol::V2::ClientSessionCapabilities
+    field = %("future":{"count":18446744073709551615})
+    a = type.from_json(%({#{field},"_meta":{"example.test/a":true,"example.test/b":false}}))
+    b = type.from_json(%({"_meta":{"example.test/b":false,"example.test/a":true},#{field}}))
+    a.should eq(b)
+    a.hash.should eq(b.hash)
+
+    fs = ACP::Protocol::FsCapabilities.from_json(%({"readTextFile":true,"_meta":false}))
+    fs.read_text_file?.should be_true
+    fs.meta_raw.should be_nil
+  end
+end
+
 describe "ACP exact initialization offers" do
   it "retains ordinary metadata passed to the v1 and v2 offer constructors" do
     metadata = {"example.test/offer" => JSON::Any.new(true)}

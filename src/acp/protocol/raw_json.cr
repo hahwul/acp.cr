@@ -592,6 +592,10 @@ module ACP
                          end
         value
       end
+
+      protected def metadata_comparison
+        meta_raw.try { |wire| wire.to_json_any? || wire }
+      end
     end
 
     # :nodoc:

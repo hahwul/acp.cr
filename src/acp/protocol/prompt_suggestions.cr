@@ -1,3 +1,4 @@
+require "./raw_json"
 require "set"
 require "./content_block"
 require "./optional_metadata"
@@ -8,14 +9,14 @@ module ACP
     # Presence advertises support for an additional suggestion content type.
     struct PromptSuggestionContentCapabilities
       include JSON::Serializable
-
-      # Extension metadata for this content type.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a content type support marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Presence advertises support for suggestions containing images.
@@ -30,6 +31,7 @@ module ACP
     # Advertises which prompt suggestions the client can present.
     struct PromptSuggestionsCapabilities
       include JSON::Serializable
+      include LosslessMetadata
 
       # Presence allows suggestions with image content.
       @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsImageCapabilities))]
@@ -43,17 +45,14 @@ module ACP
       @[JSON::Field(key: "embeddedContext", converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::PromptSuggestionsEmbeddedContextCapabilities))]
       getter embedded_context : PromptSuggestionsEmbeddedContextCapabilities?
 
-      # Extension metadata for the suggestion capability.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
-
       # Advertises baseline text and resource links plus any supplied options.
       def initialize(
         @image : PromptSuggestionsImageCapabilities? = nil,
         @audio : PromptSuggestionsAudioCapabilities? = nil,
         @embedded_context : PromptSuggestionsEmbeddedContextCapabilities? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # :nodoc:
@@ -64,6 +63,8 @@ module ACP
         allowed.add("resource") if @embedded_context && embedded_context
         allowed
       end
+
+      def_equals_and_hash @image, @audio, @embedded_context, metadata_comparison
     end
 
     # :nodoc:

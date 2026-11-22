@@ -43,8 +43,10 @@ Keep `on_update` callbacks short because they run on the dispatcher fiber.
 For `initialize_connection` in either protocol version, pass `meta:` as a
 `Hash(String, JSON::Any)` or a `Protocol::RawJson` object. Use `meta_raw` on
 the implementation info to supply exact `_meta` values there as well. Stdio
-preserves the original numbers on the wire. When repeating the v2 handshake,
-omitting `meta:` reuses the last successful offer and `meta: nil` clears it.
+preserves the original numbers on the wire. Capability objects also expose
+`meta_raw` for exact extension values on either side of the handshake.
+When repeating the v2 handshake, omitting `meta:` reuses the last successful
+offer and `meta: nil` clears it.
 [ACP v2 Initialization](https://agentclientprotocol.com/protocol/v2/initialization)
 
 Session creation and fork responses in both versions, and v2 prompt

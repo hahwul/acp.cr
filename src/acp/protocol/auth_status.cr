@@ -1,30 +1,32 @@
 require "json"
+require "./raw_json"
 
 module ACP
   module Protocol
     # Draft capability marker for authentication status queries.
     struct AuthStatusCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates an authentication status capability marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
       def self.from_json(pull : JSON::PullParser) : AuthStatusCapabilities?
-        if fields = JSON::Any.new(pull).as_h?
-          new(fields["_meta"]?.try(&.as_h?))
-        end
+        return new(pull) if pull.kind.begin_object?
+
+        pull.skip
+        nil
       end
 
       # :nodoc:
       def self.to_json(value : AuthStatusCapabilities, builder : JSON::Builder) : Nil
         value.to_json(builder)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Parameters of the draft auth/status method.

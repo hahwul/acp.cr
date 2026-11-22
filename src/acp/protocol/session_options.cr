@@ -34,13 +34,11 @@ module ACP
     # Agent support for the options query and initial configuration values.
     struct SessionOptionsCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates an options capability marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
@@ -55,18 +53,18 @@ module ACP
       def self.to_json(value : SessionOptionsCapabilities, json : JSON::Builder) : Nil
         value.to_json(json)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Agent support for forking an existing session.
     struct SessionForkCapabilities
       include JSON::Serializable
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      getter meta : Hash(String, JSON::Any)?
+      include LosslessMetadata
 
       # Creates a fork capability marker.
-      def initialize(@meta : Hash(String, JSON::Any)? = nil)
+      def initialize(meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
 
       # :nodoc:
@@ -81,6 +79,8 @@ module ACP
       def self.to_json(value : SessionForkCapabilities, json : JSON::Builder) : Nil
         value.to_json(json)
       end
+
+      def_equals_and_hash metadata_comparison
     end
 
     # Workspace and optional saved session for an options preview.

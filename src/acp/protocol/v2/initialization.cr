@@ -56,22 +56,28 @@ module ACP
         def initialize(meta : Hash(String, JSON::Any)? = nil)
           self.meta = meta
         end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
+        def_equals_and_hash @json_unmapped, @raw_fields, metadata_comparison
       end
 
       # Authentication features advertised by a v2 client.
       struct ClientAuthCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Presence advertises interactive terminal authentication.
         property terminal : Capability?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the authentication capability group.
-        def initialize(@terminal : Capability? = nil, @meta : Hash(String, JSON::Any)? = nil)
+        def initialize(@terminal : Capability? = nil, meta : Hash(String, JSON::Any)? = nil)
+          self.meta = meta
         end
+
+        def_equals_and_hash @terminal, metadata_comparison
       end
 
       # Advertises which prompt suggestions the client can present.
@@ -89,6 +95,7 @@ module ACP
       # Session features that the v2 client can present.
       struct ClientSessionCapabilities
         include JSON::Serializable
+        include LosslessMetadata
         include LosslessUnmapped
 
         # Presence advertises support for draft prompt suggestions.
@@ -99,22 +106,23 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::CommandsCapabilities))]
         property commands : CommandsCapabilities?
 
-        # Extension metadata scoped to the session capabilities.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the session capability group.
         def initialize(
           @prompt_suggestions : PromptSuggestionsCapabilities? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @commands : CommandsCapabilities? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @prompt_suggestions, @commands, @json_unmapped, @raw_fields, @exact_fields,
+          metadata_comparison
       end
 
       # Optional capabilities sent by the v2 client during initialize.
       struct ClientCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Authentication capabilities.
         property auth : ClientAuthCapabilities?
@@ -126,18 +134,17 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::ClientSessionCapabilities))]
         property session : ClientSessionCapabilities?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates client capabilities.
         def initialize(
           @auth : ClientAuthCapabilities? = nil,
           @elicitation : Protocol::ElicitationCapabilities? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @session : ClientSessionCapabilities? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @auth, @elicitation, @session, metadata_comparison
       end
 
       # Interprets an Agent's exact initialize capabilities for a custom prompt type.
@@ -146,6 +153,7 @@ module ACP
       # Additional content types accepted in prompts.
       struct PromptCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Presence advertises image content.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
@@ -163,24 +171,24 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::PromptSkillCapabilities))]
         property skill : PromptSkillCapabilities?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates prompt capabilities.
         def initialize(
           @image : Capability? = nil,
           @audio : Capability? = nil,
           @embedded_context : Capability? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @skill : PromptSkillCapabilities? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @image, @audio, @embedded_context, @skill, metadata_comparison
       end
 
       # MCP server transports the v2 agent accepts.
       struct McpCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Presence advertises stdio MCP servers.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
@@ -194,23 +202,23 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::Capability))]
         property acp : Capability?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the transport capability group.
         def initialize(
           @stdio : Capability? = nil,
           @http : Capability? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @acp : Capability? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @stdio, @http, @acp, metadata_comparison
       end
 
       # Optional features available for v2 sessions.
       struct SessionCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Additional prompt content that the Agent accepts.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::PromptCapabilities))]
@@ -252,10 +260,6 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::SessionForkCapabilities)]
         property fork : Protocol::SessionForkCapabilities?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the session capability group.
         def initialize(
           @prompt : PromptCapabilities? = nil,
@@ -263,19 +267,24 @@ module ACP
           @delete : Protocol::SessionDeleteCapabilities? = nil,
           @additional_directories : Protocol::SessionAdditionalDirectoriesCapabilities? = nil,
           @system_prompt : Protocol::SessionSystemPromptCapabilities? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @status : Protocol::SessionStatusCapabilities? = nil,
           @title : Protocol::SessionTitleCapabilities? = nil,
           @archive : Protocol::SessionArchiveCapabilities? = nil,
           @options : Protocol::SessionOptionsCapabilities? = nil,
           @fork : Protocol::SessionForkCapabilities? = nil,
         )
+          self.meta = meta
         end
+
+        def_equals_and_hash @prompt, @mcp, @delete, @additional_directories, @system_prompt, @status, @title,
+          @archive, @options, @fork, metadata_comparison
       end
 
       # Optional capabilities returned by the Agent during v2 initialize.
       struct AgentCapabilities
         include JSON::Serializable
+        include LosslessMetadata
 
         # Capabilities scoped to sessions.
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::V2::SessionCapabilities))]
@@ -289,23 +298,24 @@ module ACP
         @[JSON::Field(converter: ::ACP::Protocol::OptionalCapabilityObject(::ACP::Protocol::ProvidersCapabilities))]
         property providers : ProvidersCapabilities?
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates the agent capability group.
         def initialize(
           @session : SessionCapabilities? = nil,
           @auth : Capability? = nil,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
           @providers : ProvidersCapabilities? = nil,
         )
+          self.meta = meta
         end
 
         # Whether the Agent advertised the draft auth/status capability.
         def auth_status? : Bool
-          !@auth.try(&.json_unmapped["status"]?).try(&.as_h?).nil?
+          return false unless auth = @auth
+
+          !!(auth.json_unmapped["status"]?.try(&.as_h?) || auth.raw_field("status").try(&.starts_with?('{')))
         end
+
+        def_equals_and_hash @session, @auth, @providers, metadata_comparison
       end
 
       # The additional launch configuration of a terminal authentication method.
