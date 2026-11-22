@@ -281,8 +281,13 @@ module ACP
       # Reads usable v2 display blocks from an array in wire order.
       # :nodoc:
       def self.decode_v2_array(array : RawJson) : Array(ContentBlock)?
-        array.elements?.try &.compact_map do |block|
-          from_v2_json(block)
+        array.elements?.try { |elements| decode_v2_array(elements) }
+      end
+
+      # :nodoc:
+      def self.decode_v2_array(array : Array(RawJson)) : Array(ContentBlock)
+        array.compact_map do |block|
+          from_v2_json(block) if block.object?
         rescue JSON::Error
           nil
         end

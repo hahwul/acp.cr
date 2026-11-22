@@ -201,6 +201,46 @@ the permission handler runs. Use the callback's `request_id` to match
 `$/cancel_request` notifications delivered through `on_notification`.
 [ACP v2 Permission Requests](https://agentclientprotocol.com/protocol/v2/tool-calls#requesting-permission)
 
+### Transcript messages
+
+Feed each connection's v2 session updates to a `MessageStore` in receive
+order. User, Agent, thought, and session-directed messages have independent
+ID scopes within each session.
+
+```crystal
+transcript = ACP::V2::MessageStore.new
+client.on_update = ->(update : ACP::Protocol::V2::SessionUpdateParams) do
+  transcript.observe(update)
+  nil
+end
+
+message = transcript.message(session_id, ACP::V2::MessageKind::Agent, message_id)
+```
+
+`messages(session_id)` lists retained messages in first-seen order. Use
+`content_raw` for exact blocks, `content_blocks` to decode usable display
+blocks, and `skill_references` for draft skill references in user messages.
+Message updates patch `meta_raw` by key. Chunk metadata remains available
+on the incoming `MessageChunkUpdate`. Session-directed messages expose the
+reported sender and recipient session and message IDs.
+
+The store defaults to 512 messages across sessions and 256 KiB per message
+for IDs, links, metadata, content, and streamed block storage. Adjust
+`message_limit:` and `message_byte_limit:`, or pass `nil` to remove a limit.
+At the message count limit, `observe` returns `false` for a new message ID.
+`observe` returns `true` when an update applies or records a content gap.
+Use `content_incomplete?` to show that content exceeded the byte limit.
+An oversized replacement clears earlier content, and an oversized chunk
+leaves the retained prefix. A full content replacement clears the gap
+and resumes appending chunks. A replacement can fit while new links or
+metadata exceed the remaining budget. In that case the new content is
+retained with the previous links and metadata.
+
+For a full replay, use `forget_session` on the affected sessions or collect
+replay into a fresh store. Each session's `replay_complete` marks the end of
+the Agent's replay delivery. The store's configured limits still apply
+to those updates. [ACP v2 message updates](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle#message-ids) · [Replay completion](https://agentclientprotocol.com/protocol/v2/session-setup#replay-complete)
+
 ### Plan state
 
 Feed each connection's v2 session updates to a `PlanStore` in receive order.
