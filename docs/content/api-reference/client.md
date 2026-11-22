@@ -115,6 +115,16 @@ client returns JSON-RPC `-32602` for invalid requests before calling the
 handler. ACP v1 accepts an explicit `null` request ID for request scope.
 [ACP v1 Elicitation Scope](https://agentclientprotocol.com/protocol/v1/elicitation#creating-an-elicitation)
 
+Typed form and URL requests expose exact extension metadata through
+`meta_raw`. Use `CreateElicitationResult#meta_raw=` to return exact metadata
+or copy it from a request. The `meta` accessor provides editable JSON
+object fields. Edits along object paths preserve untouched wire values.
+Arrays are serialized as a whole when edited through `meta`. Use
+`meta_raw=` when exact values inside a changed array matter.
+Stdio supports exact replies. A custom transport that cannot preserve an
+exact reply returns JSON-RPC `-32603` to the Agent.
+[ACP Extension Metadata](https://agentclientprotocol.com/protocol/v2/extensibility)
+
 An ACP v2 elicitation with `request_id` belongs to an outstanding Client request
 on the same connection. The client rejects a request-scoped elicitation
 with `toolCallId`. The callback's local `cancellation` channel closes when
