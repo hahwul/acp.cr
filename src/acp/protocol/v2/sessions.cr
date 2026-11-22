@@ -64,9 +64,7 @@ module ACP
       struct McpServer
         include JSON::Serializable
         include LosslessOpenObject
-
-        @[JSON::Field(ignore: true)]
-        @projected_fields : Hash(String, PreservedJson)?
+        include EditableLosslessUnmapped
 
         # MCP transport type such as `stdio` or `http`.
         @[JSON::Field(key: "type")]
@@ -97,33 +95,14 @@ module ACP
           from_json(wire.with_field("type", type).json)
         end
 
-        protected def on_unknown_json_attribute(pull, key, key_location)
-          wire = RawJson.new(pull)
-          if wire.object? || wire.array?
-            preserved = PreservedMetadata.wrap(wire)
-            # A wide number in header or env metadata must not hide the
-            # editable list. In particular, deleting it must remove it on wire.
-            if !preserved.value && key.in?("headers", "env") && wire.elements?.try(&.all?(&.object?))
-              preserved = PreservedJson.new(wire, project_array_objects: true, project_nested_objects: true)
-            end
-            if (view = preserved.value) && WireFrame.encode(view) != wire.json
-              fields = @projected_fields ||= {} of String => PreservedJson
-              fields[key] = preserved
-              retain_unmapped_json(key, wire.json, projection: view)
-              return
-            end
+        protected def project_unmapped_field(key : String, wire : RawJson) : PreservedJson
+          preserved = super
+          # A wide number in header or env metadata must not hide the
+          # editable list. In particular, deleting it must remove it on wire.
+          if !preserved.value && key.in?("headers", "env") && wire.elements?.try(&.all?(&.object?))
+            return PreservedJson.new(wire, project_array_objects: true, project_nested_objects: true)
           end
-          @projected_fields.try(&.delete(key))
-          retain_unmapped_json(key, wire.json)
-        end
-
-        protected def retained_unmapped_json(key : String, value : JSON::Any) : String?
-          if (preserved = @projected_fields.try(&.[key]?)) && (view = preserved.value)
-            if view.as_h?.try(&.same?(value.as_h?)) || view.as_a?.try(&.same?(value.as_a?))
-              return preserved.raw.json
-            end
-          end
-          super
+          preserved
         end
 
         # Typed stdio configuration when the transport is stdio.
@@ -312,11 +291,36 @@ module ACP
         end
       end
 
+      # :nodoc:
+      module LosslessConfigValue
+        @[JSON::Field(key: "value", converter: ::ACP::Protocol::PreservedMetadata)]
+        @value_wire : PreservedJson
+
+        # The choice's JSON::Any view, or JSON null if no view is available.
+        def value : JSON::Any
+          @value_wire.value || JSON::Any.new(nil)
+        end
+
+        # The exact choice, including opaque extension payloads.
+        def value_raw : RawJson
+          @value_wire.raw
+        end
+
+        protected def value_comparison
+          if @value_wire.partial?
+            value_raw
+          else
+            @value_wire.value || value_raw
+          end
+        end
+      end
+
       # A configuration choice to apply when setting up a v2 session.
       struct InitialSessionConfigOption
         include JSON::Serializable
         include LosslessUnmapped
         include LosslessMetadata
+        include LosslessConfigValue
 
         # ID of the configuration option to set.
         @[JSON::Field(key: "configId")]
@@ -325,9 +329,6 @@ module ACP
         # Value discriminator. V2 requires it, including for IDs and booleans.
         @[JSON::Field(key: "type")]
         getter value_type : String
-
-        @[JSON::Field(key: "value", converter: ::ACP::Protocol::PreservedMetadata)]
-        @value_wire : PreservedJson
 
         # Creates an initial option with a built-in or extension value type.
         def initialize(@config_id : String, @value_type : String, value : JSON::Any | RawJson, meta : Hash(String, JSON::Any)? = nil)
@@ -341,29 +342,11 @@ module ACP
           new(config_id, value.is_a?(Bool) ? "boolean" : "id", JSON::Any.new(value), meta)
         end
 
-        # The choice's JSON::Any view. Values outside its range use JSON null.
-        def value : JSON::Any
-          @value_wire.value || JSON::Any.new(nil)
-        end
-
-        # The exact choice, including opaque extension payloads.
-        def value_raw : RawJson
-          @value_wire.raw
-        end
-
         protected def keep_exact_unmapped?(_key : String) : Bool
           true
         end
 
         def_equals_and_hash @config_id, @value_type, value_comparison, @json_unmapped, @raw_fields, metadata_comparison
-
-        protected def value_comparison
-          if @value_wire.partial?
-            value_raw
-          else
-            @value_wire.value || value_raw
-          end
-        end
 
         private def valid_value? : Bool
           case @value_type
@@ -419,7 +402,10 @@ module ACP
       # Changes a configuration option in a v2 session.
       struct SessionSetConfigOptionParams
         include JSON::Serializable
-        include JSON::Serializable::Unmapped
+        include LosslessUnmapped
+        include EditableLosslessUnmapped
+        include LosslessMetadata
+        include LosslessConfigValue
 
         # Target session ID.
         @[JSON::Field(key: "sessionId")]
@@ -433,27 +419,40 @@ module ACP
         @[JSON::Field(key: "type")]
         property value_type : String
 
-        # Value, including extension variants.
-        property value : JSON::Any
-
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Builds a request with an explicit value type.
         def initialize(
           @session_id : String,
           @config_id : String,
           @value_type : String,
-          @value : JSON::Any,
-          @meta : Hash(String, JSON::Any)? = nil,
+          value : JSON::Any | RawJson,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          @value_wire = value.is_a?(RawJson) ? PreservedMetadata.wrap(value) : PreservedJson.new(value)
+          self.meta = meta
         end
 
         # Builds a request for a select ID or boolean.
         def self.new(session_id : String, config_id : String, value : String | Bool, meta : Hash(String, JSON::Any)? = nil)
           new(session_id, config_id, value.is_a?(Bool) ? "boolean" : "id", JSON::Any.new(value), meta)
         end
+
+        # Replaces the choice with a JSON::Any value.
+        def value=(value : JSON::Any) : JSON::Any
+          @value_wire = PreservedJson.new(value)
+          value
+        end
+
+        # Replaces the choice with an exact JSON value.
+        def value_raw=(value : RawJson) : RawJson
+          @value_wire = PreservedMetadata.wrap(value)
+          value
+        end
+
+        protected def keep_exact_unmapped?(_key : String) : Bool
+          true
+        end
+
+        def_equals_and_hash @session_id, @config_id, @value_type, value_comparison, @json_unmapped, @raw_fields, metadata_comparison
       end
 
       # The complete configuration after a successful option change.

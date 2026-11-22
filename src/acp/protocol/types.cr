@@ -1366,6 +1366,7 @@ module ACP
     # Params for the `session/set_mode` method (Client → Agent).
     struct SessionSetModeParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session to change the mode for (required).
       @[JSON::Field(key: "sessionId")]
@@ -1376,12 +1377,12 @@ module ACP
       @[JSON::Field(key: "modeId")]
       property mode_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@session_id : String, @mode_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a mode change request.
+      def initialize(@session_id : String, @mode_id : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @mode_id, metadata_comparison
     end
 
     # Result of the `session/set_mode` method. Empty on success.
@@ -1402,6 +1403,7 @@ module ACP
     # Params for the `session/set_config_option` method (Client → Agent).
     struct SessionSetConfigOptionParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session to set the config option for (required).
       @[JSON::Field(key: "sessionId")]
@@ -1419,19 +1421,18 @@ module ACP
       # `select` option, a Bool for a `boolean` option.
       getter value : String | Bool
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # A Bool `value` sets `type: "boolean"`, as the schema requires.
       def initialize(
         @session_id : String,
         @config_id : String,
         @value : String | Bool,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @config_type = "boolean" if @value.is_a?(Bool)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @config_id, @config_type, @value, metadata_comparison
 
       # Sets the value and keeps `config_type` in step with it.
       def value=(@value : String | Bool) : String | Bool

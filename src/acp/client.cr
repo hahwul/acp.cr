@@ -1353,10 +1353,14 @@ module ACP
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
 
-      params = Protocol::SessionSetModeParams.new(sid, mode_id)
-      send_choice_request(Protocol::AgentMethod::SESSION_SET_MODE, params, Protocol::SessionSetModeResult)
+      session_set_mode(Protocol::SessionSetModeParams.new(sid, mode_id))
+    end
 
-      ClientLog.info { "Mode set to: #{mode_id}" }
+    # Changes the session mode and returns the Agent's acknowledgement.
+    def session_set_mode(params : Protocol::SessionSetModeParams) : Protocol::SessionSetModeResult
+      result = send_choice_request(Protocol::AgentMethod::SESSION_SET_MODE, params, Protocol::SessionSetModeResult)
+      ClientLog.info { "Mode set to: #{params.mode_id}" }
+      result
     end
 
     # Changes a configuration option for the active session.
@@ -1376,10 +1380,14 @@ module ACP
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
 
-      params = Protocol::SessionSetConfigOptionParams.new(sid, config_id, value)
+      session_set_config_option(Protocol::SessionSetConfigOptionParams.new(sid, config_id, value))
+    end
+
+    # Changes a configuration option with typed parameters and extension metadata.
+    def session_set_config_option(params : Protocol::SessionSetConfigOptionParams) : Protocol::SessionSetConfigOptionResult
       result = send_choice_request(Protocol::AgentMethod::SESSION_SET_CONFIG_OPTION, params, Protocol::SessionSetConfigOptionResult)
 
-      ClientLog.info { "Config option '#{config_id}' set to '#{value}'" }
+      ClientLog.info { "Config option '#{params.config_id}' set to '#{params.value}'" }
 
       result
     end
@@ -1612,8 +1620,7 @@ module ACP
     # ─── Private Methods ────────────────────────────────────────────
 
     protected def send_choice_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
-      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
-      response = send_and_await_response(method, message_builder, validate_choice: true, exact_response: true)
+      response = send_exact_request(method, params, validate_choice: true)
       decode_typed_response(method, response, type)
     end
 
@@ -1657,17 +1664,25 @@ module ACP
 
     private def send_exact_request(method : String, params : JSON::Serializable, *, timeout : Float64? = @request_timeout,
                                    on_result : (String -> Nil)? = nil,
-                                   on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
+                                   on_response : (PendingResponse -> Nil)? = nil,
+                                   validate_choice : Bool = false) : PendingResponse
       raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
       projection = raw.to_json_any?
       wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
       if wire_params && SESSION_SETUP_METHODS.includes?(method) && !Protocol::WireFrame.unique_members?(raw.json)
         raise ArgumentError.new("ACP session setup requires unique JSON member names")
       end
+      if wire_params && validate_choice && !Protocol::WireFrame.repeated_members(raw.json, "sessionId", "modeId", "configId", "type", "value", "_meta").empty?
+        raise ArgumentError.new("ACP session choice requires unambiguous request fields")
+      end
       routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
+      if validate_choice && !projection && (value = raw.field("value"))
+        # A routing placeholder must never turn a wide choice into a boolean.
+        routing_view.as_h["value"] = value.to_json_any? || JSON::Any.new(nil)
+      end
       builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_view) }
       send_and_await_response(method, builder, timeout, on_result: on_result, on_response: on_response,
-        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: true,
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, validate_choice: validate_choice, exact_response: true,
         wire_params: wire_params, require_exact_params: true)
     end
 

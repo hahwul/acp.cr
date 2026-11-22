@@ -1938,6 +1938,155 @@ describe "ACP::Client requests pending at disconnect" do
   end
 end
 
+describe "ACP exact session choice requests" do
+  it "preserves exact metadata on v1 and v2 choice request parameters" do
+    metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+    params = %({"sessionId":"session","modeId":"code","configId":"model","type":"id","value":"large","_meta":#{metadata}})
+    {ACP::Protocol::SessionSetModeParams, ACP::Protocol::SessionSetConfigOptionParams, ACP::Protocol::V2::SessionSetConfigOptionParams}.each do |type|
+      wire = ACP::Protocol::RawJson.from_json(type.from_json(params).to_json)
+      wire.field("_meta").not_nil!.json.should eq(metadata)
+    end
+  end
+
+  it "sends custom v2 values and retains exact values in the resulting choices" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::V2::Client.new(transport)
+      client.request_timeout = 2.0
+      initialize = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+      answer_identity_request(feed, outgoing, initialize)
+      client.initialize_connection
+      option = %("configId":"custom","name":"Custom","type":"_example.test/value")
+      answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":[{#{option},"currentValue":1}]}))
+      client.session_new("/work")
+
+      metadata = %({"example.test/count":18446744073709551615})
+      value = %({"count":18446744073709551615,"values":[0.123456789012345678901,"old"]})
+      settings = %({"values":[0.123456789012345678901,"old"]})
+      type = ACP::Protocol::V2::SessionSetConfigOptionParams
+      body = %({"sessionId":"root","configId":"custom","type":"_example.test/value","value":#{value},"settings":#{settings},"_meta":#{metadata}})
+      params = type.from_json(body)
+      params.value["values"].as_a[1] = JSON::Any.new("edited")
+      params.json_unmapped["settings"]["values"].as_a[1] = JSON::Any.new("edited")
+      edited = value.sub(%("old"), %("edited"))
+      params.value_raw.json.should eq(edited)
+      duplicate = type.from_json(body)
+      duplicate.json_unmapped["configId"] = JSON::Any.new("custom")
+      expect_raises(ArgumentError, /unambiguous request fields/) { client.session_set_config_option(duplicate) }
+      duplicate.json_unmapped.delete("configId")
+      duplicate.json_unmapped["_meta"] = JSON::Any.new(nil)
+      expect_raises(ArgumentError, /unambiguous request fields/) { client.session_set_config_option(duplicate) }
+
+      sent = capture_request_params(feed, outgoing, %({"configOptions":[{#{option},"currentValue":#{edited}}],"_meta":#{metadata}}))
+      result = client.session_set_config_option(params)
+      request = next_permission_event(sent)
+      request.field("value").not_nil!.json.should eq(edited)
+      request.field("settings").not_nil!.json.should eq(settings.sub(%("old"), %("edited")))
+      request.field("_meta").not_nil!.json.should eq(metadata)
+      result.meta_raw.not_nil!.json.should eq(metadata)
+      cached = client.session_config_options_raw("root").not_nil!.elements?.not_nil!.first
+      cached.field("currentValue").not_nil!.json.should eq(edited)
+
+      wide = ACP::Protocol::RawJson.from_json("18446744073709551615")
+      params.value_raw = wide
+      params.value.raw.should be_nil
+      params.value_type = "boolean"
+      expect_raises(ArgumentError, /must be booleans/) { client.session_set_config_option(params) }
+      params.value_type = "_example.test/value"
+      sent = capture_request_params(feed, outgoing, %({"configOptions":[{#{option},"currentValue":#{wide.json}}]}))
+      client.session_set_config_option(params)
+      next_permission_event(sent).field("value").should eq(wide)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "checks an exact v2 choice against the latest options at write time" do
+    reader, feed = IO.pipe
+    outgoing, writer = IO.pipe
+    outgoing.read_timeout = 2.seconds
+    transport = QueuedExactChoiceStdio.new(reader, writer)
+    client = ACP::V2::Client.new(transport)
+    client.request_timeout = 2.0
+    updates = Channel(Nil).new(1)
+    client.on_update = ->(_note : ACP::Protocol::V2::SessionUpdateParams) do
+      updates.send(nil)
+      nil
+    end
+    initialize = %({"protocolVersion":2,"info":{"name":"agent","version":"1"},"capabilities":{"session":{}}})
+    answer_identity_request(feed, outgoing, initialize)
+    client.initialize_connection
+    original = choice_state_option("configId", "fast", ["fast", "large"])
+    answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":[#{original}]}))
+    client.session_new("/work")
+
+    failures = Channel(Exception?).new(1)
+    spawn do
+      params = ACP::Protocol::V2::SessionSetConfigOptionParams.new("root", "model", "large")
+      params.meta_raw = ACP::Protocol::RawJson.from_json(%({"example.test/ratio":0.123456789012345678901}))
+      client.session_set_config_option(params)
+      failures.send(nil)
+    rescue ex
+      failures.send(ex)
+    end
+    next_permission_event(transport.queued)
+    updated = choice_state_option("configId", "fast", ["fast"])
+    feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"config_option_update","configOptions":[#{updated}]}}})
+    next_permission_event(updates)
+    transport.release.send(nil)
+    next_permission_event(failures).should be_a(ArgumentError)
+    client.session_config_options("root").not_nil!.first.selected_value.should eq("fast")
+    outgoing.read_timeout = 50.milliseconds
+    expect_raises(IO::TimeoutError) { outgoing.gets }
+  ensure
+    transport.try(&.release.close)
+    client.try(&.close)
+    feed.try(&.close)
+    outgoing.try(&.close)
+  end
+
+  it "does not validate a wide custom request value as a v1 boolean" do
+    with_wide_stdio do |transport, feed, outgoing|
+      boolean = ACP::Protocol::BooleanConfigOptionCapabilities.new
+      options = ACP::Protocol::SessionConfigOptionsCapabilities.new(boolean: boolean)
+      caps = ACP::Protocol::ClientCapabilities.new(session: ACP::Protocol::ClientSessionCapabilities.new(config_options: options))
+      client = ExactChoiceTestClient.new(transport, client_capabilities: caps)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":[{"id":"flag","name":"Flag","type":"boolean","currentValue":true}]}))
+      client.session_new("/work")
+      wide = ACP::Protocol::RawJson.from_json("18446744073709551615")
+      params = ACP::Protocol::V2::SessionSetConfigOptionParams.new("root", "flag", "boolean", wide)
+      expect_raises(ArgumentError, /requires a boolean value/) { client.send_config_choice(params) }
+      client.session_config_options.not_nil!.first.boolean_value.should be_true
+      outgoing.read_timeout = 50.milliseconds
+      expect_raises(IO::TimeoutError) { outgoing.gets }
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+private class QueuedExactChoiceStdio < ACP::StdioTransport
+  getter queued = Channel(Nil).new(1)
+  getter release = Channel(Nil).new(1)
+
+  def send_wire(frame : ACP::Protocol::WireFrame, &preflight : -> Nil) : Nil
+    wire = ACP::Protocol::RawJson.from_json(frame.json)
+    if wire.field("method").try(&.as_s?) == "session/set_config_option"
+      @queued.send(nil)
+      @release.receive?
+    end
+    super(frame, &preflight)
+  end
+end
+
+private class ExactChoiceTestClient < ACP::Client
+  def send_config_choice(params : JSON::Serializable) : ACP::Protocol::SessionSetConfigOptionResult
+    send_choice_request("session/set_config_option", params, ACP::Protocol::SessionSetConfigOptionResult)
+  end
+end
+
 describe "ACP exact session management" do
   it "preserves exact metadata on all session management parameter types" do
     metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
@@ -9042,8 +9191,10 @@ describe "ACP v1 exact session modes" do
 
         acknowledgement = %({"_meta":#{metadata}})
         ACP::Protocol::SessionSetModeResult.from_json(acknowledgement).meta_raw.not_nil!.json.should eq(metadata)
-        answer_identity_request(feed, outgoing, acknowledgement)
-        client.session_set_mode("code")
+        sent = capture_request_params(feed, outgoing, acknowledgement)
+        change = ACP::Protocol::SessionSetModeParams.from_json(%({"sessionId":"root","modeId":"code","_meta":#{metadata}}))
+        client.session_set_mode(change).meta_raw.not_nil!.json.should eq(metadata)
+        next_permission_event(sent).field("_meta").not_nil!.json.should eq(metadata)
         client.session_modes.not_nil!.current_mode_id.should eq("code")
 
         updates = Channel(ACP::Protocol::CurrentModeUpdate).new(1)
@@ -9117,8 +9268,11 @@ describe "ACP v1 recoverable configuration options" do
         client.session_set_config_option("model", "missing-name")
       end
       changed = option.sub(%("currentValue":"fast"), %("currentValue":"large"))
-      answer_identity_request(feed, outgoing, %({"configOptions":[#{changed}]}))
-      result = client.session_set_config_option("model", "large")
+      sent = capture_request_params(feed, outgoing, %({"configOptions":[#{changed}],"_meta":#{metadata}}))
+      params = ACP::Protocol::SessionSetConfigOptionParams.from_json(%({"sessionId":"root","configId":"model","value":"large","_meta":#{metadata}}))
+      result = client.session_set_config_option(params)
+      next_permission_event(sent).field("_meta").not_nil!.json.should eq(metadata)
+      result.meta_raw.not_nil!.json.should eq(metadata)
       check_option.call(result.config_options)
       client.session_config_options.not_nil!.first.current_value.should eq("large")
     ensure
