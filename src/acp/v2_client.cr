@@ -206,7 +206,9 @@ module ACP
           method = AgentMethod::SESSION_PROMPT
           session_id = params.field("sessionId").not_nil!.as_s?.not_nil!
           projection = params.to_json_any?
-          wire_params = params unless projection && Protocol::WireFrame.encode(projection) == params.json
+          projected_wire = projection.try { |value| Protocol::WireFrame.encode(value) }
+          wire_params = params unless projected_wire == params.json
+          require_exact = !!(wire_params && !only_link_size_normalizes?(wire_params, projected_wire))
           routing_params = projection || JSON::Any.new({"sessionId" => JSON::Any.new(session_id)})
           builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_params) }
           if skill_names && !skill_names.empty?
@@ -225,8 +227,29 @@ module ACP
             end
           end
           response = send_and_await_response(method, builder, prompt_timeout,
-            before_send: check_skills, wire_params: wire_params, exact_response: true)
+            before_send: check_skills, wire_params: wire_params, exact_response: true, require_exact_params: require_exact)
           decode_typed_response(method, response, Wire::SessionPromptResult)
+        end
+
+        # JSON::Any represents the standard unsigned link size -0 as 0.
+        # Every other part of the validated prompt must match exactly.
+        private def only_link_size_normalizes?(params : Protocol::RawJson, projected_wire : String?) : Bool
+          return false unless projected_wire
+
+          fields = params.members?.not_nil!
+          normalized_size = Protocol::RawJson.from_json("0")
+          changed = false
+          blocks = fields["prompt"].elements?.not_nil!.map do |block|
+            if block.field("type").try(&.as_s?) == "resource_link" && block.field("size").try(&.json) == "-0"
+              members = block.members?.not_nil!
+              members["size"] = normalized_size
+              changed = true
+              members
+            else
+              block
+            end
+          end
+          changed && Protocol::WireFrame.encode(fields.merge({"prompt" => blocks})) == projected_wire
         end
 
         private def v2_wire? : Bool

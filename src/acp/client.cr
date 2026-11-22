@@ -1197,10 +1197,16 @@ module ACP
     ) : Protocol::SessionPromptResult
       sid = session_id || @session_id
       raise NoActiveSessionError.new unless sid
+
+      session_prompt(Protocol::SessionPromptParams.new(sid, prompt))
+    end
+
+    # Sends typed prompt parameters with optional exact extension metadata.
+    def session_prompt(params : Protocol::SessionPromptParams) : Protocol::SessionPromptResult
       raise InvalidStateError.new("ACP initialization is required") if @state.created?
 
       caps = @agent_capabilities.try(&.prompt_capabilities)
-      prompt.each do |block|
+      params.prompt.each do |block|
         case block.type
         when "image"
           raise InvalidStateError.new("The Agent did not advertise image prompts") unless caps.try(&.image?)
@@ -1211,10 +1217,8 @@ module ACP
         end
       end
 
-      params = Protocol::SessionPromptParams.new(sid, prompt)
-
       # Use a longer timeout for prompts since they can take a while.
-      send_typed_request(Protocol::AgentMethod::SESSION_PROMPT, params, Protocol::SessionPromptResult, timeout: @prompt_timeout, exact_response: true)
+      send_exact_typed_request(Protocol::AgentMethod::SESSION_PROMPT, params, Protocol::SessionPromptResult, timeout: @prompt_timeout)
     end
 
     # Convenience: sends a simple text prompt.
@@ -1572,17 +1576,18 @@ module ACP
       decode_typed_response(method, response, type)
     end
 
-    protected def send_exact_typed_request(method : String, params : JSON::Serializable, type : T.class) : T forall T
-      decode_typed_response(method, send_exact_request(method, params), type)
+    protected def send_exact_typed_request(method : String, params : JSON::Serializable, type : T.class, *, timeout : Float64? = @request_timeout) : T forall T
+      decode_typed_response(method, send_exact_request(method, params, timeout: timeout), type)
     end
 
-    private def send_exact_request(method : String, params : JSON::Serializable, *, on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
+    private def send_exact_request(method : String, params : JSON::Serializable, *, timeout : Float64? = @request_timeout,
+                                   on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
       raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
       projection = raw.to_json_any?
       wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
       routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
       builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_view) }
-      send_and_await_response(method, builder, exact_response: true, wire_params: wire_params, require_exact_params: true, on_response: on_response)
+      send_and_await_response(method, builder, timeout, exact_response: true, wire_params: wire_params, require_exact_params: true, on_response: on_response)
     end
 
     # Core implementation for sending a JSON-RPC request and awaiting

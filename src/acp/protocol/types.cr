@@ -1231,6 +1231,7 @@ module ACP
     # Params for the `session/prompt` method (Client → Agent).
     struct SessionPromptParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session to send the prompt to (required).
       @[JSON::Field(key: "sessionId")]
@@ -1241,12 +1242,12 @@ module ACP
       # ContentBlock::ResourceLink. Other types require capabilities.
       property prompt : Array(ContentBlock)
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@session_id : String, @prompt : Array(ContentBlock), @meta : Hash(String, JSON::Any)? = nil)
+      # Creates a prompt for the given session.
+      def initialize(@session_id : String, @prompt : Array(ContentBlock), meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @prompt, metadata_comparison
     end
 
     # Result of the `session/prompt` method (Agent → Client).
