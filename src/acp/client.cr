@@ -364,6 +364,38 @@ module ACP
       end
     end
 
+    private class V1Terminal
+      getter session_id : String
+      property? visible : Bool = false
+      property? releasing : Bool = false
+      property? retired : Bool = false
+
+      def initialize(@session_id : String, @attachment_order : UInt64?)
+      end
+
+      def retired_by?(sessions : Array(String), order : UInt64?) : Bool
+        attached = @attachment_order
+        sessions.includes?(@session_id) && (!order || !attached || attached < order)
+      end
+    end
+
+    private class TerminalCreationRejected < Error
+      getter code : Int32
+
+      def initialize(@code : Int32, message : String)
+        super(message)
+      end
+    end
+
+    # Terminal IDs belong to the creating session and this connection.
+    # Keep released IDs as nil so they cannot name a later terminal.
+    # Guarded by @pending_mutex.
+    private DUPLICATE_TERMINAL_ID = "Terminal creation returned an existing terminal ID"
+
+    @v1_terminals = {} of String => V1Terminal?
+    @v1_terminal_creates = Set(V1Terminal).new
+    @v1_closed_terminal_sessions = Set(String).new
+
     # Agent requests (with a non-null ID) whose handler hasn't answered yet.
     # `session_cancel` and an incoming `$/cancel_request` answer some of
     # them early by removing them; the handler's late answer is then
@@ -1069,6 +1101,7 @@ module ACP
         @plan_ids.delete(session_id)
         @early_plan_sessions.delete(session_id)
         @session_choices.drop(session_id)
+        retire_v1_terminals(session_id) unless v2_wire?
         @subagent_registry.forget_runtime(session_id)
         forget_active_session(session_id)
       end
@@ -1844,6 +1877,9 @@ module ACP
           end
         end
         @late_session_retirements.clear
+        @v1_terminals.clear
+        @v1_terminal_creates.clear
+        @v1_closed_terminal_sessions.clear
         @url_elicitations.each_value { |elicitation| elicitation.completion = nil }
         @url_elicitations.clear
         @initialize_request = nil
@@ -2294,6 +2330,7 @@ module ACP
     end
 
     private def apply_retirement(session_id : String, order : UInt64?) : Array(String)?
+      retire_v1_terminals(session_id, order) unless v2_wire?
       unless retirement_applies?(session_id, order)
         if v2_wire?
           @subagent_registry.discard_old_entity_grants(session_id, order.not_nil!)
@@ -2309,6 +2346,20 @@ module ACP
       end
       forget_active_session(session_id)
       closed_sessions
+    end
+
+    # The caller holds @pending_mutex. A late close retires its own attachment.
+    private def retire_v1_terminals(session_id : String, order : UInt64? = nil) : Nil
+      affected = @subagent_registry.runtime_session_ids(session_id)
+      unless @subagent_registry.runtime_attachment_order(session_id)
+        @v1_closed_terminal_sessions.add(session_id)
+      end
+      @v1_terminal_creates.each do |terminal|
+        terminal.retired = true if terminal.retired_by?(affected, order)
+      end
+      @v1_terminals.transform_values! do |terminal|
+        terminal unless terminal.try(&.retired_by?(affected, order))
+      end
     end
 
     private def valid_response_header?(response : JSON::Any) : Bool
@@ -2475,6 +2526,14 @@ module ACP
         entry = nil
       end
 
+      if !v2_wire? && method_name == Protocol::ClientMethod::TERMINAL_CREATE && (sid = entry.try(&.session_id))
+        registration = prepare_v1_terminal(sid)
+        if registration.is_a?(Protocol::JsonRpcErrorObject)
+          rejection = registration
+        else
+          terminal = registration
+        end
+      end
       prepared = entry.try { |active_entry| prepare_agent_request(id, method_name, params, params_json, active_entry) }
       spawn(name: "acp-agent-request") do
         reply = rejection || (prepared ? prepared.call : route_agent_request(method_name, params, params_json))
@@ -2483,18 +2542,7 @@ module ACP
         elsif claim_agent_request(id, entry)
           sent : AgentReply? = nil
           begin
-            sent = case reply
-                   in Protocol::JsonRpcErrorObject
-                     respond_to_agent_error(reply_id, reply.code, reply.message, reply.data)
-                     reply
-                   in JSON::Any
-                     respond_to_agent(reply_id, reply)
-                     reply
-                   in Protocol::RawJson
-                     write_exact_agent_result(reply_id, method_name, reply) do
-                       raise ConnectionClosedError.new if closed? || @v2_contract_unknown.get
-                     end
-                   end
+            sent = send_agent_request_reply(reply_id, method_name, terminal, reply)
           ensure
             completion = settle_elicitation_reply(id, entry, sent)
           end
@@ -2511,8 +2559,101 @@ module ACP
         else
           record_dispatch_failure(ex)
         end
+      ensure
+        if pending_terminal = terminal
+          @pending_mutex.synchronize { @v1_terminal_creates.delete(pending_terminal) }
+        end
       end
       true
+    end
+
+    private def prepare_v1_terminal(session_id : String) : V1Terminal | Protocol::JsonRpcErrorObject
+      @pending_mutex.synchronize do
+        order = @subagent_registry.runtime_attachment_order(session_id)
+        closed = @subagent_registry.closed_runtime?(session_id) || (!order && @v1_closed_terminal_sessions.includes?(session_id))
+        if @disconnected || closed
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::RESOURCE_NOT_FOUND, "Session is no longer active")
+        end
+
+        @v1_closed_terminal_sessions.delete(session_id) if order
+        terminal = V1Terminal.new(session_id, order)
+        @v1_terminal_creates.add(terminal)
+        terminal
+      end
+    end
+
+    private def send_agent_request_reply(id : Protocol::RequestId?, method : String, terminal : V1Terminal?, reply : AgentReply) : AgentReply
+      case reply
+      in Protocol::JsonRpcErrorObject
+        respond_to_agent_error(id, reply.code, reply.message, reply.data)
+        reply
+      in JSON::Any, Protocol::RawJson
+        if terminal
+          send_v1_terminal_created(id, terminal, reply)
+        elsif reply.is_a?(Protocol::RawJson)
+          write_exact_agent_result(id, method, reply) do
+            raise ConnectionClosedError.new if closed? || @v2_contract_unknown.get
+          end
+        else
+          respond_to_agent(id, reply)
+          reply
+        end
+      end
+    end
+
+    # A terminal becomes visible only when the transport starts its success reply.
+    private def send_v1_terminal_created(id : Protocol::RequestId?, terminal : V1Terminal, reply : JSON::Any | Protocol::RawJson) : AgentReply
+      terminal_id = if reply.is_a?(Protocol::RawJson)
+                      reply.field("terminalId").not_nil!.as_s?.not_nil!
+                    else
+                      reply["terminalId"].as_s
+                    end
+      reserved = @pending_mutex.synchronize do
+        raise ConnectionClosedError.new if @disconnected
+        if invalidate_duplicate_terminal_id?(terminal_id)
+          raise TerminalCreationRejected.new(JsonRpcError::INTERNAL_ERROR, DUPLICATE_TERMINAL_ID)
+        end
+        check_terminal_creation_session(terminal)
+        @v1_terminals[terminal_id] = terminal
+        true
+      end
+
+      check_connection = -> { raise ConnectionClosedError.new if closed? }
+      make_visible = -> do
+        @pending_mutex.synchronize do
+          raise ConnectionClosedError.new if @disconnected
+          check_terminal_creation_session(terminal)
+          unless @v1_terminals[terminal_id]?.try(&.same?(terminal))
+            raise TerminalCreationRejected.new(JsonRpcError::INTERNAL_ERROR, DUPLICATE_TERMINAL_ID)
+          end
+
+          terminal.visible = true
+        end
+        nil
+      end
+      sent = if reply.is_a?(Protocol::RawJson)
+               write_exact_agent_result(id, Protocol::ClientMethod::TERMINAL_CREATE, reply, before_success_write: make_visible, &check_connection)
+             else
+               @transport.send_checked(Protocol.build_response_raw(id, reply), &make_visible)
+               reply
+             end
+      sent
+    rescue ex : TerminalCreationRejected
+      error = Protocol::JsonRpcErrorObject.new(ex.code, ex.message || "Terminal creation rejected")
+      respond_to_agent_error(id, error.code, error.message)
+      error
+    ensure
+      if reserved && terminal_id && (!sent || sent.is_a?(Protocol::JsonRpcErrorObject))
+        @pending_mutex.synchronize do
+          @v1_terminals.delete(terminal_id) if @v1_terminals[terminal_id]?.try(&.same?(terminal))
+        end
+      end
+    end
+
+    private def check_terminal_creation_session(terminal : V1Terminal) : Nil
+      if terminal.retired?
+        raise TerminalCreationRejected.new(JsonRpcError::RESOURCE_NOT_FOUND, "Session is no longer active")
+      end
     end
 
     # Keep an active elicitation cancellable if its request ID is reused.
@@ -2789,7 +2930,7 @@ module ACP
     end
 
     private def write_exact_agent_result(id : Protocol::RequestId?, method : String, result : Protocol::RawJson,
-                                         &preflight : -> Nil) : Protocol::RawJson | Protocol::JsonRpcErrorObject
+                                         *, before_success_write : (-> Nil)? = nil, &preflight : -> Nil) : Protocol::RawJson | Protocol::JsonRpcErrorObject
       started = false
       wire = JSON.build do |json|
         json.object do
@@ -2800,6 +2941,7 @@ module ACP
       end
       @transport.send_wire(Protocol::WireFrame.new(wire, require_exact: true)) do
         preflight.call
+        before_success_write.try(&.call)
         started = true
       end
       result
@@ -2918,18 +3060,74 @@ module ACP
         ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
       end
-      unless h = handler
-        reply = handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
-        return validate_v1_resource_reply(method_name, reply)
+      terminal_id = typed_params.terminal_id if !v2_wire? && typed_params.responds_to?(:terminal_id)
+      if terminal_id
+        releasing = typed_params.is_a?(Protocol::ReleaseTerminalParams)
+        terminal = v1_terminal_for_request(terminal_id, typed_params.session_id, releasing)
+        unless terminal
+          data = JSON::Any.new({"terminalId" => JSON::Any.new(terminal_id)})
+          return Protocol::JsonRpcErrorObject.new(JsonRpcError::RESOURCE_NOT_FOUND, "Terminal not found", data)
+        end
       end
 
-      # Separate from the parse above: a JSON error raised by the handler's
-      # own code is a handler failure, not invalid params.
-      begin
-        encode_agent_result(h.call(typed_params))
-      rescue ex
-        ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
-        handler_error_reply(ex, ex.message || "Handler error")
+      reply = if h = handler
+                # Exceptions in the callback are handler failures, not invalid params.
+                begin
+                  result = h.call(typed_params)
+                  released = releasing
+                  collision = terminal_id_collision(result.terminal_id) if result.is_a?(Protocol::CreateTerminalResult)
+                  collision || encode_agent_result(result)
+                rescue ex
+                  ClientLog.error { "Error in #{method_name} handler: #{ex.message}" }
+                  handler_error_reply(ex, ex.message || "Handler error")
+                end
+              else
+                raw = handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
+                result_fields = raw.as_h? if raw.is_a?(JSON::Any)
+                released = releasing && !!result_fields
+                if method_name == Protocol::ClientMethod::TERMINAL_CREATE
+                  collision = terminal_id_collision(result_fields.try(&.["terminalId"]?).try(&.as_s?))
+                end
+                collision || validate_v1_resource_reply(method_name, raw)
+              end
+      reply
+    ensure
+      if releasing && terminal_id && terminal
+        @pending_mutex.synchronize do
+          if released || (reply && (!reply.is_a?(Protocol::JsonRpcErrorObject) || reply.code == JsonRpcError::RESOURCE_NOT_FOUND))
+            @v1_terminals[terminal_id] = nil if @v1_terminals[terminal_id]?.try(&.same?(terminal))
+          else
+            terminal.releasing = false
+          end
+        end
+      end
+    end
+
+    # A callback may already have replaced the handle, even if its reply
+    # cannot be serialized. The caller holds @pending_mutex.
+    private def invalidate_duplicate_terminal_id?(terminal_id : String) : Bool
+      return false unless @v1_terminals.has_key?(terminal_id)
+
+      @v1_terminals[terminal_id] = nil
+      true
+    end
+
+    private def terminal_id_collision(terminal_id : String?) : Protocol::JsonRpcErrorObject?
+      return if v2_wire? || !terminal_id
+
+      if @pending_mutex.synchronize { invalidate_duplicate_terminal_id?(terminal_id) }
+        Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, DUPLICATE_TERMINAL_ID)
+      end
+    end
+
+    # Claim a release before invoking the callback, which may yield.
+    private def v1_terminal_for_request(terminal_id : String, session_id : String, release : Bool) : V1Terminal?
+      @pending_mutex.synchronize do
+        terminal = @v1_terminals[terminal_id]?
+        next unless terminal && terminal.visible? && !terminal.releasing? && terminal.session_id == session_id
+
+        terminal.releasing = true if release
+        terminal
       end
     end
 

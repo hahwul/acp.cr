@@ -508,6 +508,11 @@ describe "ACP $/cancel_request" do
     entered = Channel(Nil).new(1)
     notified = Channel(JSON::Any?).new(1)
     client.on_notification = ->(_m : String, p : JSON::Any?) { notified.send(p); nil }
+    client.on_create_terminal = ->(_params : ACP::Protocol::CreateTerminalParams) do
+      ACP::Protocol::CreateTerminalResult.new("t")
+    end
+    transport.inject_raw(%({"jsonrpc":"2.0","id":"create","method":"terminal/create","params":{"sessionId":"s","command":"fixture"}}))
+    wait_for_sent(transport) { |message| message["id"]? == "create" }["result"]["terminalId"].should eq("t")
     client.on_wait_for_terminal_exit = ->(_p : ACP::Protocol::WaitForTerminalExitParams) do
       entered.send(nil)
       release.receive

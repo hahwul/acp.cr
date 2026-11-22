@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Breaking Changes
+- ACP v1 terminal handlers must return a fresh terminal ID for each creation on a connection. Follow-up calls for unknown, released, or other-session IDs return `-32002`.
 - ACP v1 file and terminal callbacks require capability advertisement in a successful `initialize` exchange. Unadvertised requests return `-32601` before invoking either callback.
 - ACP v2 custom prompt content requires `on_prompt_content_type` to confirm the Agent’s advertised support.
 - Typed session mode and configuration setters validate IDs and values against the session's current advertisements. Initialize with `session.configOptions.boolean` to set v1 boolean options.
