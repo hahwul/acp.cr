@@ -18,6 +18,7 @@
 require "json"
 require "./content_block"
 require "./optional_metadata"
+require "./raw_json"
 
 module ACP
   module Protocol
@@ -30,12 +31,20 @@ module ACP
     abstract struct ToolCallContent
       include JSON::Serializable
 
-      use_json_discriminator "type", {
-        "content"  => ToolCallContentBlock,
-        "diff"     => ToolCallDiff,
-        "terminal" => ToolCallTerminal,
-        "session"  => ToolCallSessionReference,
-      }
+      # Reads tool content at the transport's JSON nesting limit.
+      def self.new(pull : JSON::PullParser) : ToolCallContent
+        line, column = pull.location
+        wire = RawJson.new(pull)
+        type = wire.field("type").try(&.as_s?)
+        case type
+        when "content"  then ToolCallContentBlock.from_json(wire.json)
+        when "diff"     then ToolCallDiff.from_json(wire.json)
+        when "terminal" then ToolCallTerminal.from_json(wire.json)
+        when "session"  then ToolCallSessionReference.from_json(wire.json)
+        else
+          raise JSON::SerializableError.new("Unknown or missing tool-call content type: #{type.inspect}", to_s, "type", line, column, nil)
+        end
+      end
 
       # The discriminator field present on every tool call content item.
       getter type : String
@@ -53,6 +62,8 @@ module ACP
 
     struct ToolCallContentBlock < ToolCallContent
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Always "content" for this variant.
       getter type : String = "content"
@@ -60,12 +71,9 @@ module ACP
       # The actual content block (text, image, audio, resource, resource_link).
       property content : ContentBlock
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@content : ContentBlock, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@content : ContentBlock, meta : Hash(String, JSON::Any)? = nil)
         @type = "content"
+        self.meta = meta
       end
 
       # Convenience: returns the text if the inner content is a TextContentBlock.
@@ -73,6 +81,10 @@ module ACP
         if c = @content.as?(TextContentBlock)
           c.text
         end
+      end
+
+      protected def comparison_value
+        {@type, @content, comparable_json(meta_raw)}
       end
     end
 
@@ -92,6 +104,8 @@ module ACP
 
     struct ToolCallDiff < ToolCallContent
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Always "diff" for this variant.
       getter type : String = "diff"
@@ -100,24 +114,21 @@ module ACP
       property path : String
 
       # The original content (nil for new files).
-      @[JSON::Field(key: "oldText")]
+      @[JSON::Field(key: "oldText", converter: ::ACP::Protocol::OptionalContentValue(String))]
       property old_text : String?
 
       # The new content after modification (required).
       @[JSON::Field(key: "newText")]
       property new_text : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @path : String,
         @new_text : String,
         @old_text : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @type = "diff"
+        self.meta = meta
       end
 
       # Returns true if this diff represents a new file creation.
@@ -147,6 +158,8 @@ module ACP
 
     struct ToolCallTerminal < ToolCallContent
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Always "terminal" for this variant.
       getter type : String = "terminal"
@@ -155,28 +168,25 @@ module ACP
       @[JSON::Field(key: "terminalId")]
       property terminal_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@terminal_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@terminal_id : String, meta : Hash(String, JSON::Any)? = nil)
         @type = "terminal"
+        self.meta = meta
       end
     end
 
     # A display reference to a session the tool call operates on.
     struct ToolCallSessionReference < ToolCallContent
+      include LosslessMetadata
+      include WireValueEquality
+
       # ID of the referenced session.
       @[JSON::Field(key: "sessionId")]
       property session_id : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       # Creates a session reference.
-      def initialize(@session_id : String, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@session_id : String, meta : Hash(String, JSON::Any)? = nil)
         @type = "session"
+        self.meta = meta
       end
     end
 
@@ -196,11 +206,13 @@ module ACP
     struct ToolCallLocation
       include JSON::Serializable
       include LosslessMetadata
+      include WireValueEquality
 
       # The absolute file path being accessed or modified (required).
       property path : String
 
       # Optional line number within the file (1-based). Schema `uint32`.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(UInt32))]
       property line : UInt32?
 
       # Creates a reported tool-call location.

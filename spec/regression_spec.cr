@@ -1172,6 +1172,82 @@ describe "ACP v1 raw tool call notifications" do
   end
 end
 
+describe "ACP v1 tool call collections" do
+  it "delivers exact content and locations through the typed stdio callback" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+      client.session_new("/work")
+
+      updates = Channel(ACP::Protocol::ToolCallStatusUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        updates.send(note.update.as(ACP::Protocol::ToolCallStatusUpdate))
+        nil
+      end
+      nested = "[" * 105 + "1" + "]" * 105
+      metadata = %({"example.test/count":18446744073709551615,"example.test/nested":#{nested}})
+      content = %([{"type":"content","content":{"type":"text","text":"Done"},"_meta":#{metadata}},false,{"type":"future"}])
+      locations = %([{"path":"/report","line":12,"_meta":#{metadata}},{"path":"/summary","line":"unknown"},{}])
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","status":"completed","content":#{content},"locations":#{locations},"_meta":#{metadata}}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when update = updates.receive
+        update.status.should eq("completed")
+        update.typed_content.size.should eq(1)
+        block = update.typed_content.first.as(ACP::Protocol::ToolCallContentBlock)
+        block.text.should eq("Done")
+        block.meta_raw.not_nil!.json.should eq(metadata)
+        update.typed_locations.map(&.path).should eq(["/report", "/summary"])
+        update.typed_locations.map(&.line).should eq([12_u32, nil])
+        update.typed_locations.first.meta_raw.not_nil!.json.should eq(metadata)
+        update.meta_raw.not_nil!.json.should eq(metadata)
+        update.content_raw.not_nil!.json.should eq(content)
+        update.locations_raw.not_nil!.json.should eq(locations)
+        wire = ACP::Protocol::RawJson.from_json(update.to_json)
+        wire.field("content").not_nil!.json.should eq(content)
+        wire.field("locations").not_nil!.json.should eq(locations)
+      else
+        fail "collection update did not reach the typed callback"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps the other updates when optional collections have the wrong shape" do
+    update = ACP::Protocol::ToolCallUpdate.from_json(%({"sessionUpdate":"tool_call","toolCallId":"tool","title":"Write report","content":{},"locations":false}))
+    update.title.should eq("Write report")
+    update.content.should be_nil
+    update.locations.should be_nil
+    update.typed_content.should be_empty
+    update.typed_locations.should be_empty
+  end
+
+  it "keeps exact metadata attached to the edited content item" do
+    type = ACP::Protocol::ToolCallUpdate
+    metadata = %({"example.test/count":18446744073709551615})
+    update = type.from_json(%({"sessionUpdate":"tool_call","toolCallId":"tool","title":"Report","content":[{"type":"terminal","terminalId":"first","_meta":#{metadata}},{"type":"terminal","terminalId":"second"}]}))
+    entries = update.content.not_nil!
+    entries.reverse!
+    entries.last.as_h["terminalId"] = JSON::Any.new("changed")
+    items = update.typed_content.map(&.as(ACP::Protocol::ToolCallTerminal))
+    items.map(&.terminal_id).should eq(["second", "changed"])
+    items.first.meta_raw.should be_nil
+    items.last.meta_raw.not_nil!.json.should eq(metadata)
+    type.from_json(update.to_json).should eq(update)
+
+    update.content = [] of JSON::Any
+    update.typed_content.should be_empty
+    update.content_raw.not_nil!.json.should eq("[]")
+    update.content = nil
+    update.content_raw.should be_nil
+  end
+end
+
 # ─── R23: a blocked agent-request handler must not stall the dispatcher ──
 #
 # prompt-turn#cancellation: after `session/cancel` the Agent answers the
