@@ -801,6 +801,12 @@ parameters provide exact extension metadata through `meta_raw`, and
 [ACP v1 File System](https://agentclientprotocol.com/protocol/v1/file-system#checking-support)
 [ACP v1 Terminals](https://agentclientprotocol.com/protocol/v1/terminals#checking-support)
 
+Use `meta_raw=` to attach exact JSON metadata to typed file and terminal
+results, including `TerminalExitStatus`. Stdio preserves the original
+number tokens. Custom transports that cannot preserve an exact reply
+return `-32603` to the Agent.
+[ACP v1 Extension Metadata](https://agentclientprotocol.com/protocol/v1/extensibility#the-_meta-field)
+
 | Handler | Params Type | Result Type | Description |
 |---------|-------------|-------------|-------------|
 | `on_read_text_file` | `ReadTextFileParams` | `ReadTextFileResult` | Handle `fs/read_text_file` |

@@ -30,6 +30,10 @@ module ACP
     end
   end
 
+  # Raised before writing an outgoing frame that exceeds the transport's limit.
+  class FrameTooLargeError < TransportError
+  end
+
   # ─── Protocol Errors ───────────────────────────────────────────────
 
   # Raised on protocol-level issues (version mismatch, bad handshake, etc.)
