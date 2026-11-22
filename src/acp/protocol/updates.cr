@@ -461,6 +461,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/agent-plan
     struct PlanUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The list of tasks to be accomplished (required).
       # When updating, the agent MUST send a complete list; the client
@@ -468,15 +470,17 @@ module ACP
       @[JSON::Field(converter: ::ACP::Protocol::PlanEntries)]
       property entries : Array(PlanEntry) = [] of PlanEntry
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Reads a complete checklist with an unambiguous entries field.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "entries"))
+      end
 
       def initialize(
         @entries : Array(PlanEntry) = [] of PlanEntry,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "plan"
+        self.meta = meta
       end
     end
 
@@ -512,7 +516,12 @@ module ACP
     # :nodoc:
     module PlanEntries
       def self.from_json(pull : JSON::PullParser) : Array(PlanEntry)
-        read(pull, require_fields: false)
+        if pull.kind.begin_array?
+          read(pull, require_fields: false)
+        else
+          pull.skip
+          [] of PlanEntry
+        end
       end
 
       def self.read(pull : JSON::PullParser, *, require_fields : Bool) : Array(PlanEntry)
@@ -548,10 +557,22 @@ module ACP
       include JSON::Serializable
       include LosslessMetadata
 
-      use_json_discriminator "type", {
-        "items"    => PlanItems,
-        "markdown" => PlanMarkdown,
-      }
+      # Reads a known representation at the transport's JSON nesting limit.
+      def self.new(pull : JSON::PullParser) : PlanUpdateContent
+        line, column = pull.location
+        wire = RawJson.new(pull)
+        unless WireFrame.repeated_members(wire.json, "type", "planId").empty?
+          raise JSON::ParseException.new("Ambiguous ACP plan identity", line, column)
+        end
+
+        type = wire.field("type").try(&.as_s?)
+        case type
+        when "items"    then PlanItems.from_json(wire.json)
+        when "markdown" then PlanMarkdown.from_json(wire.json)
+        else
+          raise JSON::SerializableError.new("Unknown or missing plan type: #{type.inspect}", to_s, "type", line, column, nil)
+        end
+      end
 
       # Representation of the plan on the wire.
       getter type : String
@@ -566,6 +587,11 @@ module ACP
       # Current entries. Each update supplies the full list.
       @[JSON::Field(converter: ::ACP::Protocol::PlanEntries)]
       property entries : Array(PlanEntry)
+
+      # Reads a complete checklist with an unambiguous entries field.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "entries"))
+      end
 
       # Creates a checklist plan.
       def initialize(@plan_id : String, @entries : Array(PlanEntry), meta : Hash(String, JSON::Any)? = nil)
@@ -605,6 +631,11 @@ module ACP
       # The replacement checklist or Markdown document.
       property plan : PlanUpdateContent
 
+      # Reads a single replacement plan.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "plan"))
+      end
+
       # Creates a `plan_update` notification payload.
       def initialize(@plan : PlanUpdateContent, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "plan_update"
@@ -619,6 +650,11 @@ module ACP
       # The plan ID to remove.
       @[JSON::Field(key: "planId")]
       property plan_id : String
+
+      # Reads an unambiguous plan ID.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(WireFrame.read_with_unique_members(pull, "planId"))
+      end
 
       # Creates a `plan_removed` notification payload.
       def initialize(@plan_id : String, meta : Hash(String, JSON::Any)? = nil)

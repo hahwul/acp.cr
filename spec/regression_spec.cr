@@ -5022,6 +5022,66 @@ describe "ACP v2 exact upsert metadata" do
   end
 end
 
+describe "ACP v1 plan notifications" do
+  it "delivers exact plan metadata and the remaining checklist after skipping invalid entries" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      updates = Channel(ACP::Protocol::PlanUpdate).new(1)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        updates.send(note.update.as(ACP::Protocol::PlanUpdate))
+        nil
+      end
+      metadata = %({"example.test/count":18446744073709551615,"example.test/ratio":0.123456789012345678901})
+      entries = %([{"content":"Draft","priority":"medium","status":"completed","_meta":#{metadata}},false,{"content":"Review","priority":"high","status":"pending"}])
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"plan","entries":#{entries},"_meta":#{metadata}}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when plan = updates.receive
+        plan.entries.map(&.content).should eq(["Draft", "Review"])
+        plan.entries.first.meta_raw.not_nil!.json.should eq(metadata)
+        plan.meta_raw.not_nil!.json.should eq(metadata)
+        ACP::Protocol::RawJson.from_json(plan.to_json).field("_meta").not_nil!.json.should eq(metadata)
+      else
+        fail "the plan did not reach the typed callback"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "defaults an invalid entries collection on a v1 plan to an empty checklist" do
+    plan = ACP::Protocol::PlanUpdate.from_json(%({"sessionUpdate":"plan","entries":false}))
+    plan.entries.should be_empty
+  end
+
+  it "rejects ambiguous checklist fields and plan identities" do
+    [
+      %({"sessionUpdate":"plan","entries":[],"entries":[]}),
+      %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[],"entries":[]}}),
+      %({"sessionUpdate":"plan_update","plan":{"type":"items","type":"items","planId":"p","entries":[]}}),
+      %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","planId":"q","entries":[]}}),
+      %({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[]},"plan":{"type":"items","planId":"q","entries":[]}}),
+      %({"sessionUpdate":"plan_removed","planId":"p","planId":"q"}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::SessionUpdate.from_json(wire) }
+    end
+  end
+
+  it "decodes identified plans with metadata at the transport's nesting limit" do
+    nested = "[" * 110 + "18446744073709551615" + "]" * 110
+    metadata = %({"example.test/nested":#{nested}})
+    wire = %({"sessionUpdate":"plan_update","plan":{"type":"markdown","planId":"p","content":"# Plan","_meta":#{metadata}}})
+    update = ACP::Protocol::SessionUpdate.from_json(wire).as(ACP::Protocol::IdentifiedPlanUpdate)
+    plan = update.plan.as(ACP::Protocol::PlanMarkdown)
+    plan.content.should eq("# Plan")
+    plan.meta_raw.not_nil!.json.should eq(metadata)
+  end
+end
+
 describe "ACP v2 identified plan updates" do
   it "skips invalid checklist entries while retaining valid open statuses in order" do
     update = ACP::Protocol::V2::SessionUpdate.from_json(%({"sessionUpdate":"plan_update","plan":{"type":"items","planId":"p","entries":[{"content":"first","priority":"high","status":"cancelled"},false,{"content":"missing status","priority":"low"},{"content":"wrong type","priority":1,"status":"pending"},{"content":"null priority","priority":null,"status":"pending"},{"content":"null status","priority":"low","status":null},{"content":"last","priority":"future","status":"_queued"}]}}))
