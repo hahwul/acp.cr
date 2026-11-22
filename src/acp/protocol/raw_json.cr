@@ -1,3 +1,4 @@
+require "deque"
 require "./wire_frame"
 
 module ACP
@@ -174,12 +175,37 @@ module ACP
     # Keeps exact JSON behind an existing mutable JSON::Any accessor.
     struct PreservedJson
       private alias ObjectView = Hash(String, JSON::Any)
-      private alias ObjectChildren = Hash(String, ObjectChild)
+      private alias ArrayView = Array(JSON::Any)
+      private alias ContainerChild = ObjectChild | ArrayChild
+      private alias ObjectChildren = Hash(String, ContainerChild)
+      private alias ArrayChildren = Hash(UInt64, {Int32, ContainerChild})
+      private alias WireValue = WireObject | WireArray | String
+
+      private record WireObject, members : Array({String, WireValue})
+      private record WireArray, entries : Array(WireValue)
 
       private record ObjectChild, view : ObjectView, children : ObjectChildren do
+        def same_view?(value : JSON::Any) : Bool
+          value.as_h?.try(&.same?(view)) == true
+        end
+
         def same_tree?(value : JSON::Any?) : Bool
           if object = value.try(&.as_h?)
             object.same?(view) && children.all? { |key, child| child.same_tree?(object[key]?) }
+          else
+            false
+          end
+        end
+      end
+
+      private record ArrayChild, view : ArrayView, children : ArrayChildren do
+        def same_view?(value : JSON::Any) : Bool
+          value.as_a?.try(&.same?(view)) == true
+        end
+
+        def same_tree?(value : JSON::Any?) : Bool
+          if array = value.try(&.as_a?)
+            array.same?(view) && children.each_value.all? { |(index, child)| child.same_tree?(array[index]?) }
           else
             false
           end
@@ -239,11 +265,7 @@ module ACP
       private def project_members(pull : JSON::PullParser, *, nested : Bool) : JSON::Any
         projection = {} of String => JSON::Any
         pull.read_object do |key|
-          projected = if nested && pull.kind.begin_object?
-                        project_members(pull, nested: true)
-                      else
-                        RawJson.new(pull).to_json_any?
-                      end
+          projected = nested ? project_nested_value(pull) : RawJson.new(pull).to_json_any?
           if projected
             projection[key] = projected
           else
@@ -251,6 +273,23 @@ module ACP
           end
         end
         JSON::Any.new(projection)
+      end
+
+      private def project_nested_value(pull : JSON::PullParser) : JSON::Any?
+        return project_members(pull, nested: true) if pull.kind.begin_object?
+        return RawJson.new(pull).to_json_any? unless pull.kind.begin_array?
+
+        entries = [] of JSON::Any
+        complete = true
+        pull.read_array do
+          if entry = project_nested_value(pull)
+            entries << entry
+          else
+            # A hidden scalar must not shift position in the editable array.
+            complete = false
+          end
+        end
+        JSON::Any.new(entries) if complete
       end
 
       private def project_blocks(elements : Array(RawJson)) : JSON::Any
@@ -278,11 +317,25 @@ module ACP
       private def nested_object_views(object : ObjectView) : ObjectChildren
         views = ObjectChildren.new
         object.each do |key, member|
-          if nested = member.as_h?
-            views[key] = ObjectChild.new(nested, nested_object_views(nested))
+          if child = nested_view(member)
+            views[key] = child
           end
         end
         views
+      end
+
+      private def nested_view(value : JSON::Any) : ContainerChild?
+        if object = value.as_h?
+          ObjectChild.new(object, nested_object_views(object))
+        elsif array = value.as_a?
+          children = ArrayChildren.new
+          array.each_with_index do |entry, index|
+            if child = nested_view(entry)
+              children[child.view.object_id] = {index, child}
+            end
+          end
+          ArrayChild.new(array, children)
+        end
       end
 
       private def retained_block(block : JSON::Any) : ObjectSource?
@@ -313,56 +366,126 @@ module ACP
         end
       end
 
-      # Apply edits against the original visible keys. Untouched wire members keep
-      # their original values, including hidden members and repeated keys.
       private def patch_projected_object(wire : String, baseline : ObjectView, view : ObjectView,
                                          nested_views : ObjectChildren? = nil) : String
         pull = JSON::PullParser.new(wire)
-        members = [] of {String, String}
-        pull.read_object { |key| members << {key, WireFrame.read_raw(pull)} }
+        # Read the source once. Containers hold references to their children so
+        # an edit does not copy or re-encode the same value at every ancestor.
+        source = read_wire_value(pull).as(WireObject)
+        JSON.build do |builder|
+          builder.max_nesting = pull.max_nesting
+          write_patched_object(source, baseline, view, nested_views, builder)
+        end
+      end
+
+      private def read_wire_value(pull : JSON::PullParser) : WireValue
+        case pull.kind
+        when .begin_object?
+          members = [] of {String, WireValue}
+          pull.read_object { |key| members << {key, read_wire_value(pull)} }
+          WireObject.new(members)
+        when .begin_array?
+          entries = [] of WireValue
+          pull.read_array { entries << read_wire_value(pull) }
+          WireArray.new(entries)
+        else
+          pull.read_raw
+        end
+      end
+
+      private def write_wire_value(value : WireValue, builder : JSON::Builder) : Nil
+        case value
+        when WireObject
+          builder.object do
+            value.members.each { |key, member| builder.field(key) { write_wire_value(member, builder) } }
+          end
+        when WireArray
+          builder.array { value.entries.each { |entry| write_wire_value(entry, builder) } }
+        else
+          builder.raw(value)
+        end
+      end
+
+      # Apply edits against the original visible keys. Keep hidden fields and
+      # earlier repeated members when their projected container is edited.
+      private def write_patched_object(source : WireObject, baseline : ObjectView, view : ObjectView,
+                                       nested_views : ObjectChildren?, builder : JSON::Builder) : Nil
+        last_members = {} of String => Int32
+        source.members.each_with_index { |(key, _), index| last_members[key] = index }
         edits = {} of String => String?
-        nested_edits = {} of Int32 => String
+        nested_edits = {} of Int32 => {JSON::Any, ContainerChild}
         baseline.each_key { |key| edits[key] = nil unless view.has_key?(key) }
 
         view.each do |key, member|
           original = baseline[key]?
-          rendered = WireFrame.encode(member)
-          unchanged = original && rendered == WireFrame.encode(original)
           if child = nested_views.try(&.[key]?)
-            if (nested = member.as_h?) && nested.same?(child.view)
-              unless unchanged && child.same_tree?(member)
-                index = members.rindex { |name, _| name == key }.not_nil!
-                nested_edits[index] = patch_projected_object(members[index][1], original.not_nil!.as_h, nested, child.children)
-              end
+            if child.same_view?(member)
+              nested_edits[last_members[key]] = {original.not_nil!, child}
             else
-              edits[key] = rendered
+              edits[key] = WireFrame.encode(member)
             end
-          elsif !unchanged
-            edits[key] = rendered
+          else
+            rendered = WireFrame.encode(member)
+            edits[key] = rendered unless original && rendered == WireFrame.encode(original)
           end
         end
-        return wire if edits.empty? && nested_edits.empty?
 
         written = Set(String).new
-        JSON.build do |json|
-          json.max_nesting = pull.max_nesting
-          json.object do
-            members.each_with_index do |(key, value), index|
-              if nested = nested_edits[index]?
-                json.field(key) { json.raw(nested) }
-              elsif edits.has_key?(key)
-                if written.add?(key) && (replacement = edits[key])
-                  json.field(key) { json.raw(replacement) }
-                end
-              else
-                json.field(key) { json.raw(value) }
+        builder.object do
+          source.members.each_with_index do |(key, value), index|
+            if nested = nested_edits[index]?
+              builder.field(key) { write_patched_child(value, nested[0], nested[1], builder) }
+            elsif edits.has_key?(key)
+              if written.add?(key) && (replacement = edits[key])
+                builder.field(key) { builder.raw(replacement) }
               end
+            else
+              builder.field(key) { write_wire_value(value, builder) }
             end
-            edits.each do |key, replacement|
-              json.field(key) { json.raw(replacement) } if replacement && written.add?(key)
+          end
+          edits.each do |key, replacement|
+            builder.field(key) { builder.raw(replacement) } if replacement && written.add?(key)
+          end
+        end
+      end
+
+      private def write_patched_child(source : WireValue, baseline : JSON::Any,
+                                      child : ObjectChild, builder : JSON::Builder) : Nil
+        write_patched_object(source.as(WireObject), baseline.as_h, child.view, child.children, builder)
+      end
+
+      private def write_patched_child(source : WireValue, baseline : JSON::Any,
+                                      child : ArrayChild, builder : JSON::Builder) : Nil
+        members = source.as(WireArray).entries
+        original = baseline.as_a
+        prior_scalars = original.map { |value| scalar_json(value) }
+        scalars = child.view.map { |value| scalar_json(value) }
+        moved_scalars = {} of String => Deque(Int32)
+        prior_scalars.each_with_index do |scalar, index|
+          if scalar && scalars[index]? != scalar
+            (moved_scalars[scalar] ||= Deque(Int32).new) << index
+          end
+        end
+
+        builder.array do
+          child.view.each_with_index do |value, index|
+            if container = value.as_h? || value.as_a?
+              if (entry = child.children[container.object_id]?) && entry[1].same_view?(value)
+                source_index, nested = entry
+                write_patched_child(members[source_index], original[source_index], nested, builder)
+              else
+                value.to_json(builder)
+              end
+            elsif scalar = scalars[index]
+              source_index = prior_scalars[index]? == scalar ? index : moved_scalars[scalar]?.try(&.shift?)
+              source_index ? write_wire_value(members[source_index], builder) : builder.raw(scalar)
             end
           end
         end
+      end
+
+      private def scalar_json(value : JSON::Any) : String?
+        WireFrame.encode(value) unless value.as_h? || value.as_a?
       end
 
       def raw : RawJson

@@ -8529,7 +8529,7 @@ describe "ACP elicitation extension metadata" do
         else
           client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
         end
-        metadata = %({"example.test/display":true,"example.test/details":{"section":{"visible":"original","wide":18446744073709551615,"decimal":0.123456789012345678901}}})
+        metadata = %({"example.test/display":true,"example.test/details":{"sections":[{"visible":"original","wide":18446744073709551615,"decimal":0.123456789012345678901}]}})
         updated = metadata.sub("original", "updated")
         completions = Channel(String).new(1)
         received = Channel({Bool?, String?}).new(1)
@@ -8537,7 +8537,7 @@ describe "ACP elicitation extension metadata" do
           visible = params.meta.try(&.["example.test/display"]?).try(&.as_bool?)
           source = ACP::Protocol::RawJson.from_json(params.to_json).field("_meta")
           received.send({visible, source.try(&.json)})
-          if section = params.meta.try(&.["example.test/details"]?).try(&.["section"]?).try(&.as_h?)
+          if section = params.meta.try(&.["example.test/details"]?).try(&.["sections"]?).try(&.as_a?).try(&.first?).try(&.as_h?)
             section["visible"] = JSON::Any.new("updated")
           end
           result = ACP::Protocol::CreateElicitationResult.accept
@@ -8583,6 +8583,34 @@ describe "ACP elicitation extension metadata" do
     ACP::Protocol::CreateElicitationResult.from_json(ordinary.to_json).should eq(ordinary)
     ordinary.meta_raw = ACP::Protocol::RawJson.from_json("null")
     ordinary.meta.should be_nil
+  end
+
+  it "retains exact values when editing and moving metadata array elements" do
+    first = %({"label":"first","values":[{"decimal":0.123456789012345678901,"label":"old"}]})
+    second = %({"label":"second","decimal":0.987654321098765432109})
+    equivalent = { %({"decimal":0.123456789012345678901}), %({"decimal":0.123456789012345678902}) }
+    result = ACP::Protocol::CreateElicitationResult.from_json(%({"action":"accept","_meta":{"items":[#{first},#{second}],"numbers":[0.123456789012345678901,0.987654321098765432109],"equivalent":[#{equivalent[0]},#{equivalent[1]}]}}))
+    metadata = result.meta.not_nil!
+    items = metadata["items"].as_a
+    items[0]["values"][0].as_h["label"] = JSON::Any.new("updated")
+    items.reverse!
+    metadata["numbers"].as_a.unshift(JSON::Any.new("inserted"))
+    metadata["equivalent"].as_a.reverse!
+
+    edited = first.sub("old", "updated")
+    result.meta_raw.try(&.json).should eq(%({"items":[#{second},#{edited}],"numbers":["inserted",0.123456789012345678901,0.987654321098765432109],"equivalent":[#{equivalent[1]},#{equivalent[0]}]}))
+  end
+
+  it "exposes editable objects in arrays with wide fields and retains opaque numeric arrays" do
+    result = ACP::Protocol::CreateElicitationResult.from_json(%({"action":"accept","_meta":{"items":[{"label":"old","wide":18446744073709551615}],"opaque":[18446744073709551615]}}))
+    metadata = result.meta.not_nil!
+    entries = metadata["items"]?.try(&.as_a?)
+    entries.should_not be_nil
+    metadata.has_key?("opaque").should be_false
+    entries.not_nil![0].as_h["label"] = JSON::Any.new("updated")
+    result.meta_raw.try(&.json).should eq(%({"items":[{"label":"updated","wide":18446744073709551615}],"opaque":[18446744073709551615]}))
+    entries.not_nil![0] = JSON.parse(%({"label":"updated"}))
+    result.meta_raw.try(&.json).should eq(%({"items":[{"label":"updated"}],"opaque":[18446744073709551615]}))
   end
 
   it "reports an unsupported exact URL reply and releases its completion ID" do
