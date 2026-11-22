@@ -418,23 +418,12 @@ module ACP
       include LosslessMetadata
       include WireValueEquality
 
-      # :nodoc:
-      module ModeList
-        def self.from_json(pull : JSON::PullParser) : Array(SessionMode)
-          OptionalContentList(SessionMode).from_json(pull) || [] of SessionMode
-        end
-
-        def self.to_json(value : Array(SessionMode), json : JSON::Builder) : Nil
-          value.to_json(json)
-        end
-      end
-
       # The current mode the Agent is in.
       @[JSON::Field(key: "currentModeId")]
       property current_mode_id : String
 
       # The set of modes that the Agent can operate in.
-      @[JSON::Field(key: "availableModes", converter: ::ACP::Protocol::SessionModeState::ModeList)]
+      @[JSON::Field(key: "availableModes", converter: ::ACP::Protocol::DefaultContentList(::ACP::Protocol::SessionMode))]
       property available_modes : Array(SessionMode) = [] of SessionMode
 
       # Creates a snapshot of the current and available modes.

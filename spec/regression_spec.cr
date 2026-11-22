@@ -7122,6 +7122,71 @@ describe "ACP v1 exact session and turn replies" do
   end
 end
 
+describe "ACP v1 slash command advertisements" do
+  it "keeps usable commands when other entries or optional inputs are malformed" do
+    entries = %([false,{"name":false,"description":"Invalid"},{"name":"incomplete"},{"name":"help","description":"Help","input":{"hint":false}},{"name":"plan","description":"Plan","input":{"hint":"Topic","_meta":false},"_meta":true}])
+    payload = %({"sessionUpdate":"available_commands_update","availableCommands":#{entries},"_meta":false})
+    params = ACP::Protocol::SessionUpdateParams.from_json(%({"sessionId":"root","update":#{payload},"_meta":false}))
+    params.meta.should be_nil
+    update = params.update.as(ACP::Protocol::AvailableCommandsUpdate)
+    update.available_commands.map(&.name).should eq(["help", "plan"])
+    update.available_commands.first.input.should be_nil
+    update.available_commands.last.input.not_nil!.hint.should eq("Topic")
+    update.available_commands.last.input.not_nil!.meta.should be_nil
+    update.available_commands.last.meta.should be_nil
+    update.meta.should be_nil
+
+    {"null", "false", "{}", "[]"}.each do |list|
+      empty = ACP::Protocol::SessionUpdate.from_json(%({"sessionUpdate":"available_commands_update","availableCommands":#{list}})).as(ACP::Protocol::AvailableCommandsUpdate)
+      empty.available_commands.should be_empty
+    end
+  end
+
+  {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
+    it "delivers a #{label} in command metadata through a typed stdio callback" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::Client.new(transport)
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+        client.initialize_connection
+        answer_identity_request(feed, outgoing, %({"sessionId":"root"}))
+        client.session_new("/work")
+
+        updates = Channel(ACP::Protocol::SessionUpdateParams).new(1)
+        client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+          updates.send(params) if params.update.is_a?(ACP::Protocol::AvailableCommandsUpdate)
+          nil
+        end
+        metadata = %({"example.test/samples":[{"number":#{number}}]})
+        command = %({"name":"plan","description":"Plan","input":{"hint":"Topic","_meta":#{metadata}},"_meta":#{metadata}})
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"available_commands_update","availableCommands":[#{command}],"_meta":#{metadata}},"_meta":#{metadata}}})
+        answer_identity_request(feed, outgoing, "{}")
+        client.ext_method("barrier")
+        select
+        when params = updates.receive
+          params.session_id.should eq("root")
+          update = params.update.as(ACP::Protocol::AvailableCommandsUpdate)
+          option = update.available_commands.first
+          option.name.should eq("plan")
+          option.input.not_nil!.hint.should eq("Topic")
+          {params, update, option, option.input.not_nil!}.each do |payload|
+            payload.meta_raw.not_nil!.json.should eq(metadata)
+          end
+          decoded = ACP::Protocol::SessionUpdateParams.from_json(params.to_json)
+          decoded.should eq(params)
+          decoded.hash.should eq(params.hash)
+          decoded.before_load_response = true
+          decoded.should_not eq(params)
+        else
+          fail "available commands update did not reach the typed callback"
+        end
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+end
+
 describe "ACP v1 exact session modes" do
   {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
     it "preserves a #{label} in mode snapshots and live updates" do
