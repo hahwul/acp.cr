@@ -1384,6 +1384,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/tool-calls#permission-options
     struct PermissionOption
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Unique identifier for this option (required).
       @[JSON::Field(key: "optionId")]
@@ -1396,16 +1398,13 @@ module ACP
       # Values: "allow_once", "allow_always", "reject_once", "reject_always"
       property kind : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @option_id : String,
         @name : String,
         @kind : String = "allow_once",
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Backward-compatible alias: `id` maps to `option_id`.
@@ -1424,62 +1423,57 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/tool-calls#requesting-permission
     struct ToolCallInfo
       include JSON::Serializable
+      include ToolCallRawPayloads
+      include ToolCallCollections
+      include LosslessMetadata
+      include WireValueEquality
+
+      ToolCallRawPayloads.payload_field input, "input"
 
       # The unique ID of the tool call.
       @[JSON::Field(key: "toolCallId")]
       property tool_call_id : String?
 
       # Human-readable title or summary of the tool call.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property title : String?
 
       # The category of tool being invoked.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property kind : String?
 
       # Current execution status.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property status : String?
 
-      # Content produced by the tool call.
-      property content : Array(JSON::Any)?
-
       # The name of the tool being invoked (backward compat).
-      @[JSON::Field(key: "toolName")]
+      @[JSON::Field(key: "toolName", converter: ::ACP::Protocol::OptionalContentValue(String))]
       property tool_name : String?
 
-      # The input/arguments to the tool call.
-      property input : JSON::Any?
-
       # The name of the tool being invoked.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(String))]
       property name : String?
-
-      # File locations affected by this tool call.
-      property locations : Array(JSON::Any)?
-
-      # Raw input parameters sent to the tool.
-      @[JSON::Field(key: "rawInput")]
-      property raw_input : JSON::Any?
-
-      # Raw output returned by the tool.
-      @[JSON::Field(key: "rawOutput")]
-      property raw_output : JSON::Any?
-
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
 
       def initialize(
         @tool_call_id : String? = nil,
         @title : String? = nil,
         @kind : String? = nil,
         @status : String? = nil,
-        @content : Array(JSON::Any)? = nil,
+        content : Array(JSON::Any)? = nil,
         @tool_name : String? = nil,
-        @input : JSON::Any? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        input : JSON::Any? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @name : String? = nil,
-        @locations : Array(JSON::Any)? = nil,
-        @raw_input : JSON::Any? = nil,
-        @raw_output : JSON::Any? = nil,
+        locations : Array(JSON::Any)? = nil,
+        raw_input : JSON::Any? = nil,
+        raw_output : JSON::Any? = nil,
       )
+        self.content = content
+        self.locations = locations
+        self.input = input
+        self.raw_input = raw_input
+        self.raw_output = raw_output
+        self.meta = meta
       end
     end
 
@@ -1487,6 +1481,8 @@ module ACP
     # The agent asks the client (user) for permission to perform an action.
     struct RequestPermissionParams
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The session this permission request belongs to (required).
       @[JSON::Field(key: "sessionId")]
@@ -1499,16 +1495,21 @@ module ACP
       # The options the user can choose from (required).
       property options : Array(PermissionOption)
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Request ID available in the client callback for matching cancellation.
+      @[JSON::Field(ignore: true)]
+      property request_id : RequestId?
 
       def initialize(
         @session_id : String,
         @tool_call : ToolCallInfo,
         @options : Array(PermissionOption),
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
+      end
+
+      protected def comparison_value
+        {super, @request_id}
       end
     end
 

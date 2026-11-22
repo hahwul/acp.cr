@@ -813,16 +813,24 @@ Sends a custom extension notification (no response expected).
 | Callback | Type | Description |
 |----------|------|-------------|
 | `on_update` | `UpdateHandler?` | Handle streaming session updates |
+| `on_request_permission` | `RequestPermissionHandler?` | Handle v1 permission requests with exact tool data |
 | `on_agent_request` | `AgentRequestHandler?` | Handle agent-initiated requests |
 | `on_notification` | `NotificationHandler?` | Handle non-update notifications |
 | `on_disconnect` | `(-> Nil)?` | Called on connection loss |
 
-For `session/request_permission`, return the JSON form of
-`Protocol::RequestPermissionResult.selected(option_id)` or
-`Protocol::RequestPermissionResult.cancelled`. Select an ID from the Agent's
-original options. Invalid results or selections return JSON-RPC `-32603`.
-Over stdio, repeated permission option fields return `-32602` before the
-callback runs.
+Return `Protocol::RequestPermissionResult.selected(option_id)` or
+`Protocol::RequestPermissionResult.cancelled` from `on_request_permission`.
+The callback receives `RequestPermissionParams` with the original request ID.
+The tool call exposes `raw_input_raw`, `raw_output_raw`, `content_raw`, and
+`locations_raw` for values that need exact JSON. Its `meta_raw` accessor also
+preserves exact extension values, as do those on the request and its options.
+A selected ID must appear in the Agent's original options. Invalid results or
+selections return JSON-RPC `-32603`. Over stdio, repeated permission option
+fields return `-32602` before the callback runs.
+
+With `on_request_permission` unset, `on_agent_request` handles representable
+permission requests and returns the JSON form of the same result. Without a
+registered handler, the client returns a cancelled outcome.
 [ACP v1 Permissions](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission)
 
 For an accepted URL elicitation, `on_elicitation_complete` receives the
