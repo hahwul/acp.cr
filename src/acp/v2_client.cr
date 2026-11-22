@@ -102,7 +102,6 @@ module ACP
         end
 
         def initialize_v2(offer : Wire::InitializeParams) : Wire::InitializeResult
-          method = AgentMethod::INITIALIZE
           outcome = nil
           observe = ->(response : PendingResponse) do
             outcome = begin
@@ -117,9 +116,10 @@ module ACP
             end
             nil
           end
-          builder = ->(id : Int64) { Protocol.build_request(id, method, offer) }
           begin
-            send_and_await_response(method, builder, on_response: observe)
+            send_initialization_offer(offer, on_response: observe)
+          rescue ex : FrameTooLargeError
+            raise ex
           rescue ex : RequestTimeoutError | TransportError
             close
             raise ex
@@ -461,7 +461,7 @@ module ACP
       # success. An Agent error leaves the last successful handshake active.
       def initialize_connection(*, info : Wire::Implementation? = nil,
                                 capabilities : Wire::ClientCapabilities? = nil,
-                                meta : Hash(String, JSON::Any) | Nil | InheritMetadata = InheritMetadata.new) : Wire::InitializeResult
+                                meta : Hash(String, JSON::Any) | Protocol::RawJson | Nil | InheritMetadata = InheritMetadata.new) : Wire::InitializeResult
         _, started = @initializing.compare_and_set(false, true)
         raise InvalidStateError.new("ACP v2 initialization is already in progress") unless started
 
@@ -470,10 +470,13 @@ module ACP
           if @terminal_auth_running.get
             raise InvalidStateError.new("Cannot initialize during terminal authentication")
           end
-          previous_offer = @connection.initialization_offer
-          metadata = meta.is_a?(InheritMetadata) ? previous_offer.try(&.meta) : meta
-          offer = Wire::InitializeParams.new(info || previous_offer.try(&.info) || @info,
-            capabilities: capabilities || previous_offer.try(&.capabilities) || @capabilities, meta: metadata)
+          offer = @connection.initialization_offer || Wire::InitializeParams.new(@info, capabilities: @capabilities)
+          offer.info = info if info
+          offer.capabilities = capabilities if capabilities
+          case meta
+          when Protocol::RawJson            then offer.meta_raw = meta
+          when Hash(String, JSON::Any), Nil then offer.meta = meta
+          end
           @connection.initialize_v2(offer)
         rescue ex : JsonRpcError
           close if !previous && ex.unsupported_protocol_version?
@@ -1022,7 +1025,7 @@ module ACP
         replacement.on_system_prompt_mode = on_system_prompt_mode
         replacement.on_prompt_content_type = on_prompt_content_type
         begin
-          replacement.initialize_connection(meta: @connection.initialization_offer.try(&.meta))
+          replacement.initialize_connection(meta: @connection.initialization_offer.try(&.meta_raw))
           close
         rescue ex
           replacement.close rescue nil
@@ -1041,10 +1044,11 @@ module ACP
       capabilities : Protocol::V2::ClientCapabilities = Protocol::V2::ClientCapabilities.new,
       env : Process::Env = nil,
       chdir : String? = nil,
+      meta : Hash(String, JSON::Any) | Protocol::RawJson | Nil = nil,
     ) : Client
       client = Client.new(ProcessTransport.new(command, args, env, chdir), info, capabilities)
       begin
-        client.initialize_connection
+        client.initialize_connection(meta: meta)
       rescue ex
         client.close rescue nil
         raise ex

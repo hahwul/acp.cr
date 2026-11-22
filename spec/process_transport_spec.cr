@@ -139,7 +139,15 @@ describe "ACP terminal authentication" do
         case "$wire" in
           *'"method":"initialize"'*)
             case "$wire" in
-              *'"clientInfo":'*'"title":"Test Client"'*'"example.test/client":true'*) ;;
+              *'"clientInfo":'*'"title":"Test Client"'*) ;;
+              *) exit 9 ;;
+            esac
+            case "$wire" in
+              *'"example.test/client":true'*) ;;
+              *) exit 9 ;;
+            esac
+            case "$wire" in
+              *'"example.test/offer":18446744073709551615'*) ;;
               *) exit 9 ;;
             esac
             printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"authMethods":[{"type":"terminal","id":"login","name":"Terminal login","args":["--login","two words"],"env":{"ACP_SPEC_LOGIN":"interactive"}},{"type":"terminal","id":"fail","name":"Fail","args":["--fail"]}]}}'
@@ -154,7 +162,8 @@ describe "ACP terminal authentication" do
 
     caps = ACP::Protocol::ClientCapabilities.new(auth: ACP::Protocol::ClientAuthCapabilities.new(terminal: true))
     info = ACP::Protocol::ClientInfo.new("spec-client", "1", title: "Test Client", meta: {"example.test/client" => JSON::Any.new(true)})
-    client = ACP.connect("/bin/sh", [script, "base argument"], env: {"ACP_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps, client_info: info)
+    meta = ACP::Protocol::RawJson.from_json(%({"example.test/offer":18446744073709551615}))
+    client = ACP.connect("/bin/sh", [script, "base argument"], env: {"ACP_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps, client_info: info, meta: meta)
     client.request_timeout = 2.0
     notification_handler = ->(_method : String, _params : JSON::Any?) { nil }
     client.on_notification = notification_handler
@@ -241,6 +250,10 @@ describe "ACP v2 terminal authentication" do
               *'"protocolVersion":2'*'"terminal":{}'*) ;;
               *) exit 7 ;;
             esac
+            case "$wire" in
+              *'"example.test/offer":0.123456789012345678901'*) ;;
+              *) exit 7 ;;
+            esac
             printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"info":{"name":"fixture","version":"1"},"capabilities":{"session":{}},"authMethods":[{"type":"terminal","methodId":"login","name":"Terminal login","args":["--login","two words"],"env":[{"name":"ACP_V2_SPEC_LOGIN","value":"previous"},{"name":"ACP_V2_SPEC_LOGIN","value":"interactive"}]}]}}'
             ;;
           *'"method":"session/new"'*)
@@ -256,7 +269,8 @@ describe "ACP v2 terminal authentication" do
         terminal: ACP::Protocol::V2::Capability.new
       )
     )
-    client = ACP::V2.connect("/bin/sh", [script, "base argument"], env: {"ACP_V2_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps)
+    meta = ACP::Protocol::RawJson.from_json(%({"example.test/offer":0.123456789012345678901}))
+    client = ACP::V2.connect("/bin/sh", [script, "base argument"], env: {"ACP_V2_SPEC_LOGIN" => "base"}, chdir: directory, capabilities: caps, meta: meta)
     client.request_timeout = 2.0
     expect_raises(ACP::AuthenticationError, /declined/) { client.authenticate_terminal("login") { false } }
     File.exists?(marker).should be_false

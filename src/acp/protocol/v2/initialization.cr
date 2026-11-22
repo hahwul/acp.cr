@@ -455,6 +455,8 @@ module ACP
       # Parameters of an ACP v2 initialize request.
       struct InitializeParams
         include JSON::Serializable
+        include LosslessMetadata
+        include WireValueEquality
 
         # Highest supported protocol version offered in the handshake.
         @[JSON::Field(key: "protocolVersion")]
@@ -466,17 +468,18 @@ module ACP
         # Client features.
         property capabilities : ClientCapabilities = ClientCapabilities.new
 
-        # Extension metadata.
-        @[JSON::Field(key: "_meta")]
-        property meta : Hash(String, JSON::Any)?
-
         # Creates an initialization offer in the ACP v2 format.
         def initialize(
           @info : Implementation,
           @protocol_version : UInt16 = VERSION,
           @capabilities : ClientCapabilities = ClientCapabilities.new,
-          @meta : Hash(String, JSON::Any)? = nil,
+          meta : Hash(String, JSON::Any)? = nil,
         )
+          self.meta = meta
+        end
+
+        protected def comparison_value
+          {@protocol_version, @info, @capabilities, comparable_json(meta_raw)}
         end
       end
 

@@ -89,6 +89,7 @@ module ACP
   # - `env` — optional environment variables for the agent process.
   # - `chdir` — optional working directory for the agent process.
   # - `client_info` — full implementation metadata to send during initialization.
+  # - `meta` — optional extension metadata for the initialize request.
   #
   # Spawns the agent, wraps it in a `Client`, performs the `initialize`
   # handshake, and returns the ready-to-use (initialized) client — so callers
@@ -110,6 +111,7 @@ module ACP
     chdir : String? = nil,
     *,
     client_info : Protocol::ClientInfo? = nil,
+    meta : Hash(String, JSON::Any) | Protocol::RawJson | Nil = nil,
   ) : Client
     transport = ProcessTransport.new(
       command,
@@ -127,7 +129,7 @@ module ACP
     )
 
     begin
-      client.initialize_connection
+      client.initialize_connection(meta: meta)
     rescue ex
       # Don't leak the spawned agent process if the handshake fails.
       client.close rescue nil

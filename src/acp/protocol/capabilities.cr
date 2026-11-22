@@ -757,6 +757,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/initialization#implementation-information
     struct ClientInfo
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Intended for programmatic or logical use, but can be used as a
       # display name fallback if title isn't present.
@@ -770,11 +772,8 @@ module ACP
       # Version of the implementation.
       property version : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta", converter: ::ACP::Protocol::OptionalMetadata)]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@name : String, @version : String, @title : String? = nil, @meta : Hash(String, JSON::Any)? = nil)
+      def initialize(@name : String, @version : String, @title : String? = nil, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 
