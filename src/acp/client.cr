@@ -299,8 +299,12 @@ module ACP
     @session_lifecycle_order = 0_u64
     @late_session_retirements = {} of String => LateSessionRetirement
     private MAX_LATE_SESSION_RETIREMENTS = 128
-    private MAX_EARLY_PLAN_IDS           =  64
-    private MAX_EARLY_PLAN_ID_SIZE       = 64 * 1024
+    private SESSION_SETUP_METHODS        = {
+      Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_LOAD,
+      Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK,
+    }
+    private MAX_EARLY_PLAN_IDS     = 64
+    private MAX_EARLY_PLAN_ID_SIZE = 64 * 1024
 
     # V1 session IDs learned through successful setup, guarded by @pending_mutex.
     @known_session_ids = Set(String).new
@@ -787,11 +791,15 @@ module ACP
       system_prompt : Protocol::SystemPrompt? = nil,
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionNewResult
-      ensure_state(ClientState::Initialized, "session/new")
-      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
-
       params = Protocol::SessionNewParams.new(cwd, mcp_servers,
         additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+      session_new(params)
+    end
+
+    # Creates and attaches a session with typed setup parameters.
+    def session_new(params : Protocol::SessionNewParams) : Protocol::SessionNewResult
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::SESSION_NEW)
+      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
       result = attach_session(Protocol::AgentMethod::SESSION_NEW, params, Protocol::SessionNewResult)
 
       ClientLog.info { "Session created: #{result.session_id}" }
@@ -818,14 +826,19 @@ module ACP
       system_prompt : Protocol::SystemPrompt? = nil,
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionLoadResult
-      ensure_state(ClientState::Initialized, "session/load")
+      params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+      session_load(params)
+    end
+
+    # Loads an existing session and replays history with typed setup parameters.
+    def session_load(params : Protocol::SessionLoadParams) : Protocol::SessionLoadResult
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::SESSION_LOAD)
       unless @agent_capabilities.try(&.load_session?)
         raise InvalidStateError.new("The Agent did not advertise loadSession")
       end
-      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
-
-      params = Protocol::SessionLoadParams.new(session_id, cwd, mcp_servers,
-        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
+      session_id = params.session_id
       result = attach_session(Protocol::AgentMethod::SESSION_LOAD, params, Protocol::SessionLoadResult, session_id)
 
       ClientLog.info { "Session loaded: #{session_id}" }
@@ -1077,14 +1090,19 @@ module ACP
       system_prompt : Protocol::SystemPrompt? = nil,
       config_options : Array(Protocol::InitialSessionConfigOption)? = nil,
     ) : Protocol::SessionResumeResult
-      ensure_state(ClientState::Initialized, "session/resume")
+      params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
+        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+      session_resume(params)
+    end
+
+    # Resumes an existing session with typed setup parameters.
+    def session_resume(params : Protocol::SessionResumeParams) : Protocol::SessionResumeResult
+      ensure_state(ClientState::Initialized, Protocol::AgentMethod::SESSION_RESUME)
       unless @agent_capabilities.try(&.session_capabilities).try(&.resume?)
         raise InvalidStateError.new("The Agent did not advertise sessionCapabilities.resume")
       end
-      validate_session_setup(cwd, additional_directories, system_prompt, mcp_servers, config_options)
-
-      params = Protocol::SessionResumeParams.new(session_id, cwd, mcp_servers,
-        additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
+      validate_session_setup(params.cwd, params.additional_directories, params.system_prompt, params.mcp_servers, params.config_options)
+      session_id = params.session_id
       result = attach_session(Protocol::AgentMethod::SESSION_RESUME, params, Protocol::SessionResumeResult, session_id)
 
       ClientLog.info { "Session resumed: #{session_id}" }
@@ -1555,7 +1573,6 @@ module ACP
 
     # Applies an internal cache update in wire order after a result decodes.
     private def send_cached_request(method : String, params : JSON::Serializable, type : T.class, &apply : T, String -> Nil) : T forall T
-      message_builder = ->(id : Int64) { Protocol.build_request(id, method, params) }
       decoded = nil
       observe = ->(payload : String) do
         begin
@@ -1568,8 +1585,7 @@ module ACP
         nil
       end
 
-      response = send_and_await_response(method, message_builder, on_result: observe,
-        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: true)
+      response = send_exact_request(method, params, on_result: observe)
       cached_result = decoded
       return cached_result if cached_result
 
@@ -1581,13 +1597,19 @@ module ACP
     end
 
     private def send_exact_request(method : String, params : JSON::Serializable, *, timeout : Float64? = @request_timeout,
+                                   on_result : (String -> Nil)? = nil,
                                    on_response : (PendingResponse -> Nil)? = nil) : PendingResponse
       raw = Protocol::RawJson.from_json(Protocol::WireFrame.encode(params))
       projection = raw.to_json_any?
       wire_params = raw unless projection && Protocol::WireFrame.encode(projection) == raw.json
+      if wire_params && SESSION_SETUP_METHODS.includes?(method) && !Protocol::WireFrame.unique_members?(raw.json)
+        raise ArgumentError.new("ACP session setup requires unique JSON member names")
+      end
       routing_view = projection || Protocol::WireFrame.new(raw.json).project_for_routing
       builder = ->(id : Int64) { Protocol.build_request_raw(id, method, routing_view) }
-      send_and_await_response(method, builder, timeout, exact_response: true, wire_params: wire_params, require_exact_params: true, on_response: on_response)
+      send_and_await_response(method, builder, timeout, on_result: on_result, on_response: on_response,
+        check_fork_cursor: method == Protocol::AgentMethod::SESSION_FORK, exact_response: true,
+        wire_params: wire_params, require_exact_params: true)
     end
 
     # Core implementation for sending a JSON-RPC request and awaiting
@@ -1671,8 +1693,7 @@ module ACP
       resource_offer = v1_resource_offer(params) if initialize && !v2_wire?
       v2_request = v2_wire? && !initialize
       changes_choice = @session_choices.change_method?(method)
-      session_setup = method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_LOAD,
-        Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
+      session_setup = SESSION_SETUP_METHODS.includes?(method)
       entity_cancel = @subagent_registry.entity_cancel?(method)
       arm_at_write = initialize || session_setup || !!closing_session || v2_wire? || changes_choice || entity_cancel
       @pending_mutex.synchronize do
@@ -1812,8 +1833,7 @@ module ACP
 
     # Only session setup can publish an MCP registration to the Agent.
     private def mcp_declarations(method : String, params : Hash(String, JSON::Any)?) : Array(String)?
-      return unless method.in?(Protocol::AgentMethod::SESSION_NEW, Protocol::AgentMethod::SESSION_LOAD,
-                      Protocol::AgentMethod::SESSION_RESUME, Protocol::AgentMethod::SESSION_FORK)
+      return unless SESSION_SETUP_METHODS.includes?(method)
       return unless servers = params.try(&.["mcpServers"]?).try(&.as_a?)
 
       ids = servers.compact_map do |entry|

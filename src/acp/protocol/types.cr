@@ -305,6 +305,7 @@ module ACP
     # when it also advertises `sessionCapabilities.systemPrompt.mode.override`.
     struct SystemPrompt
       include JSON::Serializable
+      include LosslessMetadata
 
       # How the agent combines `content` with its own instructions:
       # "append", "override", or a future/`_`-prefixed mode (required).
@@ -314,15 +315,12 @@ module ACP
       # allowed for now.
       property content : Array(ContentBlock)
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @mode : String,
         @content : Array(ContentBlock),
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # A `mode: "append"` prompt made of one text block.
@@ -334,6 +332,8 @@ module ACP
       def self.override(text : String) : SystemPrompt
         new("override", [TextContentBlock.new(text).as(ContentBlock)])
       end
+
+      def_equals_and_hash @mode, @content, metadata_comparison
     end
 
     # ─── Session/New Method ───────────────────────────────────────────
@@ -342,6 +342,7 @@ module ACP
     # Params for the `session/new` method (Client → Agent).
     struct SessionNewParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The current working directory (absolute path).
       property cwd : String
@@ -365,18 +366,15 @@ module ACP
       @[JSON::Field(key: "configOptions")]
       property config_options : Array(InitialSessionConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.meta = meta
       end
 
       # Convenience constructor that accepts typed McpServer values.
@@ -389,6 +387,8 @@ module ACP
           additional_directories: additional_directories, system_prompt: system_prompt, config_options: config_options)
         inst
       end
+
+      def_equals_and_hash @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # ─── Session Mode Types ───────────────────────────────────────────
@@ -1014,6 +1014,7 @@ module ACP
     # Params for the `session/load` method (Client → Agent).
     struct SessionLoadParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID to load/resume (required).
       @[JSON::Field(key: "sessionId")]
@@ -1040,20 +1041,19 @@ module ACP
       @[JSON::Field(key: "configOptions")]
       property config_options : Array(InitialSessionConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # Result of the `session/load` method. Contains mode/config state
@@ -1094,6 +1094,7 @@ module ACP
     # responding — the result returns once the session is ready.
     struct SessionResumeParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # The session ID to resume (required).
       @[JSON::Field(key: "sessionId")]
@@ -1120,20 +1121,19 @@ module ACP
       @[JSON::Field(key: "configOptions")]
       property config_options : Array(InitialSessionConfigOption)?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @session_id : String,
         @cwd : String,
         @mcp_servers : Array(JSON::Any) = [] of JSON::Any,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
         @additional_directories : Array(String)? = nil,
         @system_prompt : SystemPrompt? = nil,
         @config_options : Array(InitialSessionConfigOption)? = nil,
       )
+        self.meta = meta
       end
+
+      def_equals_and_hash @session_id, @cwd, @mcp_servers, @additional_directories, @system_prompt, @config_options, metadata_comparison
     end
 
     # Result of the `session/resume` method.
