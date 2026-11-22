@@ -475,6 +475,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-config-options
     struct ConfigOptionGroup
       include JSON::Serializable
+      include LosslessMetadata
+      include ConfigOptionEquality
 
       # Unique identifier for this group (required). Per the ACP schema
       # (`SessionConfigSelectGroup`) this is carried on the wire under the key
@@ -488,16 +490,14 @@ module ACP
       # The values in this group (required).
       property options : Array(ConfigOptionValue)
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a named group with its selectable values.
       def initialize(
         @group : String,
         @name : String,
         @options : Array(ConfigOptionValue) = [] of ConfigOptionValue,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Backward-compatible alias. This identifier used to be exposed (and
@@ -518,6 +518,8 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-config-options#configoption
     struct ConfigOption
       include JSON::Serializable
+      include LosslessMetadata
+      include ConfigOptionEquality
 
       # Unique identifier for this config option (required).
       # Maps to the Rust SDK's `SessionConfigId`.
@@ -545,17 +547,13 @@ module ACP
       @[JSON::Field(key: "currentValue")]
       @current_value : String | Bool?
 
-      # Raw wire form of the selectable values. Per the ACP schema
-      # (`SessionConfigSelect.options` -> `SessionConfigSelectOptions`) this is
-      # a SINGLE `"options"` array that is EITHER a flat list of
-      # `SessionConfigSelectOption` values OR a list of
-      # `SessionConfigSelectGroup` groups. There is NO separate `"groups"` key.
-      # We keep the raw array here and expose typed `options`/`groups` views.
-      # Exposed read-only: the typed views and this wire array are derived from
-      # each other at construction / deserialization, so a public setter could
-      # silently desync them. Construct a new ConfigOption to change the values.
-      @[JSON::Field(key: "options")]
-      getter options_raw : Array(JSON::Any)?
+      @[JSON::Field(key: "options", converter: ::ACP::Protocol::SelectableOptionArray)]
+      @options_wire : PreservedJson?
+
+      # Selectable values or groups projected into JSON::Any.
+      def options_raw : Array(JSON::Any)?
+        @options_wire.try(&.value).try(&.as_a?)
+      end
 
       # Flat list of available values for this option (nil when grouped).
       # Maps to the Rust SDK's `SessionConfigSelectOptions::Ungrouped`.
@@ -568,10 +566,7 @@ module ACP
       @[JSON::Field(ignore: true)]
       getter groups : Array(ConfigOptionGroup)? = nil
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a configuration option with either flat or grouped values.
       def initialize(
         @id : String,
         @name : String,
@@ -581,27 +576,30 @@ module ACP
         @groups : Array(ConfigOptionGroup)? = nil,
         @description : String? = nil,
         @category : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         # Per the ACP schema an option's value set is EITHER flat or grouped,
         # never both. Fail fast instead of silently dropping one on the wire.
         if (o = @options) && !o.empty? && (g = @groups) && !g.empty?
           raise ArgumentError.new("ConfigOption accepts either `options` or `groups`, not both")
         end
-        @options_raw = build_options_raw
+        if choices = @groups || @options
+          @options_wire = SelectableOptionArray.from_json(JSON::PullParser.new(WireFrame.encode(choices)))
+        end
+        self.meta = meta
       end
 
       # Populate the typed `options`/`groups` views from the raw wire array
       # after JSON deserialization. A group element is identified by the
       # presence of the `"group"` key (per `SessionConfigSelectGroup`).
       def after_initialize : Nil
-        raw = @options_raw
-        return unless raw
-        if raw.any? { |item| item.as_h?.try(&.has_key?("group")) }
-          @groups = raw.compact_map { |item| ConfigOptionGroup.from_json(item.to_json) rescue nil }
+        return unless raw = @options_wire.try(&.raw.elements?)
+
+        if raw.any?(&.field("group"))
+          @groups = raw.compact_map { |item| ConfigOptionGroup.from_json(item.json) rescue nil }
           @options = nil
         else
-          @options = raw.compact_map { |item| ConfigOptionValue.from_json(item.to_json) rescue nil }
+          @options = raw.compact_map { |item| ConfigOptionValue.from_json(item.json) rescue nil }
           @groups = nil
         end
       end
@@ -655,14 +653,9 @@ module ACP
         end
       end
 
-      # Builds the raw wire `options` array from whichever typed view is set,
-      # so both flat and grouped options serialize under the single spec key.
-      private def build_options_raw : Array(JSON::Any)?
-        if grps = @groups
-          grps.map { |g| JSON.parse(g.to_json) }
-        elsif opts = @options
-          opts.map { |o| JSON.parse(o.to_json) }
-        end
+      protected def comparison_value
+        # The typed lists can differ even when the wire array is identical.
+        {super, comparable_json(@options), comparable_json(@groups)}
       end
     end
 
@@ -674,9 +667,9 @@ module ACP
     # `boolean` with a Bool one). Per session-config-options a Client
     # "SHOULD ignore" an option with an unrecognized `type`, and one such
     # entry must not fail the whole message.
-    def self.parse_config_options(items : Array(JSON::Any)) : Array(ConfigOption)
+    def self.parse_config_options(items : Array(JSON::Any) | Array(RawJson)) : Array(ConfigOption)
       items.compact_map do |item|
-        option = ConfigOption.from_json(item.to_json)
+        option = ConfigOption.from_json(WireFrame.encode(item))
         case option.config_type
         when "select"  then option if option.boolean_value.nil?
         when "boolean" then option unless option.boolean_value.nil?
@@ -689,7 +682,10 @@ module ACP
     # JSON converter for `configOptions` result fields; see `parse_config_options`.
     module ConfigOptionsConverter
       def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)
-        Protocol.parse_config_options(RequiredOptionList.from_json(pull))
+        unless pull.kind.begin_array?
+          raise JSON::ParseException.new("Configuration options must be an array", *pull.location)
+        end
+        Protocol.parse_config_options(RawJson.new(pull).elements?.not_nil!)
       end
 
       def self.to_json(value : Array(ConfigOption), json : JSON::Builder) : Nil
@@ -700,7 +696,7 @@ module ACP
     # :nodoc:
     module OptionalConfigOptions
       def self.from_json(pull : JSON::PullParser) : Array(ConfigOption)?
-        return Protocol.parse_config_options(OptionalOptionList.from_json(pull)) if pull.kind.begin_array?
+        return ConfigOptionsConverter.from_json(pull) if pull.kind.begin_array?
 
         pull.skip
         nil

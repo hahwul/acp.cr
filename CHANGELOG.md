@@ -18,6 +18,7 @@
 - `ProcessTransport.new` (and so `ACP.connect`) raises `TransportError`, with the original error as `cause`, when the agent can't be started (missing command, bad `chdir`), instead of `File::NotFoundError`
 
 ### Bug Fixes
+- Preserve ACP v1 configuration options, groups, and selectable values when their extension metadata contains exact numbers.
 - Preserve ACP v1 extension metadata in load, resume, configuration change, and prompt replies, including prompt token usage metadata.
 - Preserve exact extension metadata in ACP session title, archive, unarchive, close, and delete replies, and in v1 status and options replies.
 - Preserve exact extension metadata in ACP v2 tool call and terminal cancellation replies.

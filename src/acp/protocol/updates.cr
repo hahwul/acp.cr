@@ -722,29 +722,40 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/session-config-options#from-the-agent
     struct ConfigOptionUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include ConfigOptionEquality
 
-      # The full set of configuration options and their current values.
-      # Stored as `Array(JSON::Any)` for wire compatibility; use
-      # `typed_config_options` for parsed `ConfigOption` structs.
       @[JSON::Field(key: "configOptions", converter: ::ACP::Protocol::RequiredOptionList)]
-      property config_options : Array(JSON::Any) = [] of JSON::Any
+      @config_options_wire = PreservedJson.new(JSON::Any.new([] of JSON::Any))
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(
-        @config_options : Array(JSON::Any) = [] of JSON::Any,
-        @meta : Hash(String, JSON::Any)? = nil,
-      )
+      # Creates an update with replacement configuration options.
+      def initialize(config_options : Array(JSON::Any) = [] of JSON::Any, meta : Hash(String, JSON::Any)? = nil)
         @session_update = "config_option_update"
+        self.config_options = config_options
+        self.meta = meta
+      end
+
+      # Representable fields in the full configuration option list.
+      def config_options : Array(JSON::Any)
+        @config_options_wire.value.not_nil!.as_a
+      end
+
+      # Replaces the full configuration option list.
+      def config_options=(options : Array(JSON::Any)) : Array(JSON::Any)
+        @config_options_wire = PreservedJson.new(JSON::Any.new(options))
+        options
+      end
+
+      # The configuration option objects with their exact JSON values.
+      def config_options_raw : RawJson
+        @config_options_wire.raw
       end
 
       # Attempts to parse `config_options` items as typed `ConfigOption` values.
       # Entries that fail to deserialize or have an unrecognized `type` are
       # skipped (see `Protocol.parse_config_options`).
       def typed_config_options : Array(ConfigOption)
-        Protocol.parse_config_options(@config_options)
+        Protocol.parse_config_options(config_options_raw.elements?.not_nil!)
       end
     end
 

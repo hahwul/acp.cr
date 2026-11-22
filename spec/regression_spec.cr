@@ -7122,6 +7122,126 @@ describe "ACP v1 exact session and turn replies" do
   end
 end
 
+describe "ACP v1 exact configuration options" do
+  {"wide integer" => "18446744073709551615", "precise decimal" => "1.23000000000000000001"}.each do |label, number|
+    it "keeps flat and grouped choices with a #{label} in extension metadata" do
+      with_wide_stdio do |transport, feed, outgoing|
+        client = ACP::Client.new(transport)
+        client.request_timeout = 2.0
+        answer_identity_request(feed, outgoing, %({"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"options":{}}}}))
+        client.initialize_connection
+
+        metadata = %({"example.test/number":#{number}})
+        values = %([{"value":"fast","name":"Fast","_meta":#{metadata}},{"value":"large","name":"Large"}])
+        flat = %({"id":"model","name":"Model","type":"select","currentValue":"fast","options":#{values},"_meta":#{metadata}})
+        group = %({"group":"models","name":"Models","options":#{values},"_meta":#{metadata}})
+        grouped = %({"id":"grouped","name":"Grouped","type":"select","currentValue":"fast","options":[#{group}]})
+        config = "[#{flat},#{grouped}]"
+        check_options = ->(options : Array(ACP::Protocol::ConfigOption)) do
+          options.map(&.id).should eq(["model", "grouped"])
+          options[0].options.not_nil!.map(&.value).should eq(["fast", "large"])
+          options[1].groups.not_nil!.map(&.group).should eq(["models"])
+          options[0].meta_raw.not_nil!.json.should eq(metadata)
+          options[1].groups.not_nil!.first.meta_raw.not_nil!.json.should eq(metadata)
+          options.each { |option| option.all_values.first.meta_raw.not_nil!.json.should eq(metadata) }
+          nil
+        end
+
+        answer_identity_request(feed, outgoing, %({"configOptions":#{config}}))
+        check_options.call(client.session_options("/work").config_options.not_nil!)
+        answer_identity_request(feed, outgoing, %({"sessionId":"root","configOptions":#{config}}))
+        check_options.call(client.session_new("/work").config_options.not_nil!)
+        check_options.call(client.session_config_options.not_nil!)
+
+        updates = Channel(ACP::Protocol::ConfigOptionUpdate).new(1)
+        client.on_update = ->(params : ACP::Protocol::SessionUpdateParams) do
+          if update = params.update.as?(ACP::Protocol::ConfigOptionUpdate)
+            updates.send(update)
+          end
+          nil
+        end
+        mixed = %([false,#{flat},#{grouped}])
+        feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"root","update":{"sessionUpdate":"config_option_update","configOptions":#{mixed},"_meta":#{metadata}}}})
+        select
+        when update = updates.receive
+          check_options.call(update.typed_config_options)
+          update.meta_raw.not_nil!.json.should eq(metadata)
+          update.config_options_raw.json.should eq(config)
+          update.config_options.size.should eq(2)
+          update.config_options.first.as_h["name"] = JSON::Any.new("Renamed")
+          update.typed_config_options.first.name.should eq("Renamed")
+          check_options.call(update.typed_config_options)
+        when timeout(2.seconds)
+          fail "configuration option update did not arrive"
+        end
+        check_options.call(client.session_config_options.not_nil!)
+
+        changed = config.sub(%("currentValue":"fast"), %("currentValue":"large"))
+        answer_identity_request(feed, outgoing, %({"configOptions":#{changed}}))
+        result = client.session_set_config_option("model", "large")
+        check_options.call(result.config_options)
+        result.config_options.first.current_value.should eq("large")
+        check_options.call(client.session_config_options.not_nil!)
+        client.session_config_options.not_nil!.first.current_value.should eq("large")
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "builds a configuration option from a typed value carrying exact metadata" do
+    metadata = %({"example.test/count":18446744073709551615})
+    value = ACP::Protocol::ConfigOptionValue.from_json(%({"value":"fast","name":"Fast","_meta":#{metadata}}))
+    option = ACP::Protocol::ConfigOption.new("model", "Model", current_value: "fast", options: [value])
+    option.options_raw.not_nil!.first["name"].should eq("Fast")
+    option.options_raw.not_nil!.first.as_h["name"] = JSON::Any.new("Renamed")
+    option.to_json.should contain(%("name":"Renamed"))
+    option.to_json.should contain(%("_meta":#{metadata}))
+  end
+
+  it "keeps equality and hashing for configuration options that fit in JSON::Any" do
+    left = ACP::Protocol::ConfigOption.from_json(%({"id":"model","name":"Model","options":[{"value":"fast","name":"Fast"}]}))
+    right = ACP::Protocol::ConfigOption.from_json(%({"id":"model","name":"Model","options":[{"name":"Fast","value":"fast"}]}))
+    left.should eq(right)
+    left.hash.should eq(right.hash)
+
+    options = [JSON.parse(left.to_json)]
+    update = ACP::Protocol::ConfigOptionUpdate.new(options)
+    decoded = ACP::Protocol::ConfigOptionUpdate.from_json(update.to_json)
+    update.should eq(decoded)
+    update.hash.should eq(decoded.hash)
+  end
+
+  it "compares retained configuration values independently of projection object IDs" do
+    choice = %({"id":"model","name":"Model","options":[{"name":"Fast","value":"fast","_meta":{"samples":[{"number":1.25e0}]}}]})
+    first = ACP::Protocol::ConfigOption.from_json(choice)
+    second = ACP::Protocol::ConfigOption.from_json(choice.sub("1.25e0", "1.25"))
+    first.should eq(second)
+    first.hash.should eq(second.hash)
+
+    wire = %({"sessionUpdate":"config_option_update","configOptions":[#{choice}]})
+    first_update = ACP::Protocol::ConfigOptionUpdate.from_json(wire)
+    second_update = ACP::Protocol::ConfigOptionUpdate.from_json(wire)
+    first_update.should eq(second_update)
+    first_update.hash.should eq(second_update.hash)
+
+    wide = wire.sub("1.25e0", "18446744073709551615")
+    ACP::Protocol::ConfigOptionUpdate.from_json(wide).should eq(ACP::Protocol::ConfigOptionUpdate.from_json(wide))
+    ACP::Protocol::ConfigOptionUpdate.from_json(wide).should_not eq(ACP::Protocol::ConfigOptionUpdate.from_json(wide.sub("18446744073709551615", "18446744073709551614")))
+  end
+
+  it "includes the typed flat and grouped lists in configuration option comparison" do
+    flat = ACP::Protocol::ConfigOption.new("model", "Model", options: [] of ACP::Protocol::ConfigOptionValue)
+    grouped = ACP::Protocol::ConfigOption.new("model", "Model", groups: [] of ACP::Protocol::ConfigOptionGroup)
+    flat.should_not eq(grouped)
+
+    first = ACP::Protocol::ConfigOption.new("model", "Model", options: [ACP::Protocol::ConfigOptionValue.new("fast", "Fast")])
+    second = ACP::Protocol::ConfigOption.from_json(first.to_json)
+    second.options.not_nil![0] = ACP::Protocol::ConfigOptionValue.new("large", "Large")
+    first.should_not eq(second)
+  end
+end
+
 describe "ACP result identities" do
   it "requires unambiguous strings in the typed result decoders" do
     [ACP::Protocol::SessionNewResult, ACP::Protocol::V2::SessionNewResult].each do |type|
