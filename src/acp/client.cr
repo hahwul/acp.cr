@@ -2403,9 +2403,19 @@ module ACP
       end
 
       params_json = wire_frame.try(&.params_json)
-      if !v2_wire? && (required = v1_resource_requirement(method_name)) && !@v1_resource_methods.includes?(required)
-        rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::METHOD_NOT_FOUND,
-          "Client did not advertise support for: #{method_name}", JSON::Any.new(method_name))
+      if !v2_wire? && (required = v1_resource_requirement(method_name))
+        if !@v1_resource_methods.includes?(required)
+          rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::METHOD_NOT_FOUND,
+            "Client did not advertise support for: #{method_name}", JSON::Any.new(method_name))
+        else
+          repeated = wire_frame.try { |frame| Protocol::WireFrame.repeated_members(frame.json, "jsonrpc", "method", "params") }
+          if msg["jsonrpc"]?.try(&.as_s?) != "2.0" || repeated.try(&.includes?("jsonrpc")) || msg["result"]? || msg["error"]?
+            rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_REQUEST, "Invalid JSON-RPC resource request")
+          elsif repeated && !repeated.empty?
+            rejection = Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Ambiguous resource request fields")
+          end
+          params_json ||= Protocol::WireFrame.field(wire_frame.json, "params") if wire_frame
+        end
       elsif wire_frame && method_name == Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
         exact_params = params_json || Protocol::WireFrame.field(wire_frame.json, "params")
         if ambiguous_permission_request?(wire_frame, exact_params)
@@ -2528,19 +2538,19 @@ module ACP
       when Protocol::ClientMethod::SESSION_REQUEST_PERMISSION
         handle_permission_request(params, params_json)
       when Protocol::ClientMethod::FS_READ_TEXT_FILE
-        handle_typed_client_method(params, @on_read_text_file, Protocol::ReadTextFileParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_read_text_file, Protocol::ReadTextFileParams, method_name, params_json, "path", "line", "limit")
       when Protocol::ClientMethod::FS_WRITE_TEXT_FILE
-        handle_typed_client_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_write_text_file, Protocol::WriteTextFileParams, method_name, params_json, "path", "content")
       when Protocol::ClientMethod::TERMINAL_CREATE
-        handle_typed_client_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_create_terminal, Protocol::CreateTerminalParams, method_name, params_json, "command", "args", "env", "cwd", "outputByteLimit")
       when Protocol::ClientMethod::TERMINAL_OUTPUT
-        handle_typed_client_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_terminal_output, Protocol::TerminalOutputParams, method_name, params_json, "terminalId")
       when Protocol::ClientMethod::TERMINAL_RELEASE
-        handle_typed_client_method(params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_release_terminal, Protocol::ReleaseTerminalParams, method_name, params_json, "terminalId")
       when Protocol::ClientMethod::TERMINAL_WAIT_FOR_EXIT
-        handle_typed_client_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_wait_for_terminal_exit, Protocol::WaitForTerminalExitParams, method_name, params_json, "terminalId")
       when Protocol::ClientMethod::TERMINAL_KILL
-        handle_typed_client_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name, params_json)
+        handle_v1_resource_method(params, @on_kill_terminal, Protocol::KillTerminalParams, method_name, params_json, "terminalId")
       else
         handle_unknown_agent_request(method_name, params, params_json)
       end
@@ -2837,23 +2847,41 @@ module ACP
       end
     end
 
-    # Generic typed dispatch for client methods. Tries the typed handler
-    # first, then falls back like an unknown method (`on_agent_request`,
-    # else -32601).
-    private def handle_typed_client_method(
+    # Decode known resource requests before handing them to either callback.
+    private def handle_v1_resource_method(
       params : JSON::Any?,
       handler,
       params_type,
       method_name : String,
       params_json : String?,
+      *fields : String,
     ) : AgentReply
-      return handle_unknown_agent_request(method_name, params, params_json) unless h = handler
+      return handle_unknown_agent_request(method_name, params, nil) unless handler || @on_agent_request
 
       typed_params = begin
-        params_type.from_json(params_json || params.to_json)
+        source = JSON::PullParser.new(params_json || params.to_json)
+        input = params_type.new(Protocol::WireFrame.read_with_unique_members(source, "sessionId", *fields))
+        case input
+        when Protocol::ReadTextFileParams, Protocol::WriteTextFileParams
+          raise ArgumentError.new("File path must be absolute") unless Protocol.absolute_path?(input.path)
+          if input.is_a?(Protocol::ReadTextFileParams) && input.line == 0
+            raise ArgumentError.new("File line numbers start at 1")
+          end
+        when Protocol::CreateTerminalParams
+          if (cwd = input.cwd) && !Protocol.absolute_path?(cwd)
+            raise ArgumentError.new("Terminal working directory must be absolute")
+          end
+          if input.command.includes?('\0') || input.args.try(&.any?(&.includes?('\0')))
+            raise ArgumentError.new("Terminal commands and arguments cannot contain NUL")
+          end
+        end
+        input
       rescue ex
         ClientLog.error { "Failed to parse #{method_name} params: #{ex.message}" }
         return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid params for #{method_name}: #{ex.message}")
+      end
+      unless h = handler
+        return handle_unknown_agent_request(method_name, params, (params_json unless raw_notification_representable?(params_json)))
       end
 
       # Separate from the parse above: a JSON error raised by the handler's
