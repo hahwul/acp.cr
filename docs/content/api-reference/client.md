@@ -375,6 +375,18 @@ also exposes `archive` and `unarchive`.
 If a request times out, the Agent may still commit the change. Check the
 session's archive state in a later list response.
 
+### `#session_list`
+
+Both protocol versions return usable sessions in the Agent's order, even when
+some entries are malformed. V2 entries use absolute workspace roots and RFC
+3339 timestamps. The page and each entry expose exact extension metadata via
+`meta_raw`.
+
+Use `has_more?` to check for another page. An empty cursor is valid. Pass
+`next_cursor` and the original filters in the next request.
+[ACP v1 session list](https://agentclientprotocol.com/protocol/v1/session-list)
+[ACP v2 session list](https://agentclientprotocol.com/protocol/v2/session-list)
+
 Use `client.session_list(archived: "only")` in v1 or pass
 `ACP::Protocol::V2::SessionListParams.new(archived: "only")` in v2 to list
 archived sessions. Use `"include"` to list both archived and unarchived

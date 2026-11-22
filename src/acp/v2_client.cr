@@ -15,6 +15,12 @@ module ACP
       private alias AgentMethod = Wire::AgentMethod
       private alias ClientMethod = Wire::ClientMethod
 
+      private record SessionListResponse, page : Wire::SessionListResult do
+        def self.from_json(json : String) : self
+          new(Wire::SessionListResult.from_v2_json(json))
+        end
+      end
+
       private class Connection < ACP::Client
         property on_v2_update : (Protocol::V2::SessionUpdateParams -> Nil)?
         property on_request_permission : (Wire::RequestPermissionParams -> Wire::RequestPermissionResult)?
@@ -601,7 +607,7 @@ module ACP
           if (cwd = params.cwd) && !Wire.absolute_path?(cwd)
             raise ArgumentError.new("The ACP v2 session list directory must be absolute")
           end
-          @connection.request_typed(AgentMethod::SESSION_LIST, params, Wire::SessionListResult)
+          @connection.request_typed(AgentMethod::SESSION_LIST, params, SessionListResponse, exact_response: true).page
         end
       end
 
