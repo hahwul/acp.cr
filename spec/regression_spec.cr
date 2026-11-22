@@ -7958,9 +7958,9 @@ describe "ACP v2 request-scoped elicitations" do
   end
 end
 
-private def form_elicitation_frame(id : Int32, schema : String) : String
+private def form_elicitation_frame(id : Int32, schema : String, *, scope : String = %q("sessionId":"s")) : String
   wire = ACP::Protocol::RawJson.from_json(schema)
-  %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"sessionId":"s","mode":"form","message":"Choose","requestedSchema":#{wire.json}}})
+  %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{#{scope},"mode":"form","message":"Choose","requestedSchema":#{wire.json}}})
 end
 
 describe "ACP v2 form elicitation schemas" do
@@ -8282,6 +8282,142 @@ describe "ACP v2 elicitation string formats" do
           reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
         end
       end
+    ensure
+      client.try(&.close)
+    end
+  end
+end
+
+describe "ACP v1 form submission validation" do
+  it "validates typed replies against the original v1 schema" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(
+        elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new))
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      result = ACP::Protocol::CreateElicitationResult.accept
+      calls = 0
+      client.on_create_elicitation = ->(input : ACP::Protocol::CreateElicitationParams) do
+        schema = input.requested_schema.not_nil!
+        schema.schema_type.should eq("object")
+        input.requested_schema_raw.not_nil!.object?.should be_true
+        calls += 1
+        schema.properties.clear
+        result
+      end
+      schema = %({"required":["choice"],"properties":{"choice":{"type":"string","enum":["one","two"]},"label":{"type":"string","pattern":"[a-z]{2}-[0-9]+"},"instant":{"type":"string","format":"date-time"},"choices":{"type":"array","items":{"type":"string","enum":["yes"]},"maxItems":18446744073709551615}}})
+      valid = {"choice" => "one", "label" => "prefix ab-12 suffix", "instant" => "20260101T123456Z", "choices" => ["yes"]} of String => ACP::Protocol::ElicitationContentValue
+      {
+        valid.reject("choice"),
+        valid.merge({"choice" => "unoffered"}),
+        valid.merge({"label" => "wrong"}),
+        valid.merge({"instant" => "no date"}),
+        valid.merge({"instant" => "20260101T123456Zgarbage"}),
+        valid.merge({"instant" => "2026-01-01T12:34:56+01:00garbage"}),
+        valid.merge({"instant" => "2026-01-01T12:34:56+12:60"}),
+        valid.merge({"instant" => "2026-01-01T12:34:56+24:00"}),
+        valid.merge({"instant" => "2026-01-01T24:00:01Z"}),
+        valid.merge({"choices" => ["no"]}),
+      }.each_with_index do |content, id|
+        result = ACP::Protocol::CreateElicitationResult.accept(content)
+        feed.puts form_elicitation_frame(id, schema)
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(id)
+        reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+      end
+      result = ACP::Protocol::CreateElicitationResult.accept(valid)
+      feed.puts form_elicitation_frame(100, schema)
+      JSON.parse(outgoing.gets.not_nil!)["result"]["content"].should eq(JSON.parse(valid.to_json))
+      {"2026-01-01T12:34:56", "2026-01-01T12:34:56+01", "2026-01-01T24:00:00Z"}.each_with_index do |timestamp, id|
+        content = valid.merge({"instant" => timestamp})
+        result = ACP::Protocol::CreateElicitationResult.accept(content)
+        feed.puts form_elicitation_frame(id + 102, schema)
+        JSON.parse(outgoing.gets.not_nil!)["result"]["content"].should eq(JSON.parse(content.to_json))
+      end
+
+      {
+        { %q(^[\d]+$), "42", true },
+        { %q(^[\d]+$), "٤٢", false },
+        { %q(^\u0061$), "a", true },
+        { %q(^\u0061$), "b", false },
+        { %q(^\uD83D\uDE00$), "😀", true },
+        { %q(^a$), "a\n", false },
+        { %q(^[[]\d$), "[4", true },
+        { %q(^[[]\d$), "[0-9", false },
+        { %q(^\v$), "\v", true },
+        { %q(^\v$), "\n", false },
+      }.each_with_index do |(pattern, label, matches), id|
+        schema = %({"properties":{"label":{"type":"string","pattern":#{pattern.to_json}}}})
+        result = ACP::Protocol::CreateElicitationResult.accept({"label" => label} of String => ACP::Protocol::ElicitationContentValue)
+        feed.puts form_elicitation_frame(id + 300, schema)
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        if matches
+          reply["result"]["content"]["label"].as_s.should eq(label)
+        else
+          reply["error"]["code"].as_i.should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
+
+      result = ACP::Protocol::CreateElicitationResult.accept
+      feed.puts form_elicitation_frame(101, %({"type":null}))
+      JSON.parse(outgoing.gets.not_nil!)["result"].should eq(JSON.parse(%({"action":"accept"})))
+
+      before_malformed = calls
+      {
+        "null",
+        %({"required":["missing"]}),
+        %({"properties":{"field":{"type":"array"}}}),
+        %({"properties":{"field":{"type":"array","items":{}}}}),
+        %({"properties":{"field":{"type":"array","items":{"type":"string"}}}}),
+        %q{{"properties":{"field":{"type":"string","pattern":"("}}}},
+        %q{{"properties":{"field":{"type":"string","pattern":")|("}}}},
+        %({"properties":{"field":{"type":"string","pattern":"a","pattern":"b"}}}),
+      }.each_with_index do |malformed, id|
+        feed.puts form_elicitation_frame(id + 200, malformed)
+        JSON.parse(outgoing.gets.not_nil!)["error"]["code"].as_i.should eq(ACP::JsonRpcError::INVALID_PARAMS)
+      end
+      calls.should eq(before_malformed)
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "checks the v1 raw callback result without removing the callback" do
+    with_wide_stdio do |transport, feed, outgoing|
+      caps = ACP::Protocol::ClientCapabilities.new(
+        elicitation: ACP::Protocol::ElicitationCapabilities.new(form: ACP::Protocol::ElicitationFormCapabilities.new))
+      client = ACP::Client.new(transport, client_capabilities: caps)
+      result = JSON.parse(%({"action":"accept","content":{"choice":"chosen"}}))
+      called = 0
+      client.on_agent_request = ->(method : String, params : JSON::Any) do
+        method.should eq("elicitation/create")
+        params["toolCallId"].as_i.should eq(42)
+        params["requestedSchema"]["properties"].as_h.clear
+        called += 1
+        result
+      end
+      schema = %({"type":"object","properties":{"choice":{"type":"string","enum":["chosen"],"description":42,"default":false},"custom":{"type":"_custom","items":["a","b"]}},"_meta":false})
+      {
+        { %({"action":"accept","content":{"choice":"chosen","custom":["value"]}}), true },
+        { %({"action":"accept","content":{"choice":"other"}}), false },
+        { %({"action":"accept","content":{"custom":{"nested":true}}}), false },
+        { %({"action":"accept","content":[]}), false },
+        { %({"content":{}}), false },
+        { %({"action":"decline","content":{"choice":"other"}}), true },
+        { %({"action":"_future","extra":[1,2]}), true },
+      }.each_with_index do |(wire, valid), id|
+        result = JSON.parse(wire)
+        feed.puts form_elicitation_frame(id, schema, scope: %q("sessionId":"s","toolCallId":42))
+        reply = JSON.parse(outgoing.gets.not_nil!)
+        reply["id"].as_i.should eq(id)
+        if valid
+          expected = JSON.parse(wire)
+          expected.as_h.delete("content") if expected["action"].as_s == "decline"
+          reply["result"].should eq(expected)
+        else
+          reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+        end
+      end
+      called.should eq(7)
     ensure
       client.try(&.close)
     end
