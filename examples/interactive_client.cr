@@ -31,8 +31,7 @@
 #   /session        — show current session info
 #   /help           — show available commands
 
-require "../src/acp"
-require "log"
+require "./terminal_display"
 require "colorize"
 
 # ─── Configuration ──────────────────────────────────────────────────
@@ -51,41 +50,42 @@ log_severity = case LOG_LEVEL.downcase
                else              ::Log::Severity::Warn
                end
 
-::Log.setup(log_severity, ::Log::IOBackend.new(io: STDERR, formatter: ::Log::ShortFormat))
+::Log.setup(log_severity, ExampleTerminal.log_backend(STDERR))
 
 # ─── Terminal Helpers ───────────────────────────────────────────────
 
 module Term
   # Prints a styled header line.
   def self.header(text : String)
-    STDERR.puts ""
-    STDERR.puts text.colorize(:cyan).bold
-    STDERR.puts ("─" * [text.size, 60].min).colorize(:dark_gray)
+    ExampleTerminal.puts STDERR, ""
+    heading = ExampleTerminal.text(text)
+    ExampleTerminal.puts STDERR, heading.colorize(:cyan).bold
+    ExampleTerminal.puts STDERR, ("─" * [heading.size, 60].min).colorize(:dark_gray)
   end
 
   # Prints an info message to stderr (not stdout, which is for the agent).
   def self.info(text : String)
-    STDERR.puts "  #{text}".colorize(:blue)
+    ExampleTerminal.puts STDERR, "  #{ExampleTerminal.text(text)}".colorize(:blue)
   end
 
   # Prints a success message.
   def self.success(text : String)
-    STDERR.puts "  ✓ #{text}".colorize(:green)
+    ExampleTerminal.puts STDERR, "  ✓ #{ExampleTerminal.text(text)}".colorize(:green)
   end
 
   # Prints a warning.
   def self.warn(text : String)
-    STDERR.puts "  ⚠ #{text}".colorize(:yellow)
+    ExampleTerminal.puts STDERR, "  ⚠ #{ExampleTerminal.text(text)}".colorize(:yellow)
   end
 
   # Prints an error.
   def self.error(text : String)
-    STDERR.puts "  ✗ #{text}".colorize(:red)
+    ExampleTerminal.puts STDERR, "  ✗ #{ExampleTerminal.text(text)}".colorize(:red)
   end
 
   # Prints agent output (to stderr so it doesn't mix with protocol on stdout).
   def self.agent(text : String)
-    STDERR.print text
+    ExampleTerminal.print STDERR, ExampleTerminal.text(text, multiline: true)
   end
 
   # Prints a tool call status line.
@@ -97,23 +97,23 @@ module Term
             when "pending"   then :yellow
             else                  :white
             end
-    STDERR.puts "  🔧 [#{label}] #{status}".colorize(color)
+    ExampleTerminal.puts STDERR, "  🔧 [#{ExampleTerminal.text(label)}] #{ExampleTerminal.text(status)}".colorize(color)
   end
 
   # Prints a thought/reasoning block.
   def self.thought(text : String)
-    STDERR.puts "  💭 #{text}".colorize(:magenta)
+    ExampleTerminal.puts STDERR, "  💭 #{ExampleTerminal.text(text, multiline: true)}".colorize(:magenta)
   end
 
   # Prints the end-of-message marker with optional stop reason.
   def self.message_end(stop_reason : String?)
     if reason = stop_reason
       unless reason == "end_turn"
-        STDERR.puts ""
+        ExampleTerminal.puts STDERR, ""
         info("[Stop: #{reason}]")
       end
     end
-    STDERR.puts "" # Newline after message
+    ExampleTerminal.puts STDERR, "" # Newline after message
   end
 
   # Prints a tool call chunk line.
@@ -121,7 +121,8 @@ module Term
     if text = content
       kind_label = kind ? " [#{kind}]" : ""
       title = active_tools[tool_call_id]? || tool_call_id
-      STDERR.puts "  🔧 #{title}#{kind_label}: #{text}".colorize(:dark_gray)
+      label = ExampleTerminal.text("#{title}#{kind_label}")
+      ExampleTerminal.puts STDERR, "  🔧 #{label}: #{ExampleTerminal.text(text, multiline: true)}".colorize(:dark_gray)
     end
   end
 
@@ -142,7 +143,7 @@ module Term
 
   # Prints a plan with entries.
   def self.plan(entries : Array(ACP::Protocol::PlanEntry))
-    STDERR.puts "  📋 Plan:".colorize(:cyan)
+    ExampleTerminal.puts STDERR, "  📋 Plan:".colorize(:cyan)
     entries.each_with_index do |entry, idx|
       status_icon = case entry.status
                     when "completed"   then "✓"
@@ -150,27 +151,27 @@ module Term
                     when "failed"      then "✗"
                     else                    "○"
                     end
-      STDERR.puts "     #{status_icon} #{idx + 1}. #{entry.content}".colorize(:white)
+      ExampleTerminal.puts STDERR, "     #{status_icon} #{idx + 1}. #{ExampleTerminal.text(entry.content)}".colorize(:white)
     end
   end
 
   # Prints a status update line.
   def self.status(update_status : String, message : String?)
-    STDERR.puts "  ⏳ #{update_status}#{message ? ": #{message}" : ""}".colorize(:dark_gray)
+    text = "#{update_status}#{message ? ": #{message}" : ""}"
+    ExampleTerminal.puts STDERR, "  ⏳ #{ExampleTerminal.text(text)}".colorize(:dark_gray)
   end
 
   # Prints an agent error with optional detail.
   def self.agent_error(message : String, detail : String?)
     error("Agent error: #{message}")
     if detail_text = detail
-      STDERR.puts "    #{detail_text}".colorize(:dark_gray)
+      ExampleTerminal.puts STDERR, "    #{ExampleTerminal.text(detail_text, multiline: true)}".colorize(:dark_gray)
     end
   end
 
   # Prints the prompt indicator and reads a line from the TTY.
   def self.prompt : String?
-    STDERR.print "\n> ".colorize(:green).bold
-    STDERR.flush
+    ExampleTerminal.print STDERR, "\n> ".colorize(:green).bold
 
     # Read from the real terminal, not stdin (which may be piped).
     # Try /dev/tty first (works on macOS/Linux), fall back to STDIN.
@@ -187,8 +188,7 @@ module Term
 
   # Asks a yes/no question.
   def self.confirm(question : String) : Bool
-    STDERR.print "  #{question} [y/N] ".colorize(:yellow)
-    STDERR.flush
+    ExampleTerminal.print STDERR, "  #{ExampleTerminal.text(question)} [y/N] ".colorize(:yellow)
 
     tty = begin
       File.open("/dev/tty", "r")
@@ -203,13 +203,12 @@ module Term
 
   # Asks the user to pick from a list of options. Returns the selected ID.
   def self.pick(question : String, options : Array({id: String, label: String})) : String?
-    STDERR.puts "  #{question}".colorize(:yellow)
+    ExampleTerminal.puts STDERR, "  #{ExampleTerminal.text(question)}".colorize(:yellow)
     options.each_with_index do |opt, i|
-      STDERR.puts "    #{i + 1}) #{opt[:label]} (#{opt[:id]})".colorize(:white)
+      ExampleTerminal.puts STDERR, "    #{i + 1}) #{ExampleTerminal.text(opt[:label], escape_backslashes: true)} (#{ExampleTerminal.text(opt[:id], escape_backslashes: true)})".colorize(:white)
     end
-    STDERR.puts "    0) Cancel".colorize(:dark_gray)
-    STDERR.print "  Choice: ".colorize(:yellow)
-    STDERR.flush
+    ExampleTerminal.puts STDERR, "    0) Cancel".colorize(:dark_gray)
+    ExampleTerminal.print STDERR, "  Choice: ".colorize(:yellow)
 
     tty = begin
       File.open("/dev/tty", "r")
@@ -230,16 +229,16 @@ end
 # ─── Validate Arguments ────────────────────────────────────────────
 
 if ARGV.empty?
-  STDERR.puts "Usage: crystal run examples/interactive_client.cr -- <agent-command> [args...]"
-  STDERR.puts ""
-  STDERR.puts "Examples:"
-  STDERR.puts "  crystal run examples/interactive_client.cr -- claude-code --stdio"
-  STDERR.puts "  crystal run examples/interactive_client.cr -- my-agent --mode stdio"
-  STDERR.puts ""
-  STDERR.puts "Environment variables:"
-  STDERR.puts "  ACP_LOG_LEVEL  debug|info|warn|error (default: warn)"
-  STDERR.puts "  ACP_CWD        working directory (default: current)"
-  STDERR.puts "  ACP_TIMEOUT    request timeout in seconds (default: 30)"
+  ExampleTerminal.puts STDERR, "Usage: crystal run examples/interactive_client.cr -- <agent-command> [args...]"
+  ExampleTerminal.puts STDERR, ""
+  ExampleTerminal.puts STDERR, "Examples:"
+  ExampleTerminal.puts STDERR, "  crystal run examples/interactive_client.cr -- claude-code --stdio"
+  ExampleTerminal.puts STDERR, "  crystal run examples/interactive_client.cr -- my-agent --mode stdio"
+  ExampleTerminal.puts STDERR, ""
+  ExampleTerminal.puts STDERR, "Environment variables:"
+  ExampleTerminal.puts STDERR, "  ACP_LOG_LEVEL  debug|info|warn|error (default: warn)"
+  ExampleTerminal.puts STDERR, "  ACP_CWD        working directory (default: current)"
+  ExampleTerminal.puts STDERR, "  ACP_TIMEOUT    request timeout in seconds (default: 30)"
   exit(1)
 end
 
@@ -262,7 +261,7 @@ Process.on_terminate do
     rescue Channel::ClosedError
     end
   else
-    STDERR.puts "\nExiting...".colorize(:yellow)
+    ExampleTerminal.puts STDERR, "\nExiting...".colorize(:yellow)
     if c = client_ref
       c.close rescue nil
     end
@@ -281,11 +280,8 @@ Term.info("Timeout: #{TIMEOUT ? "#{TIMEOUT}s" : "none"}")
 Term.info("Spawning agent process...")
 
 begin
-  transport = ACP::ProcessTransport.new(
-    agent_command,
-    args: agent_args,
-    chdir: SESSION_CWD
-  )
+  agent = ExampleTerminal::Agent.new(agent_command, agent_args, chdir: SESSION_CWD)
+  transport = agent.transport
 rescue ex
   Term.error("Failed to spawn agent: #{ex.message}")
   exit(1)
@@ -324,7 +320,7 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
   when ACP::Protocol::AgentMessageStartUpdate
     in_message = true
     current_message.clear
-    STDERR.puts "" # Blank line before agent response
+    ExampleTerminal.puts STDERR, "" # Blank line before agent response
   when ACP::Protocol::AgentMessageChunkUpdate
     Term.agent(u.text)
     current_message.print(u.text)
@@ -361,7 +357,7 @@ client.on_agent_request = ->(method : String, params : JSON::Any) do
     permission_prompt.synchronize do
       perm_params = ACP::Protocol::RequestPermissionParams.from_json(params.to_json)
 
-      STDERR.puts ""
+      ExampleTerminal.puts STDERR, ""
       Term.header("Permission Request")
 
       # Show tool call info.
@@ -525,7 +521,7 @@ Term.info("  /help    — show commands")
 Term.info("  /cancel  — cancel current operation")
 Term.info("  /quit    — exit")
 Term.info("  CTRL+C   — cancel current prompt or exit")
-STDERR.puts ""
+ExampleTerminal.puts STDERR, ""
 
 # A single long-lived listener translates CTRL+C into `session/cancel`.
 #
@@ -549,7 +545,7 @@ spawn do
 
     if active = current_session
       cancel_requested = true
-      STDERR.puts ""
+      ExampleTerminal.puts STDERR, ""
       Term.warn("Cancelling...")
       active.cancel rescue nil
     end
@@ -680,14 +676,8 @@ Term.info("Shutting down...")
 session.try(&.close)
 client.close rescue nil
 
-# Wait for the agent process to exit if using a process transport.
-if transport.is_a?(ACP::ProcessTransport)
-  begin
-    status = transport.wait
-    Term.info("Agent process exited with status: #{status.exit_code}")
-  rescue
-    # Process already terminated.
-  end
+if status = agent.wait
+  Term.info("Agent process exited with status: #{status.exit_code}")
 end
 
 cancel_channel.close rescue nil

@@ -1,5 +1,7 @@
 require "./spec_helper"
 require "log/spec"
+require "colorize"
+require "../examples/terminal_display"
 
 # ═══════════════════════════════════════════════════════════════════════
 # Regression Specs
@@ -9887,5 +9889,78 @@ describe "ACP v1 terminal output truncation history" do
         client.try(&.close)
       end
     end
+  end
+end
+
+describe "ACP example terminal display" do
+  it "escapes C0, DEL, and C1 controls while preserving Unicode and intentional layout" do
+    input = "한👩‍💻\n\t\u0007\u000d\u001b\u007f\u0085\u009b"
+    ExampleTerminal.text(input, multiline: true).should eq("한👩‍💻\n\t\\u{7}\\u{d}\\u{1b}\\u{7f}\\u{85}\\u{9b}")
+    ExampleTerminal.text(input).should eq("한👩‍💻\\u{a}\\u{9}\\u{7}\\u{d}\\u{1b}\\u{7f}\\u{85}\\u{9b}")
+  end
+
+  it "filters stderr controls and preserves UTF-8 across arbitrary write boundaries" do
+    output = IO::Memory.new
+    stream = ExampleTerminal::Stream.new(output)
+    payload = "한\u009b🙂\u0007\n"
+    payload.to_slice.each { |byte| stream.write(Bytes[byte]) }
+    output.to_s.should eq("한\\u{9b}🙂\\u{7}\n")
+
+    incomplete = Bytes[0xf0, 0x9f]
+    stream.write(incomplete)
+    output.to_s.should eq("한\\u{9b}🙂\\u{7}\n")
+    stream.finish
+    output.to_s.should eq("한\\u{9b}🙂\\u{7}\n#{String.new(incomplete).scrub}")
+  end
+
+  it "filters control characters in the formatted log message and exception" do
+    output = IO::Memory.new
+    backend = ExampleTerminal.log_backend(output)
+    entry = Log::Entry.new("fixture", Log::Severity::Warn, "warning\u007f", Log::Metadata.empty, Exception.new("detail\u0007"))
+    backend.write(entry)
+
+    output.to_s.should contain("warning\\u{7f}")
+    output.to_s.should contain("detail\\u{7}")
+    output.to_s.should_not contain('\u007f')
+    output.to_s.should_not contain('\u0007')
+  end
+
+  it "keeps permission display escapes distinct from literal backslashes" do
+    literal = %q(allow\u{7})
+    control = "allow\u0007"
+    ExampleTerminal.text(literal, escape_backslashes: true).should eq(%q(allow\\u{7}))
+    ExampleTerminal.text(control, escape_backslashes: true).should eq(%q(allow\u{7}))
+    ExampleTerminal.text("a\u061cb\u202ec\u2066d\u2028e").should eq(%q(a\u{61c}b\u{202e}c\u{2066}d\u{2028}e))
+  end
+
+  it "serializes styled lines with diagnostics that use the same display" do
+    output = YieldingIO.new
+    styled = "fixture".colorize(:cyan).toggle(true)
+    expected_line = "#{styled}\n"
+    stream = ExampleTerminal::Stream.new(output)
+    done = Channel(Nil).new(2)
+
+    spawn do
+      ExampleTerminal.puts(output, styled)
+      done.send(nil)
+    end
+    spawn do
+      stream.write("diagnostic\u0007\n".to_slice)
+      done.send(nil)
+    end
+    2.times { next_permission_event(done) }
+
+    diagnostic = "diagnostic\\u{7}\n"
+    output.sink.to_s.in?(expected_line + diagnostic, diagnostic + expected_line).should be_true
+  end
+
+  it "drains final diagnostics when a short-lived child has exited" do
+    output = IO::Memory.new
+    agent = ExampleTerminal::Agent.new("/bin/sh", ["-c", "printf '%s' \"$1\" >&2; printf '\\360\\237' >&2", "fixture", "final 한\u0007"], stderr: output)
+    agent.transport.close
+    agent.wait.not_nil!.success?.should be_true
+    output.to_s.should eq("final 한\\u{7}#{String.new(Bytes[0xf0, 0x9f]).scrub}")
+  ensure
+    agent.try(&.transport.close)
   end
 end
