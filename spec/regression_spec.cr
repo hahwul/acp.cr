@@ -1357,6 +1357,91 @@ describe "ACP v1 typed permission requests" do
   end
 end
 
+describe "ACP v1 tool call display fields" do
+  it "delivers valid tool details when unrelated optional fields have the wrong type" do
+    with_wide_stdio do |transport, feed, outgoing|
+      client = ACP::Client.new(transport)
+      client.request_timeout = 2.0
+      answer_identity_request(feed, outgoing, %({"protocolVersion":1}))
+      client.initialize_connection
+      updates = Channel(ACP::Protocol::SessionUpdate).new(2)
+      client.on_update = ->(note : ACP::Protocol::SessionUpdateParams) do
+        updates.send(note.update)
+        nil
+      end
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"tool","title":"Check count","status":false,"kind":[],"name":"count","toolName":{}}}})
+      feed.puts %({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool","title":{},"name":false,"kind":2,"status":"completed","rawOutput":18446744073709551615}}})
+      answer_identity_request(feed, outgoing, "{}")
+      client.ext_method("barrier")
+      select
+      when update = updates.receive
+        started = update.as(ACP::Protocol::ToolCallUpdate)
+        started.title.should eq("Check count")
+        started.name.should eq("count")
+        started.tool_name.should be_nil
+        started.status.should eq("pending")
+        started.kind.should eq("other")
+      else
+        fail "tool call did not reach the typed callback"
+      end
+      select
+      when update = updates.receive
+        completed = update.as(ACP::Protocol::ToolCallStatusUpdate)
+        completed.status.should eq("completed")
+        completed.title.should be_nil
+        completed.name.should be_nil
+        completed.kind.should be_nil
+        completed.raw_output_raw.not_nil!.json.should eq("18446744073709551615")
+      else
+        fail "tool call update did not reach the typed callback"
+      end
+    ensure
+      client.try(&.close)
+    end
+  end
+
+  it "keeps initial defaults consistent across construction and decoding" do
+    type = ACP::Protocol::ToolCallUpdate
+    expected = type.new("tool", "Count")
+    ["", %(,"kind":null,"status":null)].each do |fields|
+      update = type.from_json(%({"sessionUpdate":"tool_call","toolCallId":"tool","title":"Count"#{fields}}))
+      update.kind.should eq("other")
+      update.status.should eq("pending")
+      update.should eq(expected)
+    end
+    expected.kind.should be_nil
+    expected.status = nil
+    round_trip = type.from_json(expected.to_json)
+    round_trip.should eq(expected)
+    round_trip.hash.should eq(expected.hash)
+
+    patch = ACP::Protocol::ToolCallStatusUpdate.from_json(%({"sessionUpdate":"tool_call_update","toolCallId":"tool","kind":"_custom","status":"_queued"}))
+    patch.kind.should eq("_custom")
+    patch.status.should eq("_queued")
+  end
+
+  it "leaves optional patch fields unchanged on null and conflicting duplicate values" do
+    update = ACP::Protocol::ToolCallStatusUpdate.from_json(%({"sessionUpdate":"tool_call_update","toolCallId":"tool","name":"count","name":"other","kind":null,"status":"completed","title":""}))
+    update.name.should be_nil
+    update.kind.should be_nil
+    update.status.should eq("completed")
+    update.title.should eq("")
+    fields = ACP::Protocol::RawJson.from_json(update.to_json)
+    fields.field("name").should be_nil
+    fields.field("kind").should be_nil
+  end
+
+  it "requires a usable identity and initial title" do
+    [
+      %({"sessionUpdate":"tool_call","toolCallId":false,"title":"Count"}),
+      %({"sessionUpdate":"tool_call","toolCallId":"tool","title":false}),
+      %({"sessionUpdate":"tool_call_update","toolCallId":"a","toolCallId":"b"}),
+    ].each do |wire|
+      expect_raises(JSON::ParseException) { ACP::Protocol::SessionUpdate.from_json(wire) }
+    end
+  end
+end
+
 # ─── R23: a blocked agent-request handler must not stall the dispatcher ──
 #
 # prompt-turn#cancellation: after `session/cancel` the Agent answers the
