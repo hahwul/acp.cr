@@ -22,38 +22,40 @@ shards install
 
 ## Quick Start
 
+The snippet collects ACP updates for an application. Use the
+[simple client example](examples/simple_client.cr) to display updates and agent
+diagnostics in a terminal.
+
 ```crystal
 require "acp"
 
-# 1. Connect to an agent process via stdio
-transport = ACP::ProcessTransport.new("my-agent", ["--stdio"])
-client = ACP::Client.new(transport, client_name: "my-editor")
+Log.setup(:none)
 
-# 2. Initialize the connection (handshake)
-init_result = client.initialize_connection
+begin
+  File.open(File::NULL, "w") do |diagnostics|
+    transport = ACP::ProcessTransport.new("my-agent", ["--stdio"], stderr: diagnostics)
+    client = ACP::Client.new(transport, client_name: "my-editor")
 
-# 3. Create a new session
-session = ACP::Session.create(client, cwd: Dir.current)
+    begin
+      client.initialize_connection
+      session = ACP::Session.create(client, cwd: Dir.current)
 
-# 4. Handle streaming updates
-client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
-  case u = update.update
-  when ACP::Protocol::AgentMessageChunkUpdate
-    print u.text  # Stream agent text to the terminal
-  when ACP::Protocol::ToolCallUpdate
-    puts "\n🔧 #{u.title} [#{u.status}]"
-  when ACP::Protocol::AgentThoughtChunkUpdate
-    puts "💭 #{u.text}"
+      updates = [] of ACP::Protocol::SessionUpdateParams
+      client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) do
+        updates << update
+        nil
+      end
+
+      result = session.prompt("Explain this codebase in one paragraph.")
+      # Use updates and result.stop_reason in your application.
+    ensure
+      client.close
+    end
   end
-  nil
+rescue ACP::Error
+  STDERR.puts "ACP request failed."
+  exit(1)
 end
-
-# 5. Send a prompt and wait for the result
-result = session.prompt("Explain this codebase in one paragraph.")
-puts "\n[Done — stop reason: #{result.stop_reason}]"
-
-# 6. Clean up
-client.close
 ```
 
 To select ACP v1 or v2 Preview automatically, use `ACP.connect_negotiated`.
@@ -80,6 +82,9 @@ crystal run examples/claude_code_agent.cr
 crystal run examples/gemini_agent.cr
 crystal run examples/interactive_client.cr -- my-agent --stdio
 ```
+
+The examples display terminal control characters from agent messages,
+diagnostics, and permission labels as visible escapes.
 
 ## Development
 

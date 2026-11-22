@@ -10,7 +10,7 @@
 # Usage:
 #   crystal run examples/claude_code_agent.cr
 
-require "../src/acp"
+require "./terminal_display"
 require "colorize"
 
 # 1. Prepare the agent command.
@@ -18,36 +18,37 @@ require "colorize"
 agent_command = "npx"
 agent_args = ["@zed-industries/claude-code-acp"]
 
-puts "--- Claude Code ACP Agent Example ---"
+ExampleTerminal.puts STDOUT, "--- Claude Code ACP Agent Example ---"
 
 # Check if npx is installed
 unless Process.find_executable(agent_command)
-  STDERR.puts "Error: 'npx' command not found. Please install Node.js and npm."
+  ExampleTerminal.puts STDERR, "Error: 'npx' command not found. Please install Node.js and npm."
   exit 1
 end
 
 # 2. Spawn the process transport.
-# We'll forward the agent's stderr to our stderr so we can see its logs.
-transport = ACP::ProcessTransport.new(agent_command, args: agent_args)
+# Display the agent's diagnostics as terminal-safe text.
+::Log.setup(backend: ExampleTerminal.log_backend)
+agent = ExampleTerminal::Agent.new(agent_command, agent_args)
+transport = agent.transport
 client = ACP::Client.new(transport, client_name: "claude-code-acp-example")
 
 # 3. Set up update handler to show the streaming response.
 client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
   case u = update.update
   when ACP::Protocol::AgentMessageChunkUpdate
-    print u.text
-    STDOUT.flush
+    ExampleTerminal.print STDOUT, ExampleTerminal.text(u.text, multiline: true)
   when ACP::Protocol::ThoughtUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
-      [Thinking: #{u.title}]
+      [Thinking: #{ExampleTerminal.text(u.title)}]
       MSG
       .colorize(:magenta)
-    puts u.text.colorize(:dark_gray)
+    ExampleTerminal.puts STDOUT, ExampleTerminal.text(u.text, multiline: true).colorize(:dark_gray)
   when ACP::Protocol::StatusUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
-      [Status: #{u.status}] #{u.message}
+      [Status: #{ExampleTerminal.text(u.status)}] #{ExampleTerminal.text(u.message)}
       MSG
       .colorize(:yellow)
   end
@@ -56,40 +57,39 @@ client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
 
 begin
   # 4. Initialize connection.
-  puts "Connecting to Claude Code ACP Agent..."
+  ExampleTerminal.puts STDOUT, "Connecting to Claude Code ACP Agent..."
   client.initialize_connection
 
   if ai = client.agent_info
-    puts "Connected to: #{ai.name} v#{ai.version}"
+    ExampleTerminal.puts STDOUT, "Connected to: #{ExampleTerminal.text(ai.name)} v#{ExampleTerminal.text(ai.version)}"
   end
 
   # 5. Create a session.
   session = ACP::Session.create(client, cwd: Dir.current)
-  puts "Session #{session.id} active."
+  ExampleTerminal.puts STDOUT, "Session #{ExampleTerminal.text(session.id)} active."
 
   # 6. Send a prompt.
   prompt_text = "Tell me a very short joke about Crystal programming language."
-  puts <<-MSG
+  ExampleTerminal.puts STDOUT, <<-MSG
 
     Prompt: '#{prompt_text}'
     MSG
-  print "Claude: "
-  STDOUT.flush
+  ExampleTerminal.print STDOUT, "Claude: "
 
   result = session.prompt(prompt_text)
 
-  puts <<-MSG
+  ExampleTerminal.puts STDOUT, <<-MSG
 
 
-    (Finished with reason: #{result.stop_reason})
+    (Finished with reason: #{ExampleTerminal.text(result.stop_reason)})
     MSG
 rescue ex : Exception
-  STDERR.puts "An error occurred: #{ex.message}"
+  ExampleTerminal.puts STDERR, "An error occurred: #{ExampleTerminal.text(ex.message)}"
   if rpc_ex = ex.as?(ACP::JsonRpcError)
-    STDERR.puts "RPC Error Data: #{rpc_ex.data}"
+    ExampleTerminal.puts STDERR, "RPC Error Data: #{ExampleTerminal.text(rpc_ex.data.to_s)}"
   end
 ensure
   # 7. Close client (this will also terminate the process).
   client.close
-  puts "Disconnected."
+  ExampleTerminal.puts STDOUT, "Disconnected."
 end

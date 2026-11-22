@@ -230,7 +230,8 @@ module ACP
         preflight.call
 
         begin
-          @writer.print(frame)
+          # Keep write errors inside this rescue on older Crystal versions.
+          @writer.write_string(frame.to_slice)
           @writer.flush
         rescue ex : IO::Error
           Log.error { "Write failed: #{ex.message}" }

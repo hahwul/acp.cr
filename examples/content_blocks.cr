@@ -8,59 +8,62 @@
 # Usage:
 #   crystal run examples/content_blocks.cr -- <agent-command> [args...]
 
-require "../src/acp"
+require "./terminal_display"
 require "colorize"
 
 if ARGV.empty?
-  STDERR.puts "Usage: crystal run examples/content_blocks.cr -- <agent-command> [args...]"
+  ExampleTerminal.puts STDERR, "Usage: crystal run examples/content_blocks.cr -- <agent-command> [args...]"
   exit(1)
 end
 
 agent_command = ARGV[0]
 agent_args = ARGV.size > 1 ? ARGV[1..] : [] of String
 
-transport = ACP::ProcessTransport.new(agent_command, args: agent_args)
+::Log.setup(backend: ExampleTerminal.log_backend)
+agent = ExampleTerminal::Agent.new(agent_command, agent_args)
+transport = agent.transport
 client = ACP::Client.new(transport)
 
 # Set up handlers before initializing
 client.on_update = ->(update : ACP::Protocol::SessionUpdateParams) {
   case u = update.update
   when ACP::Protocol::AgentMessageChunkUpdate
-    print u.text
+    ExampleTerminal.print STDOUT, ExampleTerminal.text(u.text, multiline: true)
   when ACP::Protocol::AgentThoughtChunkUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
       [Thought]
       MSG
       .colorize(:magenta)
-    puts u.text.colorize(:dark_gray)
+    ExampleTerminal.puts STDOUT, ExampleTerminal.text(u.text, multiline: true).colorize(:dark_gray)
   when ACP::Protocol::ToolCallUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
-      [Tool Call: #{u.title}] Status: #{u.status}
+      [Tool Call: #{ExampleTerminal.text(u.title)}] Status: #{ExampleTerminal.text(u.status)}
       MSG
       .colorize(:cyan)
   when ACP::Protocol::ToolCallStatusUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
-      [Tool Update: #{u.tool_call_id}] Status: #{u.status}
+      [Tool Update: #{ExampleTerminal.text(u.tool_call_id)}] Status: #{ExampleTerminal.text(u.status)}
       MSG
       .colorize(:green)
   when ACP::Protocol::StatusUpdate
-    puts <<-MSG
+    ExampleTerminal.puts STDOUT, <<-MSG
 
-      [Status: #{u.status}] #{u.message}
+      [Status: #{ExampleTerminal.text(u.status)}] #{ExampleTerminal.text(u.message)}
       MSG
       .colorize(:yellow)
   end
   nil
 }
 
+failed = false
 begin
   client.initialize_connection
   session = ACP::Session.create(client, cwd: Dir.current)
 
-  puts "Session #{session.id} started."
+  ExampleTerminal.puts STDOUT, "Session #{ExampleTerminal.text(session.id)} started."
 
   # Use PromptBuilder to create a rich prompt
   prompt = ACP::PromptBuilder.new
@@ -69,13 +72,17 @@ begin
     .text("Can you summarize what the main module does?")
     .build
 
-  puts "Sending rich prompt with file attachment..."
+  ExampleTerminal.puts STDOUT, "Sending rich prompt with file attachment..."
   result = session.prompt(prompt)
 
-  puts <<-MSG
+  ExampleTerminal.puts STDOUT, <<-MSG
 
-    Final Stop Reason: #{result.stop_reason}
+    Final Stop Reason: #{ExampleTerminal.text(result.stop_reason)}
     MSG
+rescue ex : ACP::Error
+  ExampleTerminal.puts STDERR, "ACP error: #{ExampleTerminal.text(ex.message)}"
+  failed = true
 ensure
   client.close
 end
+exit(1) if failed
