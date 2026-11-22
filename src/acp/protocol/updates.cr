@@ -102,6 +102,8 @@ module ACP
 
     struct SessionUpdateParams
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The session this update belongs to.
       @[JSON::Field(key: "sessionId")]
@@ -116,11 +118,14 @@ module ACP
       @[JSON::Field(ignore: true)]
       property? before_load_response : Bool = false
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
+      # Creates a session notification with optional extension metadata.
+      def initialize(@session_id : String, @update : SessionUpdate, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
+      end
 
-      def initialize(@session_id : String, @update : SessionUpdate, @meta : Hash(String, JSON::Any)? = nil)
+      protected def comparison_value
+        # Compare the typed update and runtime replay flag alongside wire metadata.
+        {@session_id, @update, @before_load_response, comparable_json(meta_raw)}
       end
     end
 
@@ -632,26 +637,28 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/slash-commands
     struct AvailableCommandsUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # The commands the agent can execute.
-      @[JSON::Field(key: "availableCommands")]
+      @[JSON::Field(key: "availableCommands", converter: ::ACP::Protocol::DefaultContentList(::ACP::Protocol::AvailableCommand))]
       property available_commands : Array(AvailableCommand) = [] of AvailableCommand
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a replacement command list.
       def initialize(
         @available_commands : Array(AvailableCommand) = [] of AvailableCommand,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "available_commands_update"
+        self.meta = meta
       end
     end
 
     # Information about an available slash command.
     struct AvailableCommand
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # Command name (e.g., "web", "test", "plan").
       property name : String
@@ -660,18 +667,17 @@ module ACP
       property description : String
 
       # Optional input specification for the command.
+      @[JSON::Field(converter: ::ACP::Protocol::OptionalContentValue(::ACP::Protocol::AvailableCommandInput))]
       property input : AvailableCommandInput?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
+      # Creates a slash command with optional input and metadata.
       def initialize(
         @name : String,
         @description : String,
         @input : AvailableCommandInput? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
     end
 
@@ -679,15 +685,15 @@ module ACP
     # In the ACP spec this is a union type (currently only "unstructured").
     struct AvailableCommandInput
       include JSON::Serializable
+      include LosslessMetadata
+      include WireValueEquality
 
       # A hint to display when the input hasn't been provided yet.
       property hint : String
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
-      def initialize(@hint : String, @meta : Hash(String, JSON::Any)? = nil)
+      # Creates an unstructured command input hint.
+      def initialize(@hint : String, meta : Hash(String, JSON::Any)? = nil)
+        self.meta = meta
       end
     end
 

@@ -123,6 +123,17 @@ module ACP
     end
 
     # :nodoc:
+    module DefaultContentList(T)
+      def self.from_json(pull : JSON::PullParser) : Array(T)
+        OptionalContentList(T).from_json(pull) || [] of T
+      end
+
+      def self.to_json(values : Array(T), builder : JSON::Builder) : Nil
+        values.to_json(builder)
+      end
+    end
+
+    # :nodoc:
     module ProjectedContent
       def self.from_json(pull : JSON::PullParser) : PreservedJson
         location = pull.location
