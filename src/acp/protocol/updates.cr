@@ -37,6 +37,7 @@
 
 require "json"
 require "./content_block"
+require "./metadata_patch"
 require "./optional_capability"
 require "./patch_fields"
 require "./prompt_suggestions"
@@ -1035,6 +1036,24 @@ module ACP
 
     # ─── Compaction ──────────────────────────────────────────────────
 
+    # :nodoc:
+    module OptionalCompactionSummary
+      def self.from_json(pull : JSON::PullParser) : PreservedJson?
+        wrap(RawJson.new(pull))
+      end
+
+      def self.wrap(wire : RawJson) : PreservedJson?
+        return unless blocks = wire.elements?
+        # Only an explicitly empty array clears a summary.
+        has_content = blocks.any? do |block|
+          OptionalContentValue(ContentBlock).from_json(JSON::PullParser.new(block.json))
+        end
+        return unless blocks.empty? || has_content
+
+        PreservedJson.new(wire, project_array_objects: true, project_nested_objects: true)
+      end
+    end
+
     # Creates or patches an ID-addressed context compaction entity. Only
     # sent to clients that advertise `clientCapabilities.session.compaction`.
     #
@@ -1045,6 +1064,10 @@ module ACP
     # See: https://agentclientprotocol.com/protocol/v1/prompt-turn#session-compaction
     struct CompactionUpdate < SessionUpdate
       include JSON::Serializable
+      include LosslessMetadataField
+
+      # :nodoc:
+      alias SummaryPatch = PatchFields::Decoded(PreservedJson, OptionalCompactionSummary)
 
       # Opaque, agent-owned ID, unique within the session (required).
       @[JSON::Field(key: "compactionId")]
@@ -1054,74 +1077,80 @@ module ACP
       # future/`_`-prefixed value (required).
       property status : String
 
-      # Replacement summary content blocks. Kept as raw JSON like message
-      # chunks; see `typed_summary`.
-      @[JSON::Field(presence: true)]
-      getter summary : Array(JSON::Any)?
+      @[JSON::Field(key: "summary", presence: true, emit_null: true, ignore_serialize: !summary_present?)]
+      @summary_patch : SummaryPatch?
+
+      @[JSON::Field(ignore: true)]
+      @summary_patch_present = false
 
       # Human-readable error description.
-      @[JSON::Field(presence: true)]
-      getter error : String?
+      PatchFields.tolerant({
+        error: {String, "error", OptionalCapabilityString},
+      })
 
-      # Extension metadata for the compaction entity.
-      @[JSON::Field(key: "_meta", presence: true)]
-      getter meta : Hash(String, JSON::Any)?
-
-      # Whether `summary` was sent (possibly as `null`, i.e. cleared).
-      @[JSON::Field(ignore: true)]
-      getter? summary_present : Bool
-
-      # Whether `error` was sent (possibly as `null`, i.e. cleared).
-      @[JSON::Field(ignore: true)]
-      getter? error_present : Bool
-
-      # Whether `_meta` was sent (possibly as `null`, i.e. cleared).
-      @[JSON::Field(ignore: true)]
-      getter? meta_present : Bool
-
+      # Creates a compaction update with a status and optional replacement fields.
       def initialize(
         @compaction_id : String,
         @status : String,
-        @summary : Array(JSON::Any)? = nil,
-        @error : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        summary : Array(JSON::Any)? = nil,
+        error : String? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
         @session_update = "compaction_update"
-        @summary_present = !@summary.nil?
-        @error_present = !@error.nil?
-        @meta_present = !@meta.nil?
+        self.summary = summary if summary
+        self.error = error if error
+        self.meta = meta if meta
       end
 
-      # Assigning a field marks it present (assigning nil means "clear").
-      def summary=(@summary : Array(JSON::Any)?) : Array(JSON::Any)?
-        @summary_present = true
-        @summary
+      # Reads a compaction with unambiguous identity and status.
+      def self.new(pull : JSON::PullParser) : self
+        previous_def(RawJson.patch_parser(pull, required: {"sessionUpdate", "compactionId", "status"},
+          optional: {"summary", "error", "_meta"}))
       end
 
-      # :ditto:
-      def error=(@error : String?) : String?
-        @error_present = true
-        @error
+      # Replacement summary blocks with the fields representable as JSON::Any.
+      def summary : Array(JSON::Any)?
+        @summary_patch.try(&.value).try(&.value).try(&.as_a?)
       end
 
-      # :ditto:
-      def meta=(@meta : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
-        @meta_present = true
-        @meta
+      # Replaces the summary. Assign nil to clear it explicitly.
+      def summary=(value : Array(JSON::Any)?) : Array(JSON::Any)?
+        @summary_patch_present = true
+        @summary_patch = value.try { |blocks| SummaryPatch.new(PreservedJson.new(JSON::Any.new(blocks))) }
+        value
       end
 
-      # Writes an explicit `null` for a field that is present but nil, so a
-      # clear survives re-serialization instead of turning into "unchanged".
-      protected def on_to_json(json : ::JSON::Builder)
-        json.field("summary", nil) if @summary_present && @summary.nil?
-        json.field("error", nil) if @error_present && @error.nil?
-        json.field("_meta", nil) if @meta_present && @meta.nil?
+      # Whether the update replaces the summary or explicitly clears it.
+      def summary_present? : Bool
+        @summary_patch_present && (!@summary_patch || !summary.nil?)
       end
 
-      # `summary` parsed into content blocks, skipping entries that don't
-      # parse. Nil when no summary was sent or it was cleared.
+      # Exact replacement summary, including extension values.
+      def summary_raw : RawJson?
+        @summary_patch.try(&.value).try(&.raw)
+      end
+
+      # Sets an exact replacement array. Nil or JSON null clears the summary.
+      def summary_raw=(value : RawJson?) : RawJson?
+        patch = if value && !value.null?
+                  summary = OptionalCompactionSummary.wrap(value) || raise ArgumentError.new("Expected a usable compaction summary")
+                  SummaryPatch.new(summary)
+                end
+        @summary_patch = patch
+        @summary_patch_present = true
+        value
+      end
+
+      # Usable blocks in message order. Nil for an omitted or cleared summary.
       def typed_summary : Array(ContentBlock)?
-        @summary.try &.compact_map { |item| ContentBlock.from_json(item.to_json) rescue nil }
+        summary_raw.try { |wire| OptionalContentList(ContentBlock).from_json(JSON::PullParser.new(wire.json)) }
+      end
+
+      def_equals_and_hash @session_update, @compaction_id, @status, summary_comparison, summary_present?,
+        error, error_present?, metadata_comparison, meta_present?
+
+      protected def summary_comparison
+        summary_raw.try { |wire| wire.to_json_any? || wire }
       end
     end
 
@@ -1130,17 +1159,22 @@ module ACP
     struct CompactionSummaryChunkUpdate < SessionUpdate
       include JSON::Serializable
       include LosslessMetadata
-      include LosslessContentField
+      include LosslessContentField::Accessors
       include ChunkContentHelper
 
       # :nodoc:
-      V2_REQUIRED_FIELDS = {"sessionUpdate", "compactionId", "content"}
-      V2_OPTIONAL_FIELDS = {"_meta"}
-      V2_WIRE_FIELDS     = V2_REQUIRED_FIELDS + V2_OPTIONAL_FIELDS
+      REQUIRED_FIELDS    = {"sessionUpdate", "compactionId", "content"}
+      OPTIONAL_FIELDS    = {"_meta"}
+      V2_REQUIRED_FIELDS = REQUIRED_FIELDS
+      V2_OPTIONAL_FIELDS = OPTIONAL_FIELDS
+      V2_WIRE_FIELDS     = REQUIRED_FIELDS + OPTIONAL_FIELDS
 
       # The compaction this chunk belongs to (required).
       @[JSON::Field(key: "compactionId")]
       property compaction_id : String
+
+      @[JSON::Field(key: "content", converter: ::ACP::Protocol::ProjectedContent::Editable)]
+      @content_wire : PreservedJson
 
       @[JSON::Field(ignore: true)]
       @open_content = false
@@ -1152,13 +1186,24 @@ module ACP
         self.meta = meta
       end
 
+      # Reads an unambiguous compaction and one standard v1 content block.
+      def self.new(pull : JSON::PullParser) : self
+        chunk = decode_wire(pull)
+        ContentBlock.from_json(chunk.content_raw.json)
+        chunk
+      end
+
       # Reads a v2 summary chunk with unambiguous fields and usable open content.
       def self.from_v2_json(json : String) : self
-        parser = RawJson.patch_parser(JSON::PullParser.new(json), required: V2_REQUIRED_FIELDS, optional: V2_OPTIONAL_FIELDS)
-        chunk = new(parser)
+        chunk = decode_wire(JSON::PullParser.new(json))
         ContentBlock.from_v2_json(chunk.content_raw)
         chunk.enable_open_content
         chunk
+      end
+
+      private def self.decode_wire(pull : JSON::PullParser) : self
+        checked = RawJson.patch_parser(pull, required: REQUIRED_FIELDS, optional: OPTIONAL_FIELDS)
+        new_from_json_pull_parser(checked)
       end
 
       protected def enable_open_content : Nil

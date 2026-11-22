@@ -147,28 +147,44 @@ module ACP
       def self.to_json(content : PreservedJson, builder : JSON::Builder) : Nil
         content.to_json(builder)
       end
+
+      # :nodoc:
+      module Editable
+        def self.from_json(pull : JSON::PullParser) : PreservedJson
+          ProjectedContent.from_json(pull, project_nested_objects: true)
+        end
+
+        def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
+          ProjectedContent.to_json(value, builder)
+        end
+      end
     end
 
     # :nodoc:
     module LosslessContentField
+      # :nodoc:
+      module Accessors
+        # Content fields representable in JSON::Any.
+        def content : JSON::Any
+          @content_wire.value.not_nil!
+        end
+
+        # Replaces the content of this chunk.
+        def content=(value : JSON::Any) : JSON::Any
+          @content_wire = PreservedJson.new(value)
+          value
+        end
+
+        # Exact content JSON, including extension values.
+        def content_raw : RawJson
+          @content_wire.raw
+        end
+      end
+
+      include Accessors
+
       @[JSON::Field(key: "content", converter: ::ACP::Protocol::ProjectedContent)]
       @content_wire : PreservedJson
-
-      # Content fields representable in JSON::Any.
-      def content : JSON::Any
-        @content_wire.value.not_nil!
-      end
-
-      # Replaces the content of this chunk.
-      def content=(value : JSON::Any) : JSON::Any
-        @content_wire = PreservedJson.new(value)
-        value
-      end
-
-      # Exact content JSON, including extension values.
-      def content_raw : RawJson
-        @content_wire.raw
-      end
     end
 
     # :nodoc:
@@ -663,15 +679,7 @@ module ACP
       include LosslessMetadata
 
       # :nodoc:
-      module ResourceField
-        def self.from_json(pull : JSON::PullParser) : PreservedJson
-          ProjectedContent.from_json(pull, project_nested_objects: true)
-        end
-
-        def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
-          ProjectedContent.to_json(value, builder)
-        end
-      end
+      alias ResourceField = ProjectedContent::Editable
 
       # Always "resource" for this block type.
       getter type : String = "resource"
