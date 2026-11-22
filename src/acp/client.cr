@@ -2387,15 +2387,18 @@ module ACP
         elsif claim_agent_request(id, entry)
           sent : AgentReply? = nil
           begin
-            case reply
-            in Protocol::JsonRpcErrorObject then respond_to_agent_error(reply_id, reply.code, reply.message, reply.data)
-            in JSON::Any                    then respond_to_agent(reply_id, reply)
-            in Protocol::RawJson
-              write_exact_agent_result(reply_id, reply) do
-                raise ConnectionClosedError.new if closed? || @v2_contract_unknown.get
-              end
-            end
-            sent = reply
+            sent = case reply
+                   in Protocol::JsonRpcErrorObject
+                     respond_to_agent_error(reply_id, reply.code, reply.message, reply.data)
+                     reply
+                   in JSON::Any
+                     respond_to_agent(reply_id, reply)
+                     reply
+                   in Protocol::RawJson
+                     write_exact_agent_result(reply_id, reply) do
+                       raise ConnectionClosedError.new if closed? || @v2_contract_unknown.get
+                     end
+                   end
           ensure
             completion = settle_elicitation_reply(id, entry, sent)
           end
@@ -2572,43 +2575,49 @@ module ACP
           handler.call(input)
         end
       end
-      if form
-        handle_form_elicitation(params_json || params.to_json, callback)
-      else
-        typed_callback = ->(input : Protocol::CreateElicitationParams) do
-          result = callback.call(input)
-          raise ArgumentError.new("Exact elicitation content requires an ACP v2 form") if result.content_raw
-          result
-        end
-        handle_typed_client_method(params, typed_callback, Protocol::ElicitationRequest, method, params_json)
-      end
+      handle_typed_elicitation(params_json || params.to_json, callback, form: form)
     end
 
-    private def handle_form_elicitation(json : String, handler : CreateElicitationHandler) : AgentReply
+    private def handle_typed_elicitation(json : String, handler : CreateElicitationHandler, *, form : Bool) : AgentReply
       v2 = v2_wire?
       input = begin
-        Protocol::FormElicitation.from_json(json, v2: v2)
+        if form
+          Protocol::FormElicitation.from_json(json, v2: v2)
+        else
+          Protocol::ElicitationRequest.from_json(json)
+        end
       rescue ex : JSON::Error
-        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid form elicitation: #{ex.message}")
+        return Protocol::JsonRpcErrorObject.new(JsonRpcError::INVALID_PARAMS, "Invalid elicitation: #{ex.message}")
       end
-      schema = input.requested_schema_raw.not_nil!
+      schema = input.requested_schema_raw
       result = handler.call(input)
-      raise ArgumentError.new("Exact elicitation content requires an ACP v2 form") if !v2 && result.content_raw
-      result.content = nil if result.action.in?("decline", "cancel")
-      if result.action == "accept"
-        content = result.content_raw || result.content.try { |value| Protocol::RawJson.from_json(Protocol::WireFrame.encode(value)) }
-        Protocol::FormElicitation.validate_submission(schema, content, v2: v2)
+      if result.content_raw && !(form && v2)
+        raise ArgumentError.new("Exact elicitation content requires an ACP v2 form")
       end
-
-      wire = Protocol::WireFrame.encode(result)
-      if result.content_raw
-        Protocol::RawJson.from_json(wire)
-      else
-        JSON.parse(wire)
+      if schema
+        result.content = nil if result.action.in?("decline", "cancel")
+        if result.action == "accept"
+          content = result.content_raw || result.content.try { |value| Protocol::RawJson.from_json(Protocol::WireFrame.encode(value)) }
+          Protocol::FormElicitation.validate_submission(schema, content, v2: v2)
+        end
       end
+      encode_elicitation_reply(result)
     rescue ex
-      ClientLog.error { "Error handling elicitation form: #{ex.class}" }
-      handler_error_reply(ex, "Invalid elicitation form result: #{ex.message}")
+      ClientLog.error { "Error handling elicitation: #{ex.class}" }
+      handler_error_reply(ex, "Invalid elicitation result: #{ex.message}")
+    end
+
+    private def encode_elicitation_reply(result : Protocol::CreateElicitationResult) : JSON::Any | Protocol::RawJson
+      wire = Protocol::WireFrame.encode(result)
+      unless result.content_raw
+        projection = begin
+          JSON.parse(wire)
+        rescue JSON::ParseException
+          nil
+        end
+        return projection if projection && Protocol::WireFrame.encode(projection) == wire
+      end
+      Protocol::RawJson.from_json(wire)
     end
 
     private def handle_v1_raw_form(params : JSON::Any?, params_json : String?) : AgentReply
@@ -2656,15 +2665,16 @@ module ACP
         claimed = true
         nil
       end
-      case reply
-      in Protocol::JsonRpcErrorObject
-        @transport.send_checked(Protocol.build_error_response(id, reply.code, reply.message, reply.data), &preflight)
-      in JSON::Any
-        @transport.send_checked(Protocol.build_response_raw(id, reply), &preflight)
-      in Protocol::RawJson
-        write_exact_agent_result(id, reply, &preflight)
-      end
-      sent = reply
+      sent = case reply
+             in Protocol::JsonRpcErrorObject
+               @transport.send_checked(Protocol.build_error_response(id, reply.code, reply.message, reply.data), &preflight)
+               reply
+             in JSON::Any
+               @transport.send_checked(Protocol.build_response_raw(id, reply), &preflight)
+               reply
+             in Protocol::RawJson
+               write_exact_agent_result(id, reply, &preflight)
+             end
     rescue ElicitationReplyClaimed
       # Another fiber owns the cancellation reply.
     rescue ex
@@ -2676,7 +2686,7 @@ module ACP
       end
     end
 
-    private def write_exact_agent_result(id : Protocol::RequestId?, result : Protocol::RawJson, &preflight : -> Nil) : Nil
+    private def write_exact_agent_result(id : Protocol::RequestId?, result : Protocol::RawJson, &preflight : -> Nil) : Protocol::RawJson | Protocol::JsonRpcErrorObject
       started = false
       wire = JSON.build do |json|
         json.object do
@@ -2689,11 +2699,13 @@ module ACP
         preflight.call
         started = true
       end
+      result
     rescue ex : ProtocolError | JSON::Error
       raise ex if started
 
-      fallback = Protocol.build_error_response(id, JsonRpcError::INTERNAL_ERROR, "Cannot send exact elicitation content")
-      @transport.send_checked(fallback, &preflight)
+      error = Protocol::JsonRpcErrorObject.new(JsonRpcError::INTERNAL_ERROR, "Cannot send exact elicitation content")
+      @transport.send_checked(Protocol.build_error_response(id, error.code, error.message), &preflight)
+      error
     end
 
     # Commits only the reply that won against cancellation. Completion can
@@ -2707,7 +2719,11 @@ module ACP
         elicitation = entry.url_elicitation
         next unless elicitation && @url_elicitations[elicitation.id]?.try(&.same?(elicitation))
 
-        accepted = reply.is_a?(JSON::Any) && reply.as_h?.try(&.["action"]?).try(&.as_s?) == "accept"
+        action = case reply
+                 when JSON::Any         then reply.as_h?.try(&.["action"]?).try(&.as_s?)
+                 when Protocol::RawJson then reply.field("action").try(&.as_s?)
+                 end
+        accepted = action == "accept"
         completion = elicitation.completion if accepted
         if accepted && !completion
           elicitation.accepted = true

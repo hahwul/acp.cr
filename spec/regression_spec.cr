@@ -8515,3 +8515,94 @@ describe "ACP elicitation request parameters" do
     end
   end
 end
+
+describe "ACP elicitation extension metadata" do
+  {1, 2}.each do |version|
+    it "preserves v#{version} metadata across typed form and URL elicitations" do
+      with_wide_stdio do |transport, feed, outgoing|
+        caps = ACP::Protocol::ElicitationCapabilities.new(
+          form: ACP::Protocol::ElicitationFormCapabilities.new, url: ACP::Protocol::ElicitationUrlCapabilities.new)
+        if version == 2
+          v2 = ACP::V2::Client.new(transport, capabilities: ACP::Protocol::V2::ClientCapabilities.new(elicitation: caps))
+          client = v2
+          initialize_wide_v2(v2, feed, outgoing)
+        else
+          client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+        end
+        metadata = %({"example.test/display":true,"example.test/details":{"section":{"visible":"original","wide":18446744073709551615,"decimal":0.123456789012345678901}}})
+        updated = metadata.sub("original", "updated")
+        completions = Channel(String).new(1)
+        received = Channel({Bool?, String?}).new(1)
+        client.on_create_elicitation = ->(params : ACP::Protocol::CreateElicitationParams) do
+          visible = params.meta.try(&.["example.test/display"]?).try(&.as_bool?)
+          source = ACP::Protocol::RawJson.from_json(params.to_json).field("_meta")
+          received.send({visible, source.try(&.json)})
+          if section = params.meta.try(&.["example.test/details"]?).try(&.["section"]?).try(&.as_h?)
+            section["visible"] = JSON::Any.new("updated")
+          end
+          result = ACP::Protocol::CreateElicitationResult.accept
+          result.meta_raw = params.meta_raw
+          result
+        end
+        client.on_elicitation_complete = ->(note : ACP::Protocol::CompleteElicitationParams) do
+          completions.send(note.elicitation_id)
+          nil
+        end
+
+        {
+          %("mode":"form","requestedSchema":{"type":"object","properties":{}}),
+          %("mode":"url","elicitationId":"metadata","url":"https://example.test/"),
+        }.each_with_index do |fields, id|
+          feed.puts %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"sessionId":"s","message":"Continue",#{fields},"_meta":#{metadata}}})
+          reply = ACP::Protocol::RawJson.from_json(outgoing.gets.not_nil!)
+          next_permission_event(received).should eq({true, metadata})
+          result = reply.field("result")
+          result.try(&.field("action")).try(&.as_s?).should eq("accept")
+          result.try(&.field("_meta")).try(&.json).should eq(updated)
+        end
+
+        feed.puts %({"jsonrpc":"2.0","method":"elicitation/complete","params":{"elicitationId":"metadata"}})
+        next_permission_event(completions).should eq("metadata")
+      ensure
+        client.try(&.close)
+      end
+    end
+  end
+
+  it "projects the same metadata through public JSON constructors" do
+    metadata = %({"example.test/details":{"label":"visible","wide":18446744073709551615}})
+    request = ACP::Protocol::CreateElicitationParams.from_json(%({"mode":"form","message":"Choose","sessionId":"s","requestedSchema":{"type":"object","properties":{}},"_meta":#{metadata}}))
+    result = ACP::Protocol::CreateElicitationResult.from_json(%({"action":"accept","_meta":#{metadata}}))
+    {request, result}.each do |value|
+      value.meta.try(&.["example.test/details"]["label"].as_s?).should eq("visible")
+      value.meta_raw.try(&.json).should eq(metadata)
+    end
+
+    simple = {"example.test/visible" => JSON::Any.new(true)}
+    ordinary = ACP::Protocol::CreateElicitationResult.new("accept", meta: simple)
+    ACP::Protocol::CreateElicitationResult.from_json(ordinary.to_json).should eq(ordinary)
+    ordinary.meta_raw = ACP::Protocol::RawJson.from_json("null")
+    ordinary.meta.should be_nil
+  end
+
+  it "reports an unsupported exact URL reply and releases its completion ID" do
+    transport = SignalingTransport.new
+    caps = ACP::Protocol::ElicitationCapabilities.new(url: ACP::Protocol::ElicitationUrlCapabilities.new)
+    client = ACP::Client.new(transport, client_capabilities: ACP::Protocol::ClientCapabilities.new(elicitation: caps))
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) do
+      ACP::Protocol::CreateElicitationResult.from_json(%({"action":"accept","_meta":{"example.test/decimal":0.123456789012345678901}}))
+    end
+    request = ->(id : Int32) do
+      %({"jsonrpc":"2.0","id":#{id},"method":"elicitation/create","params":{"sessionId":"s","mode":"url","message":"Open","url":"https://example.test","elicitationId":"same"}})
+    end
+    transport.inject_raw(request.call(1))
+    reply = next_answer(transport)
+    reply["error"]?.try(&.["code"].as_i?).should eq(ACP::JsonRpcError::INTERNAL_ERROR)
+
+    client.on_create_elicitation = ->(_params : ACP::Protocol::CreateElicitationParams) { ACP::Protocol::CreateElicitationResult.accept }
+    transport.inject_raw(request.call(2))
+    next_answer(transport)["result"]["action"].as_s.should eq("accept")
+  ensure
+    client.try(&.close)
+  end
+end

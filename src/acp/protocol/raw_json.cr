@@ -174,13 +174,24 @@ module ACP
     # Keeps exact JSON behind an existing mutable JSON::Any accessor.
     struct PreservedJson
       private alias ObjectView = Hash(String, JSON::Any)
+      private alias ObjectChildren = Hash(String, ObjectChild)
 
-      private record BlockSource, view : ObjectView, raw : RawJson, projected : String, partial : Bool,
-        nested_views : Hash(String, ObjectView)? = nil do
+      private record ObjectChild, view : ObjectView, children : ObjectChildren do
+        def same_tree?(value : JSON::Any?) : Bool
+          if object = value.try(&.as_h?)
+            object.same?(view) && children.all? { |key, child| child.same_tree?(object[key]?) }
+          else
+            false
+          end
+        end
+      end
+
+      private record ObjectSource, view : ObjectView, raw : RawJson, projected : String, partial : Bool,
+        nested_views : ObjectChildren? = nil do
         def same_nested_objects? : Bool
           return true unless objects = nested_views
 
-          objects.all? { |key, original| view[key]?.try(&.as_h?).try(&.same?(original)) == true }
+          objects.all? { |key, child| child.same_tree?(view[key]?) }
         end
       end
 
@@ -188,8 +199,9 @@ module ACP
       getter? partial = false
       @source : RawJson?
       @projected : String?
-      @block_sources : Hash(UInt64, BlockSource)?
+      @block_sources : Hash(UInt64, ObjectSource)?
       @block_order : Array(UInt64?)?
+      @object_source : ObjectSource?
       @project_nested_objects = false
 
       def initialize(@value : JSON::Any)
@@ -213,22 +225,36 @@ module ACP
           end
         end
         @projected = @value.try { |value| WireFrame.encode(value) }
+        if @project_nested_objects && !project_array_objects && (view = @value.try(&.as_h?))
+          @object_source = ObjectSource.new(view, source, @projected.not_nil!, partial?, nested_object_views(view))
+        end
       end
 
       private def project_members(source : RawJson, *, nested : Bool = @project_nested_objects) : JSON::Any?
-        return unless members = source.members?
+        return unless source.object?
 
+        project_members(JSON::PullParser.new(source.json), nested: nested)
+      end
+
+      private def project_members(pull : JSON::PullParser, *, nested : Bool) : JSON::Any
         projection = {} of String => JSON::Any
-        members.each do |key, value|
-          projected = value.to_json_any?
-          projected ||= project_members(value, nested: false) if nested && value.object?
-          projection[key] = projected if projected
+        pull.read_object do |key|
+          projected = if nested && pull.kind.begin_object?
+                        project_members(pull, nested: true)
+                      else
+                        RawJson.new(pull).to_json_any?
+                      end
+          if projected
+            projection[key] = projected
+          else
+            projection.delete(key)
+          end
         end
         JSON::Any.new(projection)
       end
 
       private def project_blocks(elements : Array(RawJson)) : JSON::Any
-        sources = {} of UInt64 => BlockSource
+        sources = {} of UInt64 => ObjectSource
         blocks = elements.compact_map do |element|
           projection = element.to_json_any?
           partial = projection.nil?
@@ -236,15 +262,8 @@ module ACP
           if projection && (object = projection.as_h?)
             encoded = WireFrame.encode(projection)
             if element.json != encoded
-              if @project_nested_objects
-                nested_views = {} of String => ObjectView
-                object.each do |key, member|
-                  if nested = member.as_h?
-                    nested_views[key] = nested
-                  end
-                end
-              end
-              sources[object.object_id] = BlockSource.new(object, element, encoded, partial, nested_views)
+              nested_views = nested_object_views(object) if @project_nested_objects
+              sources[object.object_id] = ObjectSource.new(object, element, encoded, partial, nested_views)
             end
           end
           projection
@@ -256,7 +275,17 @@ module ACP
         JSON::Any.new(blocks)
       end
 
-      private def retained_block(block : JSON::Any) : BlockSource?
+      private def nested_object_views(object : ObjectView) : ObjectChildren
+        views = ObjectChildren.new
+        object.each do |key, member|
+          if nested = member.as_h?
+            views[key] = ObjectChild.new(nested, nested_object_views(nested))
+          end
+        end
+        views
+      end
+
+      private def retained_block(block : JSON::Any) : ObjectSource?
         if (view = block.as_h?) && (source = @block_sources.try(&.[view.object_id]?))
           source if source.view.same?(view)
         end
@@ -287,7 +316,7 @@ module ACP
       # Apply edits against the original visible keys. Untouched wire members keep
       # their original values, including hidden members and repeated keys.
       private def patch_projected_object(wire : String, baseline : ObjectView, view : ObjectView,
-                                         nested_views : Hash(String, ObjectView)? = nil) : String
+                                         nested_views : ObjectChildren? = nil) : String
         pull = JSON::PullParser.new(wire)
         members = [] of {String, String}
         pull.read_object { |key| members << {key, WireFrame.read_raw(pull)} }
@@ -299,11 +328,11 @@ module ACP
           original = baseline[key]?
           rendered = WireFrame.encode(member)
           unchanged = original && rendered == WireFrame.encode(original)
-          if original_nested = nested_views.try(&.[key]?)
-            if (nested = member.as_h?) && nested.same?(original_nested)
-              unless unchanged
+          if child = nested_views.try(&.[key]?)
+            if (nested = member.as_h?) && nested.same?(child.view)
+              unless unchanged && child.same_tree?(member)
                 index = members.rindex { |name, _| name == key }.not_nil!
-                nested_edits[index] = patch_projected_object(members[index][1], original.not_nil!.as_h, nested)
+                nested_edits[index] = patch_projected_object(members[index][1], original.not_nil!.as_h, nested, child.children)
               end
             else
               edits[key] = rendered
@@ -351,6 +380,13 @@ module ACP
 
               return RawJson.new(JSON::PullParser.new(encode_blocks(blocks)))
             end
+            if object = @object_source
+              return source if rendered.json == object.projected && object.same_nested_objects?
+
+              baseline = JSON.parse(object.projected).as_h
+              merged = patch_projected_object(source.json, baseline, object.view, object.nested_views)
+              return RawJson.new(JSON::PullParser.new(merged))
+            end
             return source if rendered.json == @projected
 
             merged = WireFrame.merge_projection(source.json, value, partial_object: partial?)
@@ -371,7 +407,15 @@ module ACP
     # :nodoc:
     module PreservedMetadata
       def self.from_json(pull : JSON::PullParser) : PreservedJson
-        PreservedJson.new(pull, project_object_members: true)
+        wrap(RawJson.new(pull))
+      end
+
+      def self.wrap(source : RawJson) : PreservedJson
+        if (value = source.to_json_any?) && WireFrame.encode(value) == source.json
+          PreservedJson.new(value)
+        else
+          PreservedJson.new(source, project_object_members: true, project_nested_objects: true)
+        end
       end
 
       def self.to_json(value : PreservedJson, builder : JSON::Builder) : Nil
@@ -412,6 +456,17 @@ module ACP
       # Extension metadata with its exact JSON values.
       def meta_raw : RawJson?
         @metadata_wire.try(&.raw)
+      end
+
+      # Replaces the extension metadata with an exact JSON object.
+      # Pass nil or JSON null to clear it.
+      def meta_raw=(value : RawJson?) : RawJson?
+        @metadata_wire = if value && !value.null?
+                           raise ArgumentError.new("Extension metadata must be an object or null") unless value.object?
+
+                           PreservedMetadata.wrap(value)
+                         end
+        value
       end
     end
 

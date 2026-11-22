@@ -621,6 +621,7 @@ module ACP
     # `request_id` for a request-scoped one.
     struct CreateElicitationParams
       include JSON::Serializable
+      include LosslessMetadata
 
       # "form", "url", or a future mode (required).
       property mode : String
@@ -661,10 +662,6 @@ module ACP
       # URL mode: the URL to open after user consent (required for URL mode).
       property url : String?
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @mode : String,
         @message : String,
@@ -674,8 +671,9 @@ module ACP
         @requested_schema : ElicitationSchema? = nil,
         @elicitation_id : String? = nil,
         @url : String? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # Both scopes missing can only mean `"requestId": null` (a request
@@ -712,17 +710,16 @@ module ACP
 
         session = fields["sessionId"]?.try(&.as_s?)
         request = fields["requestId"]?
-        meta = fields["_meta"]?
-        if meta && meta.object?
-          metadata = PreservedJson.new(meta, project_object_members: true, project_nested_objects: true).value.try(&.as_h?)
-        end
-        CreateElicitationParams.new(mode, message,
+        input = CreateElicitationParams.new(mode, message,
           session_id: session,
           tool_call_id: (fields["toolCallId"]?.try(&.as_s?) if session),
           request_id: request.try(&.as_i64?) || request.try(&.as_s?),
           elicitation_id: (fields["elicitationId"]?.try(&.as_s?) if mode == "url"),
-          url: (fields["url"]?.try(&.as_s?) if mode == "url"),
-          meta: metadata)
+          url: (fields["url"]?.try(&.as_s?) if mode == "url"))
+        if (meta = fields["_meta"]?) && meta.object?
+          input.meta_raw = meta
+        end
+        input
       end
     end
 
@@ -732,6 +729,7 @@ module ACP
     # Response for `elicitation/create` (`CreateElicitationResponse`).
     struct CreateElicitationResult
       include JSON::Serializable
+      include LosslessMetadata
 
       # "accept", "decline" or "cancel" (required).
       property action : String
@@ -750,15 +748,12 @@ module ACP
         @content = value
       end
 
-      # Extension metadata.
-      @[JSON::Field(key: "_meta")]
-      property meta : Hash(String, JSON::Any)?
-
       def initialize(
         @action : String,
         @content : Hash(String, ElicitationContentValue)? = nil,
-        @meta : Hash(String, JSON::Any)? = nil,
+        meta : Hash(String, JSON::Any)? = nil,
       )
+        self.meta = meta
       end
 
       # The user submitted the form or consented to open the URL.
